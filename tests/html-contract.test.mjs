@@ -18,6 +18,8 @@ test("index.html contains the required application regions", () => {
     "columnFilterPopover",
     "columnFilterSearchInput",
     "columnFilterValues",
+    "columnOverview",
+    "clearAllFiltersButton",
   ]) {
     assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);
   }
@@ -28,6 +30,12 @@ test("application script exposes Excel-like header filtering behavior", () => {
   assert.match(html, /openColumnFilterMenu/, "missing header filter menu opener");
   assert.match(html, /rowPassesColumnFilters/, "missing row filter predicate");
   assert.match(html, /renderColumnFilterValues/, "missing filter value renderer");
+  assert.match(html, /clearAllFilters/, "missing global clear filters action");
+  assert.match(html, /renderColumnOverview/, "missing column overview renderer");
+});
+
+test("file import button is protected from wrapping in the compact header", () => {
+  assert.match(html, /#chooseFileButton\s*{[\s\S]*?white-space:\s*nowrap/, "choose file button should not wrap");
 });
 
 test("inline application script parses", () => {

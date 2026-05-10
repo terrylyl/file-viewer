@@ -172,6 +172,13 @@
         gap: 12px;
         padding: 10px 12px;
         background: var(--panel-2);
+        min-width: 0;
+      }
+
+      #chooseFileButton {
+        flex: 0 0 auto;
+        min-width: 104px;
+        white-space: nowrap;
       }
 
       .drop-zone.dragover {
@@ -205,6 +212,10 @@
         flex-wrap: wrap;
       }
 
+      .toolbar-row.metrics-row {
+        align-items: flex-start;
+      }
+
       .search-input {
         width: min(360px, 35vw);
       }
@@ -215,6 +226,25 @@
         gap: 8px;
         min-width: 0;
         flex-wrap: wrap;
+      }
+
+      .column-overview {
+        flex: 1 1 260px;
+        min-width: 220px;
+        max-height: 58px;
+        overflow: auto;
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        flex-wrap: wrap;
+        padding: 1px 0 2px;
+      }
+
+      .column-overview .pill {
+        max-width: 220px;
+        background: #eef7f5;
+        border-color: #c8ded9;
+        color: #31524c;
       }
 
       .pill {
@@ -817,7 +847,7 @@
             <label><input id="matchedOnlyInput" type="checkbox" /> 只看命中行</label>
             <button id="clearSearchButton">清除</button>
           </div>
-          <div class="toolbar-row">
+          <div class="toolbar-row metrics-row">
             <label>
               编码
               <select id="encodingSelect">
@@ -827,9 +857,11 @@
               </select>
             </label>
             <button id="columnsButton" disabled>列显示</button>
+            <button id="clearAllFiltersButton" disabled>清除筛选</button>
             <button id="exportCsvButton" disabled>导出筛选 CSV</button>
             <button id="exportIssuesButton" disabled>导出异常报告</button>
             <div class="file-stats" id="fileStats"></div>
+            <div class="column-overview" id="columnOverview" aria-label="全部列名"></div>
           </div>
         </div>
       </header>
@@ -1321,6 +1353,7 @@ self.onmessage = (event) => {
         matchedOnlyInput: document.getElementById("matchedOnlyInput"),
         clearSearchButton: document.getElementById("clearSearchButton"),
         columnsButton: document.getElementById("columnsButton"),
+        clearAllFiltersButton: document.getElementById("clearAllFiltersButton"),
         exportCsvButton: document.getElementById("exportCsvButton"),
         exportIssuesButton: document.getElementById("exportIssuesButton"),
         gridViewport: document.getElementById("gridViewport"),
@@ -1344,6 +1377,7 @@ self.onmessage = (event) => {
         rightStatus: document.getElementById("rightStatus"),
         progressBar: document.getElementById("progressBar"),
         columnsPopover: document.getElementById("columnsPopover"),
+        columnOverview: document.getElementById("columnOverview"),
         columnList: document.getElementById("columnList"),
         showAllColumnsButton: document.getElementById("showAllColumnsButton"),
         hideAllColumnsButton: document.getElementById("hideAllColumnsButton"),
@@ -1563,6 +1597,7 @@ self.onmessage = (event) => {
 
         state.viewIndices = base;
         els.rightStatus.textContent = `${state.viewIndices.length} / ${state.rows.length} 行 · ${state.headers.length} 列`;
+        renderColumnOverview();
         renderGrid();
       }
 
@@ -1979,6 +2014,17 @@ self.onmessage = (event) => {
         renderColumnFilterValues();
       }
 
+      function clearAllFilters() {
+        state.columnFilters = {};
+        state.sort = { column: -1, direction: "none" };
+        els.searchInput.value = "";
+        els.searchColumnSelect.value = "-1";
+        els.matchedOnlyInput.checked = false;
+        closeColumnFilterMenu();
+        recomputeView();
+        renderDetail();
+      }
+
       function updateSearchColumns() {
         els.searchColumnSelect.innerHTML = '<option value="-1">全部列</option>';
         state.headers.forEach((header, index) => {
@@ -2004,6 +2050,25 @@ self.onmessage = (event) => {
           text.textContent = `${index + 1}. ${header}`;
           label.append(checkbox, text);
           els.columnList.appendChild(label);
+        });
+      }
+
+      function renderColumnOverview() {
+        els.columnOverview.innerHTML = "";
+        if (!state.headers.length) {
+          const empty = document.createElement("span");
+          empty.className = "pill";
+          empty.textContent = "未加载列";
+          els.columnOverview.appendChild(empty);
+          return;
+        }
+
+        state.headers.forEach((header, index) => {
+          const pill = document.createElement("span");
+          pill.className = `pill${hasColumnFilter(index) ? " warning" : ""}`;
+          pill.title = header;
+          pill.textContent = `${index + 1}. ${header}`;
+          els.columnOverview.appendChild(pill);
         });
       }
 
@@ -2048,10 +2113,12 @@ self.onmessage = (event) => {
         state.selected = state.rows.length && state.headers.length ? { rowIndex: 0, columnIndex: 0 } : null;
         updateSearchColumns();
         renderColumnPopover();
+        renderColumnOverview();
         updateFileStats();
         recomputeView();
         renderDetail();
         els.columnsButton.disabled = !state.headers.length;
+        els.clearAllFiltersButton.disabled = !state.headers.length;
         els.exportCsvButton.disabled = !state.rows.length;
         els.exportIssuesButton.disabled = !state.rows.length;
         setProgress(1, "解析完成");
@@ -2313,6 +2380,7 @@ self.onmessage = (event) => {
         els.matchedOnlyInput.checked = false;
         recomputeView();
       });
+      els.clearAllFiltersButton.addEventListener("click", clearAllFilters);
       els.exportCsvButton.addEventListener("click", exportFilteredCsv);
       els.exportIssuesButton.addEventListener("click", exportIssueReport);
       els.copyCellButton.addEventListener("click", () => copyText(getSelectedValue()));
@@ -2414,6 +2482,7 @@ self.onmessage = (event) => {
       els.toggleDetailButton.addEventListener("click", toggleDetailPanel);
       els.restoreDetailButton.addEventListener("click", toggleDetailPanel);
 
+      renderColumnOverview();
       renderGrid();
     </script>
   </body>
