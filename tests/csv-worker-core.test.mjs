@@ -61,3 +61,15 @@ test("parseCsvText reports inconsistent rows and long fields", () => {
   assert.equal(parsed.issues.longFields[0].rowNumber, 4);
   assert.equal(parsed.issues.longFields[0].columnName, "b");
 });
+
+test("parseCsvText reports duplicate source column names", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("id,name,name\n1,Alice,QA\n2,Bob,Dev", {
+    delimiter: ",",
+    previewLimit: 500,
+  });
+
+  assert.equal(parsed.issues.duplicateColumns.length, 1);
+  assert.equal(parsed.issues.duplicateColumns[0].columnName, "name");
+  assert.equal(JSON.stringify(parsed.issues.duplicateColumns[0].columnIndexes), JSON.stringify([1, 2]));
+});

@@ -130,7 +130,13 @@
         display: flex;
         align-items: center;
         gap: 10px;
+        flex: 1 1 auto;
         min-width: 0;
+      }
+
+      .file-title-block {
+        min-width: 0;
+        flex: 1 1 auto;
       }
 
       .brand-mark {
@@ -160,6 +166,14 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+
+      .file-name-text {
+        display: block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .drop-zone {
@@ -347,6 +361,11 @@
         user-select: none;
       }
 
+      .header-cell.duplicate-column {
+        background: #fff1f1;
+        box-shadow: inset 0 -2px 0 var(--danger);
+      }
+
       .header-sort-button {
         border: 0;
         background: transparent;
@@ -381,9 +400,20 @@
       }
 
       .header-title {
+        flex: 1 1 auto;
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+
+      .duplicate-column-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--danger);
+        box-shadow: 0 0 0 2px #ffffff;
+        flex: 0 0 auto;
       }
 
       .sort-indicator {
@@ -452,6 +482,17 @@
 
       .cell.long {
         color: #665000;
+      }
+
+      .grid-viewport.wrap-cells .cell {
+        align-items: flex-start;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        white-space: pre-wrap;
+        overflow: auto;
+        overflow-wrap: anywhere;
+        text-overflow: clip;
+        line-height: 1.45;
       }
 
       mark {
@@ -826,9 +867,9 @@
         <div class="drop-zone" id="dropZone">
           <div class="brand">
             <div class="brand-mark" aria-hidden="true"></div>
-            <div>
+            <div class="file-title-block">
               <h1>本地表格文件查看器</h1>
-              <p id="fileHint">CSV 离线处理，Excel 使用可选 SheetJS 读取</p>
+              <p class="file-name-text" id="fileHint" title="CSV 离线处理，Excel 使用可选 SheetJS 读取">CSV 离线处理，Excel 使用可选 SheetJS 读取</p>
             </div>
           </div>
           <div>
@@ -845,7 +886,9 @@
             </select>
             <label><input id="caseSensitiveInput" type="checkbox" /> 大小写敏感</label>
             <label><input id="matchedOnlyInput" type="checkbox" /> 只看命中行</label>
+            <label><input id="wrapCellsInput" type="checkbox" /> 单元格换行全文</label>
             <button id="clearSearchButton">清除</button>
+            <span class="pill" id="filteredRowStats">0 / 0 行</span>
           </div>
           <div class="toolbar-row metrics-row">
             <label>
@@ -936,6 +979,10 @@
         <button id="selectAllFilterValuesButton">全选</button>
         <button id="selectNoFilterValuesButton">全不选</button>
       </div>
+      <div class="filter-actions">
+        <button id="hideFilteredRowsButton">隐藏当前结果行</button>
+        <button id="showHiddenRowsButton">显示隐藏行</button>
+      </div>
       <div class="filter-summary" id="columnFilterSummary">未选择列</div>
       <div class="filter-values" id="columnFilterValues"></div>
     </div>
@@ -967,7 +1014,7 @@
     </div>
 
     <script id="csv-worker-source" type="text/plain">
-const DEFAULT_PREVIEW_LIMIT = 300;
+const DEFAULT_PREVIEW_LIMIT = 500;
 const DEFAULT_LONG_FIELD_THRESHOLD = 50000;
 const EMPTY_RATIO_THRESHOLD = 0.6;
 
@@ -1114,6 +1161,26 @@ function buildIssueSummary(type, rowNumber, columnIndex, columnName, detail, sam
   };
 }
 
+function detectDuplicateColumns(rawHeaders) {
+  const groups = new Map();
+  rawHeaders.forEach((header, index) => {
+    const name = header == null || header === "" ? `Column ${index + 1}` : String(header);
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(index);
+  });
+  return [...groups.entries()]
+    .filter(([, indexes]) => indexes.length > 1)
+    .map(([columnName, columnIndexes]) => ({
+      type: "重复列名",
+      rowNumber: 1,
+      columnIndex: columnIndexes[0],
+      columnIndexes,
+      columnName,
+      detail: `列名出现 ${columnIndexes.length} 次：${columnIndexes.map((index) => index + 1).join(", ")}`,
+      sample: columnName,
+    }));
+}
+
 function parseCsvText(text, options = {}) {
   const delimiter = options.delimiter || detectDelimiter(text);
   const previewLimit = options.previewLimit || DEFAULT_PREVIEW_LIMIT;
@@ -1184,6 +1251,7 @@ function parseCsvText(text, options = {}) {
     inconsistentRows: [],
     sparseRows: [],
     longFields: [],
+    duplicateColumns: detectDuplicateColumns(rawHeaders),
   };
 
   for (let i = 1; i < nonEmptyRecords.length; i += 1) {
@@ -1330,15 +1398,32 @@ self.onmessage = (event) => {
     </script>
 
     <script>
-      const PREVIEW_LIMIT = 300;
-      const DETAIL_CHUNK = 20000;
-      const MODAL_CHUNK = 50000;
+      const PREVIEW_LIMIT = 500;
+      const DETAIL_CHUNK = 100000;
+      const MODAL_CHUNK = 100000;
       const ROW_HEIGHT = 34;
+      const WRAP_ROW_HEIGHT = 180;
       const HEADER_HEIGHT = 38;
       const ROW_NUMBER_WIDTH = 64;
       const DEFAULT_COL_WIDTH = 180;
       const MIN_COL_WIDTH = 80;
       const MAX_COL_WIDTH = 720;
+      const EXCEL_INDEXED_COLORS = {
+        0: "#000000",
+        1: "#ffffff",
+        2: "#ff0000",
+        3: "#00ff00",
+        4: "#0000ff",
+        5: "#ffff00",
+        6: "#ff00ff",
+        7: "#00ffff",
+        8: "#000000",
+        9: "#ffffff",
+        10: "#ff0000",
+        13: "#ffff00",
+        64: "",
+        65: "",
+      };
 
       const els = {
         dropZone: document.getElementById("dropZone"),
@@ -1351,7 +1436,9 @@ self.onmessage = (event) => {
         searchColumnSelect: document.getElementById("searchColumnSelect"),
         caseSensitiveInput: document.getElementById("caseSensitiveInput"),
         matchedOnlyInput: document.getElementById("matchedOnlyInput"),
+        wrapCellsInput: document.getElementById("wrapCellsInput"),
         clearSearchButton: document.getElementById("clearSearchButton"),
+        filteredRowStats: document.getElementById("filteredRowStats"),
         columnsButton: document.getElementById("columnsButton"),
         clearAllFiltersButton: document.getElementById("clearAllFiltersButton"),
         exportCsvButton: document.getElementById("exportCsvButton"),
@@ -1389,6 +1476,8 @@ self.onmessage = (event) => {
         clearColumnFilterButton: document.getElementById("clearColumnFilterButton"),
         selectAllFilterValuesButton: document.getElementById("selectAllFilterValuesButton"),
         selectNoFilterValuesButton: document.getElementById("selectNoFilterValuesButton"),
+        hideFilteredRowsButton: document.getElementById("hideFilteredRowsButton"),
+        showHiddenRowsButton: document.getElementById("showHiddenRowsButton"),
         columnFilterSummary: document.getElementById("columnFilterSummary"),
         columnFilterValues: document.getElementById("columnFilterValues"),
         contextMenu: document.getElementById("contextMenu"),
@@ -1406,14 +1495,20 @@ self.onmessage = (event) => {
       const state = {
         headers: [],
         rows: [],
-        issues: { inconsistentRows: [], sparseRows: [], longFields: [] },
+        issues: { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: [] },
+        cellMeta: new Map(),
         file: null,
+        sourceFileHandle: null,
         viewIndices: [],
         matchedRows: new Set(),
         visibleColumns: [],
+        columnOrder: [],
         columnWidths: [],
         columnFilters: {},
         columnFilterMenu: { columnIndex: -1, query: "" },
+        hiddenRows: new Set(),
+        dragColumn: null,
+        wrapCells: false,
         sort: { column: -1, direction: "none" },
         selected: null,
         detailVisibleChars: DETAIL_CHUNK,
@@ -1475,6 +1570,42 @@ self.onmessage = (event) => {
         URL.revokeObjectURL(url);
       }
 
+      async function saveTextFile(filename, text, mime = "text/csv;charset=utf-8") {
+        if (window.showSaveFilePicker) {
+          const options = {
+            suggestedName: filename,
+            types: [
+              {
+                description: "CSV file",
+                accept: { "text/csv": [".csv"] },
+              },
+            ],
+          };
+          if (state.sourceFileHandle) options.startIn = state.sourceFileHandle;
+          try {
+            const handle = await window.showSaveFilePicker(options);
+            const writable = await handle.createWritable();
+            await writable.write(new Blob(["\ufeff", text], { type: mime }));
+            await writable.close();
+            els.leftStatus.textContent = "已导出文件";
+            return;
+          } catch (error) {
+            if (error && error.name === "AbortError") return;
+            try {
+              const handle = await window.showSaveFilePicker({ suggestedName: filename });
+              const writable = await handle.createWritable();
+              await writable.write(new Blob(["\ufeff", text], { type: mime }));
+              await writable.close();
+              els.leftStatus.textContent = "已导出文件";
+              return;
+            } catch (fallbackError) {
+              if (fallbackError && fallbackError.name === "AbortError") return;
+            }
+          }
+        }
+        downloadText(filename, text, mime);
+      }
+
       async function copyText(text) {
         try {
           await navigator.clipboard.writeText(text);
@@ -1492,9 +1623,13 @@ self.onmessage = (event) => {
       }
 
       function getVisibleColumnIndexes() {
-        return state.headers
-          .map((_, index) => index)
+        const order = state.columnOrder.length ? state.columnOrder : state.headers.map((_, index) => index);
+        return order
           .filter((index) => state.visibleColumns[index]);
+      }
+
+      function getCurrentRowHeight() {
+        return state.wrapCells ? WRAP_ROW_HEIGHT : ROW_HEIGHT;
       }
 
       function getTotalWidth() {
@@ -1575,6 +1710,22 @@ self.onmessage = (event) => {
         return true;
       }
 
+      function rowPassesHiddenRows(rowIndex) {
+        return !state.hiddenRows.has(rowIndex);
+      }
+
+      function renderFilteredRowStats() {
+        const hiddenCount = state.hiddenRows.size;
+        const filterCount = Object.keys(state.columnFilters).length;
+        const searchActive = Boolean(els.searchInput.value && els.matchedOnlyInput.checked);
+        const parts = [`${state.viewIndices.length.toLocaleString()} / ${state.rows.length.toLocaleString()} 行`];
+        if (filterCount) parts.push(`${filterCount} 列筛选`);
+        if (searchActive) parts.push("搜索筛选");
+        if (hiddenCount) parts.push(`隐藏 ${hiddenCount.toLocaleString()} 行`);
+        els.filteredRowStats.textContent = parts.join(" · ");
+        els.filteredRowStats.classList.toggle("warning", filterCount > 0 || searchActive || hiddenCount > 0);
+      }
+
       function recomputeView() {
         const query = els.searchInput.value;
         const matchedOnly = els.matchedOnlyInput.checked;
@@ -1583,6 +1734,7 @@ self.onmessage = (event) => {
 
         for (let index = 0; index < state.rows.length; index += 1) {
           const row = state.rows[index];
+          if (!rowPassesHiddenRows(index)) continue;
           if (!rowPassesColumnFilters(row)) continue;
           const hit = query ? rowMatches(row) : false;
           if (hit) state.matchedRows.add(index);
@@ -1597,6 +1749,7 @@ self.onmessage = (event) => {
 
         state.viewIndices = base;
         els.rightStatus.textContent = `${state.viewIndices.length} / ${state.rows.length} 行 · ${state.headers.length} 列`;
+        renderFilteredRowStats();
         renderColumnOverview();
         renderGrid();
       }
@@ -1638,6 +1791,88 @@ self.onmessage = (event) => {
         if (offset < value.length) parent.appendChild(document.createTextNode(value.slice(offset)));
       }
 
+      function isDuplicateColumn(columnIndex) {
+        return (state.issues.duplicateColumns || []).some((issue) => {
+          if (Array.isArray(issue.columnIndexes)) return issue.columnIndexes.includes(columnIndex);
+          return issue.columnIndex === columnIndex;
+        });
+      }
+
+      function getCellMeta(rowIndex, columnIndex) {
+        if (!state.cellMeta || !state.cellMeta.size) return null;
+        return state.cellMeta.get(`${rowIndex}:${columnIndex}`) || null;
+      }
+
+      function applyCellMetaStyle(element, meta) {
+        element.style.removeProperty("background-color");
+        element.style.removeProperty("color");
+        if (!meta) return;
+        if (meta.backgroundColor) element.style.backgroundColor = meta.backgroundColor;
+        if (meta.color) element.style.color = meta.color;
+      }
+
+      function sanitizeStyleAttribute(value) {
+        const allowed = new Set(["color", "background-color", "font-weight", "font-style", "text-decoration"]);
+        return String(value || "")
+          .split(";")
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .map((part) => {
+            const splitAt = part.indexOf(":");
+            if (splitAt < 0) return "";
+            const name = part.slice(0, splitAt).trim().toLowerCase();
+            const rawValue = part.slice(splitAt + 1).trim();
+            if (!allowed.has(name)) return "";
+            if (/url\s*\(|expression\s*\(|javascript:/i.test(rawValue)) return "";
+            return `${name}: ${rawValue}`;
+          })
+          .filter(Boolean)
+          .join("; ");
+      }
+
+      function appendSanitizedExcelHtml(parent, html) {
+        const allowedTags = new Set(["span", "b", "strong", "i", "em", "u", "s", "sub", "sup", "br"]);
+        const template = document.createElement("template");
+        template.innerHTML = String(html || "");
+
+        const cleanNode = (node) => {
+          if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(node.textContent || "");
+          if (node.nodeType !== Node.ELEMENT_NODE) return document.createDocumentFragment();
+
+          const sourceTag = node.tagName.toLowerCase();
+          if (sourceTag === "br") return document.createElement("br");
+          const targetTag = sourceTag === "font" ? "span" : sourceTag;
+          const fragment = document.createDocumentFragment();
+          if (!allowedTags.has(targetTag)) {
+            for (const child of node.childNodes) fragment.appendChild(cleanNode(child));
+            return fragment;
+          }
+
+          const element = document.createElement(targetTag);
+          const style = sanitizeStyleAttribute(node.getAttribute("style"));
+          if (style) element.setAttribute("style", style);
+          if (sourceTag === "font") {
+            const color = node.getAttribute("color");
+            if (color && !/url\s*\(|expression\s*\(|javascript:/i.test(color)) element.style.color = color;
+          }
+          for (const child of node.childNodes) element.appendChild(cleanNode(child));
+          return element;
+        };
+
+        for (const child of template.content.childNodes) parent.appendChild(cleanNode(child));
+      }
+
+      function renderCellDisplayContent(container, value, query, meta, options = {}) {
+        container.innerHTML = "";
+        const text = value == null ? "" : String(value);
+        applyCellMetaStyle(container, meta);
+        if (meta?.html && options.allowHtml && !query) {
+          appendSanitizedExcelHtml(container, meta.html);
+          return;
+        }
+        appendHighlighted(container, text, query);
+      }
+
       function renderHeader() {
         const visibleColumns = getVisibleColumnIndexes();
         els.headerRow.innerHTML = "";
@@ -1652,7 +1887,29 @@ self.onmessage = (event) => {
         for (const col of visibleColumns) {
           const cell = document.createElement("div");
           cell.className = "header-cell";
+          const duplicate = isDuplicateColumn(col);
+          if (duplicate) cell.classList.add("duplicate-column");
           cell.style.flex = `0 0 ${state.columnWidths[col] || DEFAULT_COL_WIDTH}px`;
+          cell.draggable = true;
+          cell.dataset.column = String(col);
+          cell.addEventListener("dragstart", (event) => {
+            state.dragColumn = col;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", String(col));
+          });
+          cell.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+          });
+          cell.addEventListener("drop", (event) => {
+            event.preventDefault();
+            const fromColumn = state.dragColumn ?? Number(event.dataTransfer.getData("text/plain"));
+            dragColumn(fromColumn, col);
+            state.dragColumn = null;
+          });
+          cell.addEventListener("dragend", () => {
+            state.dragColumn = null;
+          });
 
           const button = document.createElement("button");
           button.className = "header-sort-button";
@@ -1661,6 +1918,12 @@ self.onmessage = (event) => {
           const title = document.createElement("span");
           title.className = "header-title";
           title.textContent = state.headers[col];
+          if (duplicate) {
+            const dot = document.createElement("span");
+            dot.className = "duplicate-column-dot";
+            dot.title = "Duplicate column name";
+            button.appendChild(dot);
+          }
           const sort = document.createElement("span");
           sort.className = "sort-indicator";
           sort.textContent =
@@ -1704,12 +1967,14 @@ self.onmessage = (event) => {
       function renderRows() {
         const scrollTop = els.gridViewport.scrollTop;
         const viewportHeight = els.gridViewport.clientHeight || 1;
+        const rowHeight = getCurrentRowHeight();
         const totalRows = state.viewIndices.length;
-        const start = Math.max(0, Math.floor(Math.max(0, scrollTop - HEADER_HEIGHT) / ROW_HEIGHT) - 8);
-        const end = Math.min(totalRows, Math.ceil((Math.max(0, scrollTop - HEADER_HEIGHT) + viewportHeight) / ROW_HEIGHT) + 10);
+        const start = Math.max(0, Math.floor(Math.max(0, scrollTop - HEADER_HEIGHT) / rowHeight) - 8);
+        const end = Math.min(totalRows, Math.ceil((Math.max(0, scrollTop - HEADER_HEIGHT) + viewportHeight) / rowHeight) + 10);
         const visibleColumns = getVisibleColumnIndexes();
         const totalWidth = getTotalWidth();
-        els.gridCanvas.style.height = `${HEADER_HEIGHT + totalRows * ROW_HEIGHT}px`;
+        els.gridViewport.classList.toggle("wrap-cells", state.wrapCells);
+        els.gridCanvas.style.height = `${HEADER_HEIGHT + totalRows * rowHeight}px`;
         els.gridCanvas.style.width = `${totalWidth}px`;
         els.rowLayer.innerHTML = "";
 
@@ -1719,9 +1984,9 @@ self.onmessage = (event) => {
           const hit = state.matchedRows.has(rowIndex);
           const rowEl = document.createElement("div");
           rowEl.className = `data-row${hit ? " hit" : ""}`;
-          rowEl.style.top = `${HEADER_HEIGHT + virtualIndex * ROW_HEIGHT}px`;
+          rowEl.style.top = `${HEADER_HEIGHT + virtualIndex * rowHeight}px`;
           rowEl.style.width = `${totalWidth}px`;
-          rowEl.style.height = `${ROW_HEIGHT}px`;
+          rowEl.style.height = `${rowHeight}px`;
 
           const rowNumber = document.createElement("div");
           rowNumber.className = "row-number";
@@ -1731,16 +1996,19 @@ self.onmessage = (event) => {
           for (const col of visibleColumns) {
             const value = row[col] || "";
             const summary = summarize(value);
+            const meta = getCellMeta(rowIndex, col);
             const cell = document.createElement("div");
-            cell.className = `cell${summary.isLong ? " long" : ""}`;
+            cell.className = `cell${summary.isLong && !state.wrapCells ? " long" : ""}`;
             if (state.selected && state.selected.rowIndex === rowIndex && state.selected.columnIndex === col) {
               cell.classList.add("selected");
             }
             cell.style.flex = `0 0 ${state.columnWidths[col] || DEFAULT_COL_WIDTH}px`;
-            cell.title = summary.isLong ? "文本过长，点击查看全文" : value.slice(0, 1000);
+            cell.title = state.wrapCells ? value.slice(0, 1000) : summary.isLong ? "文本过长，点击查看全文" : value.slice(0, 1000);
             cell.dataset.row = String(rowIndex);
             cell.dataset.column = String(col);
-            appendHighlighted(cell, summary.text, els.searchInput.value);
+            renderCellDisplayContent(cell, state.wrapCells ? value : summary.text, els.searchInput.value, meta, {
+              allowHtml: !summary.isLong || state.wrapCells,
+            });
             cell.addEventListener("click", () => selectCell(rowIndex, col));
             cell.addEventListener("dblclick", () => openModalForCell(rowIndex, col));
             cell.addEventListener("contextmenu", (event) => openContextMenu(event, rowIndex, col));
@@ -1762,6 +2030,20 @@ self.onmessage = (event) => {
           state.sort = { column, direction: "asc" };
         }
         recomputeView();
+      }
+
+      function dragColumn(fromColumn, toColumn) {
+        if (!Number.isInteger(fromColumn) || !Number.isInteger(toColumn) || fromColumn === toColumn) return;
+        const order = state.columnOrder.length ? [...state.columnOrder] : state.headers.map((_, index) => index);
+        const fromIndex = order.indexOf(fromColumn);
+        const toIndex = order.indexOf(toColumn);
+        if (fromIndex < 0 || toIndex < 0) return;
+        order.splice(fromIndex, 1);
+        order.splice(toIndex, 0, fromColumn);
+        state.columnOrder = order;
+        renderColumnPopover();
+        renderColumnOverview();
+        renderGrid();
       }
 
       function startResize(event) {
@@ -1826,11 +2108,12 @@ self.onmessage = (event) => {
         return count;
       }
 
-      function renderTextContent(container, value, query, limit) {
-        container.innerHTML = "";
+      function renderTextContent(container, value, query, limit, meta = null) {
         const text = value == null ? "" : String(value);
         const shown = text.slice(0, limit);
-        appendHighlighted(container, shown, query);
+        renderCellDisplayContent(container, shown, query, meta, {
+          allowHtml: Boolean(meta?.html) && shown.length === text.length,
+        });
         if (shown.length < text.length) {
           const tail = document.createElement("div");
           tail.style.marginTop = "12px";
@@ -1851,11 +2134,13 @@ self.onmessage = (event) => {
 
         if (!selected) {
           els.detailMeta.innerHTML = "";
+          applyCellMetaStyle(els.detailContent, null);
           els.detailContent.textContent = "";
           els.detailStatus.textContent = "未选择单元格";
           return;
         }
 
+        const cellMeta = getCellMeta(selected.rowIndex, selected.columnIndex);
         els.detailMeta.innerHTML = "";
         const metaItems = [
           `行 ${selected.rowIndex + 2}`,
@@ -1872,7 +2157,7 @@ self.onmessage = (event) => {
         }
 
         const occurrences = countOccurrences(value, els.detailSearchInput.value, els.caseSensitiveInput.checked);
-        renderTextContent(els.detailContent, value, els.detailSearchInput.value, state.detailVisibleChars);
+        renderTextContent(els.detailContent, value, els.detailSearchInput.value, state.detailVisibleChars, cellMeta);
         els.detailStatus.textContent = `${Math.min(value.length, state.detailVisibleChars).toLocaleString()} / ${value.length.toLocaleString()} 字符 · 命中 ${occurrences.toLocaleString()}`;
         els.leftStatus.textContent = `选中 R${selected.rowIndex + 2}C${selected.columnIndex + 1}`;
       }
@@ -1881,9 +2166,10 @@ self.onmessage = (event) => {
         const cell = state.modalCell;
         if (!cell) return;
         const value = state.rows[cell.rowIndex]?.[cell.columnIndex] || "";
+        const cellMeta = getCellMeta(cell.rowIndex, cell.columnIndex);
         els.modalContent.classList.toggle("mono", els.modalMonoInput.checked);
         els.modalTitle.textContent = `R${cell.rowIndex + 2}C${cell.columnIndex + 1} · ${state.headers[cell.columnIndex] || ""}`;
-        renderTextContent(els.modalContent, value, els.modalSearchInput.value, state.modalVisibleChars);
+        renderTextContent(els.modalContent, value, els.modalSearchInput.value, state.modalVisibleChars, cellMeta);
         const occurrences = countOccurrences(value, els.modalSearchInput.value, els.caseSensitiveInput.checked);
         els.modalStatus.textContent = `${Math.min(value.length, state.modalVisibleChars).toLocaleString()} / ${value.length.toLocaleString()} 字符 · 命中 ${occurrences.toLocaleString()}`;
         els.loadMoreModalButton.disabled = value.length <= state.modalVisibleChars;
@@ -2014,8 +2300,24 @@ self.onmessage = (event) => {
         renderColumnFilterValues();
       }
 
+      function hideRowsByCurrentColumnFilter() {
+        const rowsToHide = [...state.viewIndices];
+        for (const rowIndex of rowsToHide) {
+          state.hiddenRows.add(rowIndex);
+        }
+        closeColumnFilterMenu();
+        recomputeView();
+      }
+
+      function showHiddenRows() {
+        state.hiddenRows = new Set();
+        recomputeView();
+        renderColumnFilterValues();
+      }
+
       function clearAllFilters() {
         state.columnFilters = {};
+        state.hiddenRows = new Set();
         state.sort = { column: -1, direction: "none" };
         els.searchInput.value = "";
         els.searchColumnSelect.value = "-1";
@@ -2076,7 +2378,10 @@ self.onmessage = (event) => {
         els.fileStats.innerHTML = "";
         if (!state.file) return;
         const issueCount =
-          state.issues.inconsistentRows.length + state.issues.sparseRows.length + state.issues.longFields.length;
+          state.issues.inconsistentRows.length +
+          state.issues.sparseRows.length +
+          state.issues.longFields.length +
+          (state.issues.duplicateColumns || []).length;
         const stats = [
           state.file.name,
           formatBytes(state.file.size),
@@ -2096,18 +2401,27 @@ self.onmessage = (event) => {
         issuePill.className = `pill${issueCount ? " warning" : ""}`;
         issuePill.textContent = `${issueCount.toLocaleString()} 个异常`;
         els.fileStats.appendChild(issuePill);
+        if ((state.issues.duplicateColumns || []).length) {
+          const duplicatePill = document.createElement("span");
+          duplicatePill.className = "pill warning";
+          duplicatePill.textContent = `重复列名 ${(state.issues.duplicateColumns || []).length}`;
+          els.fileStats.appendChild(duplicatePill);
+        }
       }
 
       function setDataset(result) {
         state.headers = result.headers || [];
         state.rows = result.rows || [];
-        state.issues = result.issues || { inconsistentRows: [], sparseRows: [], longFields: [] };
+        state.issues = result.issues || { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: [] };
+        state.cellMeta = result.cellMeta instanceof Map ? result.cellMeta : new Map();
         state.file = result.file || null;
         state.visibleColumns = state.headers.map(() => true);
+        state.columnOrder = state.headers.map((_, index) => index);
         state.columnWidths = state.headers.map((header) =>
           Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, String(header).length * 10 + 36))),
         );
         state.columnFilters = {};
+        state.hiddenRows = new Set();
         state.columnFilterMenu = { columnIndex: -1, query: "" };
         state.sort = { column: -1, direction: "none" };
         state.selected = state.rows.length && state.headers.length ? { rowIndex: 0, columnIndex: 0 } : null;
@@ -2186,8 +2500,79 @@ self.onmessage = (event) => {
         throw new Error("无法加载 SheetJS，Excel 读取需要网络或 vendor/xlsx.full.min.js");
       }
 
+      function normalizeExcelColor(color) {
+        if (!color) return "";
+        if (typeof color === "string") {
+          const value = color.trim().replace(/^#/, "");
+          if (/^[0-9a-f]{8}$/i.test(value)) return `#${value.slice(2).toLowerCase()}`;
+          if (/^[0-9a-f]{6}$/i.test(value)) return `#${value.toLowerCase()}`;
+          return "";
+        }
+        if (color.rgb) {
+          const value = String(color.rgb).trim().replace(/^#/, "");
+          if (/^[0-9a-f]{8}$/i.test(value)) return `#${value.slice(2).toLowerCase()}`;
+          if (/^[0-9a-f]{6}$/i.test(value)) return `#${value.toLowerCase()}`;
+        }
+        if (color.indexed != null && Object.prototype.hasOwnProperty.call(EXCEL_INDEXED_COLORS, color.indexed)) {
+          return EXCEL_INDEXED_COLORS[color.indexed];
+        }
+        return "";
+      }
+
+      function getExcelCell(sheet, rowIndex, columnIndex, XLSX) {
+        if (Array.isArray(sheet)) return sheet[rowIndex]?.[columnIndex] || null;
+        if (Array.isArray(sheet["!data"])) return sheet["!data"][rowIndex]?.[columnIndex] || null;
+        return sheet[XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })] || null;
+      }
+
+      function extractExcelCellMeta(cell) {
+        if (!cell) return null;
+        const style = typeof cell.s === "object" && cell.s ? cell.s : {};
+        const fill = style.fill || style.patternFill || {};
+        const font = style.font || {};
+        const backgroundColor = normalizeExcelColor(fill.fgColor || fill.bgColor || style.fgColor || style.bgColor);
+        const color = normalizeExcelColor(font.color || style.color);
+        const html = typeof cell.h === "string" && /<[^>]+>/.test(cell.h) ? cell.h : "";
+        const meta = {};
+        if (backgroundColor && backgroundColor !== "#ffffff") meta.backgroundColor = backgroundColor;
+        if (color) meta.color = color;
+        if (html) meta.html = html;
+        return Object.keys(meta).length ? meta : null;
+      }
+
+      function collectExcelCellMeta(sheet, rowCount, columnCount, XLSX) {
+        const cellMeta = new Map();
+        for (let row = 1; row < rowCount; row += 1) {
+          for (let col = 0; col < columnCount; col += 1) {
+            const meta = extractExcelCellMeta(getExcelCell(sheet, row, col, XLSX));
+            if (meta) cellMeta.set(`${row - 1}:${col}`, meta);
+          }
+        }
+        return cellMeta;
+      }
+
+      function detectDuplicateHeaderIssues(headers) {
+        const groups = new Map();
+        headers.forEach((header, index) => {
+          const name = header == null || header === "" ? `Column ${index + 1}` : String(header);
+          if (!groups.has(name)) groups.set(name, []);
+          groups.get(name).push(index);
+        });
+        return [...groups.entries()]
+          .filter(([, indexes]) => indexes.length > 1)
+          .map(([columnName, columnIndexes]) => ({
+            type: "重复列名",
+            rowNumber: 1,
+            columnIndex: columnIndexes[0],
+            columnIndexes,
+            columnName,
+            detail: `列名出现 ${columnIndexes.length} 次：${columnIndexes.map((index) => index + 1).join(", ")}`,
+            sample: columnName,
+          }));
+      }
+
       function analyzeRows(headers, rows) {
-        const issues = { inconsistentRows: [], sparseRows: [], longFields: [] };
+        const issues = { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: detectDuplicateHeaderIssues(headers) };
         const expected = headers.length;
         rows.forEach((row, index) => {
           const rowNumber = index + 2;
@@ -2236,7 +2621,7 @@ self.onmessage = (event) => {
           const XLSX = await ensureSheetJs();
           setProgress(0.2, "读取 Excel");
           const buffer = await file.arrayBuffer();
-          const workbook = XLSX.read(buffer, { type: "array", cellDates: false, dense: true });
+          const workbook = XLSX.read(buffer, { type: "array", cellDates: false, dense: true, cellStyles: true, cellHTML: true });
           const sheetName = workbook.SheetNames[0];
           const sheet = workbook.Sheets[sheetName];
           setProgress(0.58, "转换工作表");
@@ -2250,9 +2635,11 @@ self.onmessage = (event) => {
           const rows = matrix.slice(1).map((row) =>
             Array.from({ length: maxColumns }, (_, index) => (row[index] == null ? "" : String(row[index]))),
           );
+          const cellMeta = collectExcelCellMeta(sheet, matrix.length, maxColumns, XLSX);
           setDataset({
             headers,
             rows,
+            cellMeta,
             issues: analyzeRows(headers, rows),
             file: {
               name: file.name,
@@ -2271,11 +2658,42 @@ self.onmessage = (event) => {
         }
       }
 
-      function handleFiles(files) {
+      async function openFileWithPicker() {
+        if (!window.showOpenFilePicker) {
+          els.fileInput.click();
+          return;
+        }
+        try {
+          const [handle] = await window.showOpenFilePicker({
+            multiple: false,
+            types: [
+              {
+                description: "Table files",
+                accept: {
+                  "text/csv": [".csv", ".tsv", ".txt"],
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+                  "application/vnd.ms-excel": [".xls"],
+                },
+              },
+            ],
+          });
+          if (!handle) return;
+          const file = await handle.getFile();
+          handleFiles([file], handle);
+        } catch (error) {
+          if (!error || error.name !== "AbortError") {
+            els.fileInput.click();
+          }
+        }
+      }
+
+      function handleFiles(files, sourceFileHandle = null) {
         const file = files && files[0];
         if (!file) return;
         const lower = file.name.toLocaleLowerCase();
         els.fileHint.textContent = file.name;
+        els.fileHint.title = file.name;
+        state.sourceFileHandle = sourceFileHandle;
         els.searchInput.value = "";
         els.detailSearchInput.value = "";
         els.modalSearchInput.value = "";
@@ -2286,7 +2704,7 @@ self.onmessage = (event) => {
         }
       }
 
-      function exportFilteredCsv() {
+      async function exportFilteredCsv() {
         if (!state.rows.length) return;
         const visibleColumns = getVisibleColumnIndexes();
         const lines = [];
@@ -2296,18 +2714,19 @@ self.onmessage = (event) => {
           lines.push(visibleColumns.map((col) => escapeCsv(row[col] || "")).join(","));
         }
         const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
-        downloadText(`${base}-filtered.csv`, lines.join("\r\n"));
+        await saveTextFile(`${base}-filtered.csv`, lines.join("\r\n"));
       }
 
       function flattenIssues() {
         return [
+          ...(state.issues.duplicateColumns || []),
           ...state.issues.inconsistentRows,
           ...state.issues.sparseRows,
           ...state.issues.longFields,
         ];
       }
 
-      function exportIssueReport() {
+      async function exportIssueReport() {
         const issues = flattenIssues();
         const lines = [["type", "rowNumber", "columnIndex", "columnName", "detail", "sample"].map(escapeCsv).join(",")];
         for (const issue of issues) {
@@ -2318,7 +2737,7 @@ self.onmessage = (event) => {
           );
         }
         const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "issues";
-        downloadText(`${base}-issues.csv`, lines.join("\r\n"));
+        await saveTextFile(`${base}-issues.csv`, lines.join("\r\n"));
       }
 
       function copySelectedRow() {
@@ -2353,8 +2772,8 @@ self.onmessage = (event) => {
         renderDetail();
       }, 180);
 
-      els.chooseFileButton.addEventListener("click", () => els.fileInput.click());
-      els.fileInput.addEventListener("change", (event) => handleFiles(event.target.files));
+      els.chooseFileButton.addEventListener("click", openFileWithPicker);
+      els.fileInput.addEventListener("change", (event) => handleFiles(event.target.files, null));
       els.dropZone.addEventListener("dragover", (event) => {
         event.preventDefault();
         els.dropZone.classList.add("dragover");
@@ -2363,7 +2782,7 @@ self.onmessage = (event) => {
       els.dropZone.addEventListener("drop", (event) => {
         event.preventDefault();
         els.dropZone.classList.remove("dragover");
-        handleFiles(event.dataTransfer.files);
+        handleFiles(event.dataTransfer.files, null);
       });
 
       els.gridViewport.addEventListener("scroll", renderGrid, { passive: true });
@@ -2375,6 +2794,11 @@ self.onmessage = (event) => {
         renderModal();
       });
       els.matchedOnlyInput.addEventListener("change", recomputeView);
+      els.wrapCellsInput.addEventListener("change", () => {
+        state.wrapCells = els.wrapCellsInput.checked;
+        els.gridViewport.scrollTop = 0;
+        renderGrid();
+      });
       els.clearSearchButton.addEventListener("click", () => {
         els.searchInput.value = "";
         els.matchedOnlyInput.checked = false;
@@ -2451,6 +2875,8 @@ self.onmessage = (event) => {
       els.clearColumnFilterButton.addEventListener("click", clearCurrentColumnFilter);
       els.selectAllFilterValuesButton.addEventListener("click", () => updateFilterValuesForVisible(true));
       els.selectNoFilterValuesButton.addEventListener("click", () => updateFilterValuesForVisible(false));
+      els.hideFilteredRowsButton.addEventListener("click", hideRowsByCurrentColumnFilter);
+      els.showHiddenRowsButton.addEventListener("click", showHiddenRows);
       els.contextMenu.addEventListener("click", (event) => {
         const action = event.target.dataset.action;
         if (!action) return;
@@ -2483,6 +2909,7 @@ self.onmessage = (event) => {
       els.restoreDetailButton.addEventListener("click", toggleDetailPanel);
 
       renderColumnOverview();
+      renderFilteredRowStats();
       renderGrid();
     </script>
   </body>
