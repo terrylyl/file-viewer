@@ -23,6 +23,11 @@ test("index.html contains the required application regions", () => {
     "wrapCellsInput",
     "filteredRowStats",
     "sheetSelect",
+    "addColumnButton",
+    "addColumnPopover",
+    "newColumnNameInput",
+    "newColumnModeSelect",
+    "copyColumnSelect",
   ]) {
     assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);
   }
@@ -71,6 +76,16 @@ test("cell URLs are rendered as clickable links", () => {
   assert.match(html, /appendLinkedText/, "missing linked text renderer");
   assert.match(html, /target = "_blank"/, "links should open in a new tab");
   assert.match(html, /rel = "noopener noreferrer"/, "links should use safe rel attributes");
+});
+
+test("users can add derived columns", () => {
+  assert.match(html, /addDerivedColumn/, "missing derived column creator");
+  assert.match(html, /openAddColumnPopover/, "missing add-column popover opener");
+  assert.match(html, /updateCopyColumnOptions/, "missing copy-source column options");
+  assert.match(html, /newColumnModeSelect\.addEventListener\("change"/, "new column mode should update controls");
+  assert.match(html, /confirmAddColumnButton\.addEventListener\("click"/, "add column confirm action missing");
+  assert.match(html, /mode === "sequence"/, "missing sequence column mode");
+  assert.match(html, /mode === "copy"/, "missing copy column mode");
 });
 
 test("file import button is protected from wrapping in the compact header", () => {
