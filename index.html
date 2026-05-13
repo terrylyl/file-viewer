@@ -81,6 +81,16 @@
         background: transparent;
       }
 
+      button.danger {
+        border-color: #f1b8b3;
+        color: var(--danger);
+      }
+
+      button.danger:hover {
+        border-color: #d92d20;
+        background: #fff1f1;
+      }
+
       button:disabled {
         cursor: not-allowed;
         opacity: 0.55;
@@ -1055,6 +1065,9 @@
         <button id="hideFilteredRowsButton">隐藏当前结果行</button>
         <button id="showHiddenRowsButton">显示隐藏行</button>
       </div>
+      <div class="filter-actions">
+        <button id="deleteCustomColumnButton" class="danger" disabled>删除此自定义列</button>
+      </div>
       <div class="filter-summary" id="columnFilterSummary">未选择列</div>
       <div class="filter-values" id="columnFilterValues"></div>
     </div>
@@ -1559,6 +1572,7 @@ self.onmessage = (event) => {
         selectNoFilterValuesButton: document.getElementById("selectNoFilterValuesButton"),
         hideFilteredRowsButton: document.getElementById("hideFilteredRowsButton"),
         showHiddenRowsButton: document.getElementById("showHiddenRowsButton"),
+        deleteCustomColumnButton: document.getElementById("deleteCustomColumnButton"),
         columnFilterSummary: document.getElementById("columnFilterSummary"),
         columnFilterValues: document.getElementById("columnFilterValues"),
         contextMenu: document.getElementById("contextMenu"),
@@ -1591,6 +1605,7 @@ self.onmessage = (event) => {
         columnOrder: [],
         columnWidths: [],
         columnFilters: {},
+        customColumns: new Set(),
         columnFilterMenu: { columnIndex: -1, query: "" },
         hiddenRows: new Set(),
         dragColumn: null,
@@ -1946,6 +1961,10 @@ self.onmessage = (event) => {
           if (Array.isArray(issue.columnIndexes)) return issue.columnIndexes.includes(columnIndex);
           return issue.columnIndex === columnIndex;
         });
+      }
+
+      function isCustomColumn(columnIndex) {
+        return state.customColumns.has(columnIndex);
       }
 
       function getCellMeta(rowIndex, columnIndex) {
@@ -2360,6 +2379,8 @@ self.onmessage = (event) => {
         state.columnFilterMenu = { columnIndex, query: "" };
         els.columnFilterTitle.textContent = `${columnIndex + 1}. ${state.headers[columnIndex] || ""}`;
         els.columnFilterSearchInput.value = "";
+        els.deleteCustomColumnButton.disabled = !isCustomColumn(columnIndex);
+        els.deleteCustomColumnButton.title = isCustomColumn(columnIndex) ? "删除此自定义列" : "原始导入列不能删除";
         const rect = anchor.getBoundingClientRect();
         els.columnFilterPopover.style.left = `${Math.min(rect.left, window.innerWidth - 350)}px`;
         els.columnFilterPopover.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 420)}px`;
@@ -2571,6 +2592,57 @@ self.onmessage = (event) => {
         els.addColumnPopover.classList.remove("open");
       }
 
+      function reindexColumnSet(columns, removedColumnIndex) {
+        const next = new Set();
+        for (const columnIndex of columns) {
+          if (columnIndex < removedColumnIndex) next.add(columnIndex);
+          if (columnIndex > removedColumnIndex) next.add(columnIndex - 1);
+        }
+        return next;
+      }
+
+      function reindexColumnFilters(filters, removedColumnIndex) {
+        const next = {};
+        for (const [columnKey, filter] of Object.entries(filters)) {
+          const columnIndex = Number(columnKey);
+          if (columnIndex === removedColumnIndex) continue;
+          const nextIndex = columnIndex > removedColumnIndex ? columnIndex - 1 : columnIndex;
+          next[String(nextIndex)] = filter;
+        }
+        return next;
+      }
+
+      function reindexCellMeta(cellMeta, removedColumnIndex) {
+        const next = new Map();
+        for (const [key, meta] of cellMeta.entries()) {
+          const [rowPart, columnPart] = key.split(":");
+          const columnIndex = Number(columnPart);
+          if (columnIndex === removedColumnIndex) continue;
+          const nextColumnIndex = columnIndex > removedColumnIndex ? columnIndex - 1 : columnIndex;
+          next.set(`${rowPart}:${nextColumnIndex}`, meta);
+        }
+        return next;
+      }
+
+      function reindexColumnOrder(order, removedColumnIndex) {
+        return order
+          .filter((columnIndex) => columnIndex !== removedColumnIndex)
+          .map((columnIndex) => (columnIndex > removedColumnIndex ? columnIndex - 1 : columnIndex));
+      }
+
+      function normalizeSelectionAfterColumnDelete(removedColumnIndex) {
+        if (!state.selected) return;
+        if (!state.headers.length || !state.rows.length) {
+          state.selected = null;
+          return;
+        }
+        const rowIndex = Math.min(state.selected.rowIndex, state.rows.length - 1);
+        let columnIndex = state.selected.columnIndex;
+        if (columnIndex === removedColumnIndex) columnIndex = Math.min(removedColumnIndex, state.headers.length - 1);
+        else if (columnIndex > removedColumnIndex) columnIndex -= 1;
+        state.selected = { rowIndex, columnIndex };
+      }
+
       function addDerivedColumn({ name, mode, sourceColumnIndex }) {
         if (!state.headers.length) return;
         const columnIndex = state.headers.length;
@@ -2599,6 +2671,7 @@ self.onmessage = (event) => {
         }
 
         state.visibleColumns[columnIndex] = true;
+        state.customColumns.add(columnIndex);
         state.columnOrder = state.columnOrder.length
           ? [...state.columnOrder, columnIndex]
           : state.headers.map((_, index) => index);
@@ -2616,6 +2689,31 @@ self.onmessage = (event) => {
         renderDetail();
         closeAddColumnPopover();
         els.leftStatus.textContent = `已添加列：${columnName}`;
+      }
+
+      function deleteCustomColumn(columnIndex) {
+        if (!isCustomColumn(columnIndex)) return;
+        const removedName = state.headers[columnIndex] || `Column ${columnIndex + 1}`;
+        state.headers.splice(columnIndex, 1);
+        state.rows.forEach((row) => row.splice(columnIndex, 1));
+        state.visibleColumns.splice(columnIndex, 1);
+        state.columnWidths.splice(columnIndex, 1);
+        state.columnOrder = reindexColumnOrder(state.columnOrder, columnIndex);
+        state.columnFilters = reindexColumnFilters(state.columnFilters, columnIndex);
+        state.customColumns = reindexColumnSet(state.customColumns, columnIndex);
+        state.cellMeta = reindexCellMeta(state.cellMeta, columnIndex);
+        if (state.sort.column === columnIndex) state.sort = { column: -1, direction: "none" };
+        else if (state.sort.column > columnIndex) state.sort.column -= 1;
+        normalizeSelectionAfterColumnDelete(columnIndex);
+        state.issues = analyzeRows(state.headers, state.rows);
+        closeColumnFilterMenu();
+        updateSearchColumns();
+        renderColumnPopover();
+        renderColumnOverview();
+        updateFileStats();
+        recomputeView();
+        renderDetail();
+        els.leftStatus.textContent = `已删除自定义列：${removedName}`;
       }
 
       function updateFileStats() {
@@ -2666,6 +2764,7 @@ self.onmessage = (event) => {
           Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, String(header).length * 10 + 36))),
         );
         state.columnFilters = {};
+        state.customColumns = new Set();
         state.hiddenRows = new Set();
         state.columnFilterMenu = { columnIndex: -1, query: "" };
         state.sort = { column: -1, direction: "none" };
@@ -3202,6 +3301,7 @@ self.onmessage = (event) => {
       els.selectNoFilterValuesButton.addEventListener("click", () => updateFilterValuesForVisible(false));
       els.hideFilteredRowsButton.addEventListener("click", hideRowsByCurrentColumnFilter);
       els.showHiddenRowsButton.addEventListener("click", showHiddenRows);
+      els.deleteCustomColumnButton.addEventListener("click", () => deleteCustomColumn(state.columnFilterMenu.columnIndex));
       els.contextMenu.addEventListener("click", (event) => {
         const action = event.target.dataset.action;
         if (!action) return;

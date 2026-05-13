@@ -28,6 +28,7 @@ test("index.html contains the required application regions", () => {
     "newColumnNameInput",
     "newColumnModeSelect",
     "copyColumnSelect",
+    "deleteCustomColumnButton",
   ]) {
     assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);
   }
@@ -80,12 +81,20 @@ test("cell URLs are rendered as clickable links", () => {
 
 test("users can add derived columns", () => {
   assert.match(html, /addDerivedColumn/, "missing derived column creator");
+  assert.match(html, /customColumns/, "missing custom column tracking state");
   assert.match(html, /openAddColumnPopover/, "missing add-column popover opener");
   assert.match(html, /updateCopyColumnOptions/, "missing copy-source column options");
   assert.match(html, /newColumnModeSelect\.addEventListener\("change"/, "new column mode should update controls");
   assert.match(html, /confirmAddColumnButton\.addEventListener\("click"/, "add column confirm action missing");
   assert.match(html, /mode === "sequence"/, "missing sequence column mode");
   assert.match(html, /mode === "copy"/, "missing copy column mode");
+});
+
+test("users can delete only custom columns", () => {
+  assert.match(html, /deleteCustomColumn/, "missing custom column deletion function");
+  assert.match(html, /isCustomColumn/, "missing custom column predicate");
+  assert.match(html, /deleteCustomColumnButton\.addEventListener\("click"/, "missing delete custom column action");
+  assert.match(html, /deleteCustomColumnButton\.disabled\s*=\s*!isCustomColumn/, "delete should be disabled for source columns");
 });
 
 test("file import button is protected from wrapping in the compact header", () => {
