@@ -2822,7 +2822,7 @@ self.onmessage = (event) => {
         if (!sheet) throw new Error(`未找到 Sheet：${sheetName}`);
         const XLSX = state.excelXLSX;
         const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
-        const maxColumns = Math.max(...matrix.map((row) => row.length), 0);
+        const maxColumns = getMatrixColumnCount(matrix);
         const rawHeaders = matrix[0] || [];
         const headers = Array.from({ length: maxColumns }, (_, index) => {
           const value = rawHeaders[index] == null || rawHeaders[index] === "" ? `Column ${index + 1}` : String(rawHeaders[index]);
@@ -2976,6 +2976,15 @@ self.onmessage = (event) => {
           }
         }
         return cellMeta;
+      }
+
+      function getMatrixColumnCount(matrix) {
+        let maxColumns = 0;
+        for (const row of matrix) {
+          const columnCount = Array.isArray(row) ? row.length : 0;
+          if (columnCount > maxColumns) maxColumns = columnCount;
+        }
+        return maxColumns;
       }
 
       function detectDuplicateHeaderIssues(headers) {

@@ -72,6 +72,11 @@ test("Excel workbooks expose sheet selection", () => {
   assert.match(html, /sheetSelect\.addEventListener\("change"/, "sheet selector should respond to changes");
 });
 
+test("Excel sheet conversion avoids spreading large matrices", () => {
+  assert.match(html, /getMatrixColumnCount/, "missing iterative matrix column counter");
+  assert.doesNotMatch(html, /Math\.max\(\s*\.\.\.matrix\.map/, "large Excel matrices should not be spread into Math.max");
+});
+
 test("cell URLs are rendered as clickable links", () => {
   assert.match(html, /detectCellLinks/, "missing URL detector");
   assert.match(html, /appendLinkedText/, "missing linked text renderer");
