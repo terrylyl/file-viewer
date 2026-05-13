@@ -22,6 +22,7 @@ test("index.html contains the required application regions", () => {
     "clearAllFiltersButton",
     "wrapCellsInput",
     "filteredRowStats",
+    "sheetSelect",
   ]) {
     assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);
   }
@@ -55,6 +56,21 @@ test("Excel cell styles and rich text are extracted and rendered", () => {
   assert.match(html, /renderCellDisplayContent/, "missing styled cell renderer");
   assert.match(html, /cellStyles:\s*true/, "Excel parser should request cell styles");
   assert.match(html, /cellHTML:\s*true/, "Excel parser should request rich text HTML");
+});
+
+test("Excel workbooks expose sheet selection", () => {
+  assert.match(html, /id="sheetSelect"/, "missing Excel sheet selector");
+  assert.match(html, /updateSheetSelect/, "missing sheet selector renderer");
+  assert.match(html, /loadExcelSheet/, "missing sheet loading function");
+  assert.match(html, /SheetNames/, "Excel parser should inspect workbook sheets");
+  assert.match(html, /sheetSelect\.addEventListener\("change"/, "sheet selector should respond to changes");
+});
+
+test("cell URLs are rendered as clickable links", () => {
+  assert.match(html, /detectCellLinks/, "missing URL detector");
+  assert.match(html, /appendLinkedText/, "missing linked text renderer");
+  assert.match(html, /target = "_blank"/, "links should open in a new tab");
+  assert.match(html, /rel = "noopener noreferrer"/, "links should use safe rel attributes");
 });
 
 test("file import button is protected from wrapping in the compact header", () => {

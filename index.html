@@ -234,6 +234,10 @@
         width: min(360px, 35vw);
       }
 
+      .sheet-control select {
+        max-width: 180px;
+      }
+
       .file-stats {
         display: flex;
         align-items: center;
@@ -493,6 +497,13 @@
         overflow-wrap: anywhere;
         text-overflow: clip;
         line-height: 1.45;
+      }
+
+      .cell a,
+      .detail-content a {
+        color: #075985;
+        text-decoration: underline;
+        text-underline-offset: 2px;
       }
 
       mark {
@@ -897,6 +908,12 @@
                 <option value="auto">自动</option>
                 <option value="utf-8">UTF-8</option>
                 <option value="gb18030">GB18030 / GBK</option>
+              </select>
+            </label>
+            <label class="sheet-control" id="sheetSelectLabel" hidden>
+              Sheet
+              <select id="sheetSelect" disabled>
+                <option value="">未加载</option>
               </select>
             </label>
             <button id="columnsButton" disabled>列显示</button>
@@ -1432,6 +1449,8 @@ self.onmessage = (event) => {
         fileHint: document.getElementById("fileHint"),
         fileStats: document.getElementById("fileStats"),
         encodingSelect: document.getElementById("encodingSelect"),
+        sheetSelectLabel: document.getElementById("sheetSelectLabel"),
+        sheetSelect: document.getElementById("sheetSelect"),
         searchInput: document.getElementById("searchInput"),
         searchColumnSelect: document.getElementById("searchColumnSelect"),
         caseSensitiveInput: document.getElementById("caseSensitiveInput"),
@@ -1497,6 +1516,11 @@ self.onmessage = (event) => {
         rows: [],
         issues: { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: [] },
         cellMeta: new Map(),
+        excelWorkbook: null,
+        excelXLSX: null,
+        excelFile: null,
+        excelSheetNames: [],
+        activeSheetName: "",
         file: null,
         sourceFileHandle: null,
         viewIndices: [],
@@ -1765,17 +1789,17 @@ self.onmessage = (event) => {
         return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
       }
 
-      function appendHighlighted(parent, text, query) {
+      function appendHighlightedText(parent, text, query) {
         const value = text == null ? "" : String(text);
         if (!query) {
-          parent.textContent = value;
+          parent.appendChild(document.createTextNode(value));
           return;
         }
         const caseSensitive = els.caseSensitiveInput.checked;
         const haystack = normalizeForSearch(value, caseSensitive);
         const needle = normalizeForSearch(query, caseSensitive);
         if (!needle) {
-          parent.textContent = value;
+          parent.appendChild(document.createTextNode(value));
           return;
         }
         let offset = 0;
@@ -1789,6 +1813,70 @@ self.onmessage = (event) => {
           found = haystack.indexOf(needle, offset);
         }
         if (offset < value.length) parent.appendChild(document.createTextNode(value.slice(offset)));
+      }
+
+      function appendHighlighted(parent, text, query) {
+        parent.textContent = "";
+        appendHighlightedText(parent, text, query);
+      }
+
+      function normalizeLinkHref(value) {
+        const text = String(value || "").trim();
+        if (!text) return "";
+        let href = text;
+        if (/^www\./i.test(href)) href = `https://${href}`;
+        if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(href)) href = `mailto:${href}`;
+        try {
+          const url = new URL(href);
+          return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.href : "";
+        } catch (error) {
+          return "";
+        }
+      }
+
+      function detectCellLinks(text) {
+        const value = text == null ? "" : String(text);
+        const linkPattern = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/gi;
+        const segments = [];
+        let offset = 0;
+        let match;
+        while ((match = linkPattern.exec(value)) !== null) {
+          const raw = match[0];
+          const trailing = raw.match(/[.,;:!?)]*$/)?.[0] || "";
+          const linkText = trailing ? raw.slice(0, -trailing.length) : raw;
+          const href = normalizeLinkHref(linkText);
+          if (!href) continue;
+          if (match.index > offset) segments.push({ text: value.slice(offset, match.index) });
+          segments.push({ text: linkText, href });
+          if (trailing) segments.push({ text: trailing });
+          offset = match.index + raw.length;
+        }
+        if (offset < value.length) segments.push({ text: value.slice(offset) });
+        return segments.some((segment) => segment.href) ? segments : [];
+      }
+
+      function appendLinkedText(parent, text, query, forcedHref = "") {
+        const value = text == null ? "" : String(text);
+        const href = normalizeLinkHref(forcedHref);
+        const segments = href ? [{ text: value, href }] : detectCellLinks(value);
+        if (!segments.length) {
+          appendHighlighted(parent, value, query);
+          return;
+        }
+        parent.textContent = "";
+        for (const segment of segments) {
+          if (!segment.href) {
+            appendHighlightedText(parent, segment.text, query);
+            continue;
+          }
+          const anchor = document.createElement("a");
+          anchor.href = segment.href;
+          anchor.target = "_blank";
+          anchor.rel = "noopener noreferrer";
+          anchor.title = segment.href;
+          appendHighlightedText(anchor, segment.text, query);
+          parent.appendChild(anchor);
+        }
       }
 
       function isDuplicateColumn(columnIndex) {
@@ -1866,11 +1954,12 @@ self.onmessage = (event) => {
         container.innerHTML = "";
         const text = value == null ? "" : String(value);
         applyCellMetaStyle(container, meta);
-        if (meta?.html && options.allowHtml && !query) {
+        const hasInlineLink = Boolean(meta?.link) || detectCellLinks(text).length > 0;
+        if (meta?.html && options.allowHtml && !query && !hasInlineLink) {
           appendSanitizedExcelHtml(container, meta.html);
           return;
         }
-        appendHighlighted(container, text, query);
+        appendLinkedText(container, text, query, meta?.link || "");
       }
 
       function renderHeader() {
@@ -2389,8 +2478,9 @@ self.onmessage = (event) => {
           `${state.headers.length.toLocaleString()} 列`,
           state.file.encoding,
           state.file.kind === "CSV" ? delimiterLabel(state.file.delimiter) : state.file.delimiter,
+          state.file.sheetCount ? `${state.file.sheetCount} sheets` : "",
           `${state.file.parseMs} ms`,
-        ];
+        ].filter(Boolean);
         for (const stat of stats) {
           const pill = document.createElement("span");
           pill.className = "pill";
@@ -2438,7 +2528,87 @@ self.onmessage = (event) => {
         setProgress(1, "解析完成");
       }
 
+      function updateSheetSelect(sheetNames = [], activeSheetName = "") {
+        state.excelSheetNames = sheetNames;
+        state.activeSheetName = activeSheetName;
+        els.sheetSelect.innerHTML = "";
+        if (!sheetNames.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "未加载";
+          els.sheetSelect.appendChild(option);
+          els.sheetSelect.disabled = true;
+          els.sheetSelectLabel.hidden = true;
+          return;
+        }
+        for (const sheetName of sheetNames) {
+          const option = document.createElement("option");
+          option.value = sheetName;
+          option.textContent = sheetName;
+          els.sheetSelect.appendChild(option);
+        }
+        els.sheetSelect.value = activeSheetName || sheetNames[0];
+        els.sheetSelect.disabled = sheetNames.length <= 1;
+        els.sheetSelectLabel.hidden = false;
+      }
+
+      function resetExcelWorkbook() {
+        state.excelWorkbook = null;
+        state.excelXLSX = null;
+        state.excelFile = null;
+        updateSheetSelect([], "");
+      }
+
+      function buildExcelDatasetFromSheet(sheetName, startedAt = Date.now()) {
+        if (!state.excelWorkbook || !state.excelXLSX || !state.excelFile) {
+          throw new Error("未加载 Excel 工作簿");
+        }
+        const sheet = state.excelWorkbook.Sheets[sheetName];
+        if (!sheet) throw new Error(`未找到 Sheet：${sheetName}`);
+        const XLSX = state.excelXLSX;
+        const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
+        const maxColumns = Math.max(...matrix.map((row) => row.length), 0);
+        const rawHeaders = matrix[0] || [];
+        const headers = Array.from({ length: maxColumns }, (_, index) => {
+          const value = rawHeaders[index] == null || rawHeaders[index] === "" ? `Column ${index + 1}` : String(rawHeaders[index]);
+          return value;
+        });
+        const rows = matrix.slice(1).map((row) =>
+          Array.from({ length: maxColumns }, (_, index) => (row[index] == null ? "" : String(row[index]))),
+        );
+        return {
+          headers,
+          rows,
+          cellMeta: collectExcelCellMeta(sheet, matrix.length, maxColumns, XLSX),
+          issues: analyzeRows(headers, rows),
+          file: {
+            name: state.excelFile.name,
+            size: state.excelFile.size,
+            encoding: "Excel workbook",
+            delimiter: sheetName,
+            parseMs: Date.now() - startedAt,
+            kind: "Excel",
+            sheetCount: state.excelSheetNames.length,
+          },
+        };
+      }
+
+      function loadExcelSheet(sheetName, startedAt = Date.now()) {
+        if (!sheetName) return;
+        try {
+          setProgress(0.58, `转换 Sheet：${sheetName}`);
+          updateSheetSelect(state.excelSheetNames, sheetName);
+          setDataset(buildExcelDatasetFromSheet(sheetName, startedAt));
+        } catch (error) {
+          setProgress(0, `Excel Sheet 读取失败：${error.message}`);
+          els.emptyState.style.display = "grid";
+          els.emptyState.querySelector("strong").textContent = "Excel Sheet 读取失败";
+          els.emptyState.querySelector("span").textContent = error.message;
+        }
+      }
+
       async function parseCsvFile(file) {
+        resetExcelWorkbook();
         if (state.worker) state.worker.terminate();
         state.worker = createCsvWorker();
         setProgress(0.02, "读取文件");
@@ -2533,10 +2703,12 @@ self.onmessage = (event) => {
         const backgroundColor = normalizeExcelColor(fill.fgColor || fill.bgColor || style.fgColor || style.bgColor);
         const color = normalizeExcelColor(font.color || style.color);
         const html = typeof cell.h === "string" && /<[^>]+>/.test(cell.h) ? cell.h : "";
+        const link = normalizeLinkHref(cell.l?.Target || "");
         const meta = {};
         if (backgroundColor && backgroundColor !== "#ffffff") meta.backgroundColor = backgroundColor;
         if (color) meta.color = color;
         if (html) meta.html = html;
+        if (link) meta.link = link;
         return Object.keys(meta).length ? meta : null;
       }
 
@@ -2618,38 +2790,18 @@ self.onmessage = (event) => {
         const startedAt = Date.now();
         setProgress(0.05, "加载 Excel 解析器");
         try {
+          resetExcelWorkbook();
           const XLSX = await ensureSheetJs();
           setProgress(0.2, "读取 Excel");
           const buffer = await file.arrayBuffer();
           const workbook = XLSX.read(buffer, { type: "array", cellDates: false, dense: true, cellStyles: true, cellHTML: true });
           const sheetName = workbook.SheetNames[0];
-          const sheet = workbook.Sheets[sheetName];
-          setProgress(0.58, "转换工作表");
-          const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
-          const maxColumns = Math.max(...matrix.map((row) => row.length), 0);
-          const rawHeaders = matrix[0] || [];
-          const headers = Array.from({ length: maxColumns }, (_, index) => {
-            const value = rawHeaders[index] == null || rawHeaders[index] === "" ? `Column ${index + 1}` : String(rawHeaders[index]);
-            return value;
-          });
-          const rows = matrix.slice(1).map((row) =>
-            Array.from({ length: maxColumns }, (_, index) => (row[index] == null ? "" : String(row[index]))),
-          );
-          const cellMeta = collectExcelCellMeta(sheet, matrix.length, maxColumns, XLSX);
-          setDataset({
-            headers,
-            rows,
-            cellMeta,
-            issues: analyzeRows(headers, rows),
-            file: {
-              name: file.name,
-              size: file.size,
-              encoding: "Excel workbook",
-              delimiter: sheetName,
-              parseMs: Date.now() - startedAt,
-              kind: "Excel",
-            },
-          });
+          if (!sheetName) throw new Error("工作簿中没有可读取的 Sheet");
+          state.excelWorkbook = workbook;
+          state.excelXLSX = XLSX;
+          state.excelFile = file;
+          updateSheetSelect(workbook.SheetNames, sheetName);
+          loadExcelSheet(sheetName, startedAt);
         } catch (error) {
           setProgress(0, `Excel 解析失败：${error.message}`);
           els.emptyState.style.display = "grid";
@@ -2788,6 +2940,7 @@ self.onmessage = (event) => {
       els.gridViewport.addEventListener("scroll", renderGrid, { passive: true });
       els.searchInput.addEventListener("input", debouncedSearch);
       els.searchColumnSelect.addEventListener("change", recomputeView);
+      els.sheetSelect.addEventListener("change", () => loadExcelSheet(els.sheetSelect.value));
       els.caseSensitiveInput.addEventListener("change", () => {
         recomputeView();
         renderDetail();
