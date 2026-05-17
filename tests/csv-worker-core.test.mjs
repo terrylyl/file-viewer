@@ -48,6 +48,20 @@ test("parseCsvText handles quoted commas and quoted newlines", () => {
   assert.equal(parsed.meta.columnCount, 2);
 });
 
+test("parseCsvText handles more rows than the JavaScript argument limit", () => {
+  const core = loadWorkerCore();
+  const rowCount = 200_000;
+  const text = `id\n${Array.from({ length: rowCount }, (_, index) => String(index + 1)).join("\n")}`;
+
+  const parsed = core.parseCsvText(text, { delimiter: ",", previewLimit: 100 });
+
+  assert.equal(parsed.rows.length, rowCount);
+  assert.equal(parsed.rows[0][0], "1");
+  assert.equal(parsed.rows[rowCount - 1][0], String(rowCount));
+  assert.equal(parsed.meta.rowCount, rowCount);
+  assert.equal(parsed.meta.columnCount, 1);
+});
+
 test("parseCsvText reports inconsistent rows and long fields", () => {
   const core = loadWorkerCore();
   const parsed = core.parseCsvText(

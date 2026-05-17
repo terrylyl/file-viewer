@@ -1366,6 +1366,14 @@ function detectDuplicateColumns(rawHeaders) {
     }));
 }
 
+function getMaxRecordColumns(records, minimumColumns = 0) {
+  let maxColumns = minimumColumns;
+  for (const row of records) {
+    if (row.length > maxColumns) maxColumns = row.length;
+  }
+  return maxColumns;
+}
+
 function parseCsvText(text, options = {}) {
   const delimiter = options.delimiter || detectDelimiter(text);
   const previewLimit = options.previewLimit || DEFAULT_PREVIEW_LIMIT;
@@ -1429,7 +1437,7 @@ function parseCsvText(text, options = {}) {
   });
   const rawHeaders = nonEmptyRecords[0] || [];
   const expectedColumns = rawHeaders.length;
-  const maxColumns = Math.max(expectedColumns, ...nonEmptyRecords.map((row) => row.length), 0);
+  const maxColumns = getMaxRecordColumns(nonEmptyRecords, expectedColumns);
   const headers = normalizeHeaders(rawHeaders, maxColumns);
   const rows = [];
   const issues = {
