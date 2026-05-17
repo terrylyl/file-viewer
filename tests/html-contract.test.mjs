@@ -118,6 +118,21 @@ test("users can create concatenated columns", () => {
   assert.match(html, /join\("\\n\\n"\)/, "concatenated blocks should be separated by a blank line");
 });
 
+test("popover outside-click handling survives rerendered click targets", () => {
+  assert.match(html, /function eventPathContains\(/, "missing composed event path helper");
+  assert.match(html, /event\.composedPath\(\)/, "outside-click handling should read the original event path");
+  assert.match(
+    html,
+    /eventPathContains\(event,\s*els\.concatenateColumnPopover\)/,
+    "concatenate popover close check should use the event path",
+  );
+  assert.doesNotMatch(
+    html,
+    /!els\.concatenateColumnPopover\.contains\(event\.target\)\s*&&\s*event\.target !== els\.concatenateColumnButton/,
+    "target-only contains checks close the popover after deleting a rerendered row",
+  );
+});
+
 test("users can rename and restore individual column names", () => {
   for (const id of ["renameColumnInput", "renameColumnButton", "restoreColumnNameButton"]) {
     assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);

@@ -2484,6 +2484,20 @@ self.onmessage = (event) => {
         els.contextMenu.classList.remove("open");
       }
 
+      function eventPathContains(event, element) {
+        if (!element) return false;
+        const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+        return path.length ? path.includes(element) : element.contains(event.target);
+      }
+
+      function eventPathHasSelector(event, selector) {
+        const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+        if (path.length) {
+          return path.some((node) => node instanceof Element && node.matches(selector));
+        }
+        return event.target instanceof Element ? Boolean(event.target.closest(selector)) : false;
+      }
+
       function closeColumnFilterMenu() {
         els.columnFilterPopover.classList.remove("open");
         state.columnFilterMenu = { columnIndex: -1, query: "" };
@@ -3722,19 +3736,19 @@ self.onmessage = (event) => {
         closeContextMenu();
       });
       document.addEventListener("click", (event) => {
-        if (!els.columnsPopover.contains(event.target) && event.target !== els.columnsButton) {
+        if (!eventPathContains(event, els.columnsPopover) && !eventPathContains(event, els.columnsButton)) {
           els.columnsPopover.classList.remove("open");
         }
-        if (!els.addColumnPopover.contains(event.target) && event.target !== els.addColumnButton) {
+        if (!eventPathContains(event, els.addColumnPopover) && !eventPathContains(event, els.addColumnButton)) {
           closeAddColumnPopover();
         }
-        if (!els.concatenateColumnPopover.contains(event.target) && event.target !== els.concatenateColumnButton) {
+        if (!eventPathContains(event, els.concatenateColumnPopover) && !eventPathContains(event, els.concatenateColumnButton)) {
           closeConcatenateColumnPopover();
         }
-        if (!els.columnFilterPopover.contains(event.target) && !event.target.closest(".header-filter-button")) {
+        if (!eventPathContains(event, els.columnFilterPopover) && !eventPathHasSelector(event, ".header-filter-button")) {
           closeColumnFilterMenu();
         }
-        if (!els.contextMenu.contains(event.target)) closeContextMenu();
+        if (!eventPathContains(event, els.contextMenu)) closeContextMenu();
       });
       document.addEventListener("mousemove", onResizeMove);
       document.addEventListener("mouseup", stopResize);
