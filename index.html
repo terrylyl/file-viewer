@@ -1725,6 +1725,7 @@ self.onmessage = (event) => {
         columnOrder: [],
         columnWidths: [],
         columnFilters: {},
+        columnValueCache: new Map(),
         customColumns: new Set(),
         columnFilterMenu: { columnIndex: -1, query: "" },
         concatenateColumnItems: [],
@@ -1891,14 +1892,31 @@ self.onmessage = (event) => {
       }
 
       function getColumnUniqueValues(columnIndex) {
+        return getCachedColumnUniqueValues(columnIndex);
+      }
+
+      function invalidateColumnValueCache(columnIndex = null) {
+        if (columnIndex == null) {
+          state.columnValueCache.clear();
+          return;
+        }
+        state.columnValueCache.delete(String(columnIndex));
+      }
+
+      function getCachedColumnUniqueValues(columnIndex) {
+        const cacheKey = String(columnIndex);
+        const cached = state.columnValueCache.get(cacheKey);
+        if (cached) return cached;
         const counts = new Map();
         for (const row of state.rows) {
           const value = row[columnIndex] == null ? "" : String(row[columnIndex]);
           counts.set(value, (counts.get(value) || 0) + 1);
         }
-        return [...counts.entries()]
+        const values = [...counts.entries()]
           .map(([value, count]) => ({ value, count }))
           .sort((a, b) => compareCells(a.value, b.value));
+        state.columnValueCache.set(cacheKey, values);
+        return values;
       }
 
       function getColumnFilter(columnIndex) {
@@ -1909,28 +1927,122 @@ self.onmessage = (event) => {
         return Boolean(getColumnFilter(columnIndex));
       }
 
-      function getSelectedFilterValues(columnIndex) {
-        const filter = getColumnFilter(columnIndex);
-        if (filter) return new Set(filter.allowedValues);
-        return new Set(getColumnUniqueValues(columnIndex).map((item) => item.value));
+      function cloneColumnFilter(filter) {
+        if (!filter) return null;
+        if (filter.allowedValues) return { mode: "include", values: new Set(filter.allowedValues) };
+        return {
+          mode: filter.mode === "exclude" ? "exclude" : "include",
+          values: new Set(filter.values || []),
+        };
       }
 
-      function normalizeColumnFilter(columnIndex, selectedValues) {
-        const uniqueValues = getColumnUniqueValues(columnIndex).map((item) => item.value);
-        if (selectedValues.size === uniqueValues.length) {
-          delete state.columnFilters[String(columnIndex)];
+      function isColumnFilterValueSelected(columnIndex, value) {
+        const filter = getColumnFilter(columnIndex);
+        if (!filter) return true;
+        if (filter.allowedValues) return filter.allowedValues.has(value);
+        if (filter.mode === "exclude") return !filter.values.has(value);
+        return filter.values.has(value);
+      }
+
+      function getColumnFilterSelectedCount(columnIndex, allValues) {
+        const filter = getColumnFilter(columnIndex);
+        if (!filter) return allValues.length;
+        if (filter.allowedValues) return Math.min(filter.allowedValues.size, allValues.length);
+        if (filter.mode === "exclude") return Math.max(0, allValues.length - filter.values.size);
+        return Math.min(filter.values.size, allValues.length);
+      }
+
+      function normalizeColumnFilter(columnIndex, filter, allValues = getColumnUniqueValues(columnIndex)) {
+        const key = String(columnIndex);
+        const next = cloneColumnFilter(filter);
+        if (!next) {
+          delete state.columnFilters[key];
           return;
         }
-        state.columnFilters[String(columnIndex)] = { allowedValues: new Set(selectedValues) };
+        if (next.mode === "exclude") {
+          if (!next.values.size) delete state.columnFilters[key];
+          else state.columnFilters[key] = next;
+          return;
+        }
+        const selectedEveryValue = allValues.length > 0 && allValues.every((item) => next.values.has(item.value));
+        if (selectedEveryValue) {
+          delete state.columnFilters[key];
+          return;
+        }
+        state.columnFilters[key] = next;
       }
 
-      function rowPassesColumnFilters(row) {
-        for (const [columnKey, filter] of Object.entries(state.columnFilters)) {
-          const columnIndex = Number(columnKey);
+      function updateColumnFilterValue(columnIndex, value, checked, allValues = getColumnUniqueValues(columnIndex)) {
+        let next = cloneColumnFilter(getColumnFilter(columnIndex));
+        if (!next) {
+          if (checked) return;
+          next = { mode: "exclude", values: new Set([value]) };
+        } else if (next.mode === "exclude") {
+          if (checked) next.values.delete(value);
+          else next.values.add(value);
+        } else if (checked) {
+          next.values.add(value);
+        } else {
+          next.values.delete(value);
+        }
+        normalizeColumnFilter(columnIndex, next, allValues);
+      }
+
+      function updateColumnFilterValues(columnIndex, items, checked, allValues = getColumnUniqueValues(columnIndex)) {
+        if (checked && items.length === allValues.length) {
+          clearColumnFilter(columnIndex);
+          return;
+        }
+        const itemValues = items.map((item) => item.value);
+        let next = cloneColumnFilter(getColumnFilter(columnIndex));
+        if (!next) {
+          if (checked) return;
+          next = itemValues.length === allValues.length
+            ? { mode: "include", values: new Set() }
+            : { mode: "exclude", values: new Set(itemValues) };
+        } else if (next.mode === "exclude") {
+          for (const value of itemValues) {
+            if (checked) next.values.delete(value);
+            else next.values.add(value);
+          }
+        } else {
+          for (const value of itemValues) {
+            if (checked) next.values.add(value);
+            else next.values.delete(value);
+          }
+        }
+        normalizeColumnFilter(columnIndex, next, allValues);
+      }
+
+      function getActiveColumnFilters() {
+        return Object.entries(state.columnFilters).map(([columnKey, filter]) => ({
+          columnIndex: Number(columnKey),
+          filter,
+        }));
+      }
+
+      function columnFilterAllowsValue(filter, value) {
+        if (!filter) return true;
+        if (filter.allowedValues) return filter.allowedValues.has(value);
+        if (filter.mode === "exclude") return !filter.values.has(value);
+        return filter.values.has(value);
+      }
+
+      function rowPassesColumnFilters(row, activeColumnFilters = getActiveColumnFilters()) {
+        for (const { columnIndex, filter } of activeColumnFilters) {
           const value = row[columnIndex] == null ? "" : String(row[columnIndex]);
-          if (!filter.allowedValues.has(value)) return false;
+          if (!columnFilterAllowsValue(filter, value)) return false;
         }
         return true;
+      }
+
+      function clearColumnFilter(columnIndex) {
+        if (columnIndex < 0) return;
+        delete state.columnFilters[String(columnIndex)];
+      }
+
+      function clearAllColumnFilters() {
+        state.columnFilters = {};
       }
 
       function rowPassesHiddenRows(rowIndex) {
@@ -1952,13 +2064,14 @@ self.onmessage = (event) => {
       function recomputeView() {
         const query = els.searchInput.value;
         const matchedOnly = els.matchedOnlyInput.checked;
+        const activeColumnFilters = getActiveColumnFilters();
         state.matchedRows = new Set();
         const base = [];
 
         for (let index = 0; index < state.rows.length; index += 1) {
           const row = state.rows[index];
           if (!rowPassesHiddenRows(index)) continue;
-          if (!rowPassesColumnFilters(row)) continue;
+          if (!rowPassesColumnFilters(row, activeColumnFilters)) continue;
           const hit = query ? rowMatches(row) : false;
           if (hit) state.matchedRows.add(index);
           if (!query || !matchedOnly || hit) base.push(index);
@@ -2530,11 +2643,11 @@ self.onmessage = (event) => {
         els.columnFilterSearchInput.focus();
       }
 
-      function getMenuFilteredValues() {
+      function getMenuFilteredValues(allValues = null) {
         const columnIndex = state.columnFilterMenu.columnIndex;
         if (columnIndex < 0) return [];
         const query = state.columnFilterMenu.query;
-        const values = getColumnUniqueValues(columnIndex);
+        const values = allValues || getColumnUniqueValues(columnIndex);
         if (!query) return values;
         const needle = normalizeForSearch(query, els.caseSensitiveInput.checked);
         return values.filter((item) => normalizeForSearch(item.value, els.caseSensitiveInput.checked).includes(needle));
@@ -2549,10 +2662,9 @@ self.onmessage = (event) => {
         }
 
         const allValues = getColumnUniqueValues(columnIndex);
-        const visibleValues = getMenuFilteredValues();
-        const selectedValues = getSelectedFilterValues(columnIndex);
+        const visibleValues = getMenuFilteredValues(allValues);
         const shownValues = visibleValues.slice(0, 500);
-        const selectedCount = allValues.filter((item) => selectedValues.has(item.value)).length;
+        const selectedCount = getColumnFilterSelectedCount(columnIndex, allValues);
         els.columnFilterSummary.textContent = `已选择 ${selectedCount} / ${allValues.length} 个值，当前显示 ${shownValues.length} 个`;
 
         if (!shownValues.length) {
@@ -2568,12 +2680,9 @@ self.onmessage = (event) => {
           const label = document.createElement("label");
           const checkbox = document.createElement("input");
           checkbox.type = "checkbox";
-          checkbox.checked = selectedValues.has(item.value);
+          checkbox.checked = isColumnFilterValueSelected(columnIndex, item.value);
           checkbox.addEventListener("change", () => {
-            const next = getSelectedFilterValues(columnIndex);
-            if (checkbox.checked) next.add(item.value);
-            else next.delete(item.value);
-            normalizeColumnFilter(columnIndex, next);
+            updateColumnFilterValue(columnIndex, item.value, checkbox.checked, allValues);
             recomputeView();
             renderColumnFilterValues();
           });
@@ -2595,12 +2704,8 @@ self.onmessage = (event) => {
       function updateFilterValuesForVisible(checked) {
         const columnIndex = state.columnFilterMenu.columnIndex;
         if (columnIndex < 0) return;
-        const next = getSelectedFilterValues(columnIndex);
-        for (const item of getMenuFilteredValues()) {
-          if (checked) next.add(item.value);
-          else next.delete(item.value);
-        }
-        normalizeColumnFilter(columnIndex, next);
+        const allValues = getColumnUniqueValues(columnIndex);
+        updateColumnFilterValues(columnIndex, getMenuFilteredValues(allValues), checked, allValues);
         recomputeView();
         renderColumnFilterValues();
       }
@@ -2608,7 +2713,7 @@ self.onmessage = (event) => {
       function clearCurrentColumnFilter() {
         const columnIndex = state.columnFilterMenu.columnIndex;
         if (columnIndex < 0) return;
-        delete state.columnFilters[String(columnIndex)];
+        clearColumnFilter(columnIndex);
         recomputeView();
         renderColumnFilterValues();
       }
@@ -2629,7 +2734,7 @@ self.onmessage = (event) => {
       }
 
       function clearAllFilters() {
-        state.columnFilters = {};
+        clearAllColumnFilters();
         state.hiddenRows = new Set();
         state.sort = { column: -1, direction: "none" };
         els.searchInput.value = "";
@@ -2949,7 +3054,7 @@ self.onmessage = (event) => {
           const columnIndex = Number(columnKey);
           if (columnIndex === removedColumnIndex) continue;
           const nextIndex = columnIndex > removedColumnIndex ? columnIndex - 1 : columnIndex;
-          next[String(nextIndex)] = filter;
+          next[String(nextIndex)] = cloneColumnFilter(filter);
         }
         return next;
       }
@@ -3022,6 +3127,7 @@ self.onmessage = (event) => {
           MIN_COL_WIDTH,
           Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, columnName.length * 10 + 36)),
         );
+        invalidateColumnValueCache();
         state.issues = analyzeRows(state.headers, state.rows);
         state.selected = state.rows.length ? { rowIndex: 0, columnIndex } : null;
         updateSearchColumns();
@@ -3052,6 +3158,7 @@ self.onmessage = (event) => {
           MIN_COL_WIDTH,
           Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, columnName.length * 10 + 36)),
         );
+        invalidateColumnValueCache();
         state.issues = analyzeRows(state.headers, state.rows);
         state.selected = state.rows.length ? { rowIndex: 0, columnIndex } : null;
         recomputeView();
@@ -3095,6 +3202,7 @@ self.onmessage = (event) => {
         state.columnFilters = reindexColumnFilters(state.columnFilters, columnIndex);
         state.customColumns = reindexColumnSet(state.customColumns, columnIndex);
         state.cellMeta = reindexCellMeta(state.cellMeta, columnIndex);
+        invalidateColumnValueCache();
         if (state.sort.column === columnIndex) state.sort = { column: -1, direction: "none" };
         else if (state.sort.column > columnIndex) state.sort.column -= 1;
         normalizeSelectionAfterColumnDelete(columnIndex);
@@ -3157,7 +3265,8 @@ self.onmessage = (event) => {
         state.columnWidths = state.headers.map((header) =>
           Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, String(header).length * 10 + 36))),
         );
-        state.columnFilters = {};
+        clearAllColumnFilters();
+        invalidateColumnValueCache();
         state.customColumns = new Set();
         state.concatenateColumnItems = [];
         state.concatenateDragIndex = -1;
@@ -3585,6 +3694,11 @@ self.onmessage = (event) => {
         renderDetail();
       }, 180);
 
+      const debouncedColumnFilterSearch = debounce(() => {
+        state.columnFilterMenu.query = els.columnFilterSearchInput.value;
+        renderColumnFilterValues();
+      }, 120);
+
       els.chooseFileButton.addEventListener("click", openFileWithPicker);
       els.fileInput.addEventListener("change", (event) => handleFiles(event.target.files, null));
       els.dropZone.addEventListener("dragover", (event) => {
@@ -3717,10 +3831,7 @@ self.onmessage = (event) => {
         recomputeView();
         closeColumnFilterMenu();
       });
-      els.columnFilterSearchInput.addEventListener("input", () => {
-        state.columnFilterMenu.query = els.columnFilterSearchInput.value;
-        renderColumnFilterValues();
-      });
+      els.columnFilterSearchInput.addEventListener("input", debouncedColumnFilterSearch);
       els.clearColumnFilterButton.addEventListener("click", clearCurrentColumnFilter);
       els.selectAllFilterValuesButton.addEventListener("click", () => updateFilterValuesForVisible(true));
       els.selectNoFilterValuesButton.addEventListener("click", () => updateFilterValuesForVisible(false));

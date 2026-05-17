@@ -150,6 +150,22 @@ test("users can delete only custom columns", () => {
   assert.match(html, /deleteCustomColumnButton\.disabled\s*=\s*!isCustomColumn/, "delete should be disabled for source columns");
 });
 
+test("large column filters avoid repeated full-table work", () => {
+  assert.match(html, /columnValueCache/, "missing per-column unique value cache");
+  assert.match(html, /function invalidateColumnValueCache\(/, "missing column filter cache invalidation");
+  assert.match(html, /function getCachedColumnUniqueValues\(/, "missing cached unique value accessor");
+  assert.match(html, /function isColumnFilterValueSelected\(/, "missing selection helper that avoids default all-value sets");
+  assert.match(html, /mode:\s*"exclude"/, "filter model should support exclusions for mostly-selected large columns");
+  assert.match(html, /const activeColumnFilters = getActiveColumnFilters\(\)/, "row filtering should precompute active filters once");
+  assert.match(html, /rowPassesColumnFilters\(row,\s*activeColumnFilters\)/, "row filtering should reuse precomputed filters");
+  assert.match(html, /const debouncedColumnFilterSearch = debounce\(/, "column filter search should be debounced");
+  assert.doesNotMatch(
+    html,
+    /return new Set\(getColumnUniqueValues\(columnIndex\)\.map/,
+    "default selected filter state should not allocate a Set for every unique value",
+  );
+});
+
 test("file import button is protected from wrapping in the compact header", () => {
   assert.match(html, /#chooseFileButton\s*{[\s\S]*?white-space:\s*nowrap/, "choose file button should not wrap");
   assert.match(html, /\.file-name-text\s*{[\s\S]*?text-overflow:\s*ellipsis/, "file name should ellipsize in the import area");
