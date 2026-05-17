@@ -95,6 +95,39 @@ test("users can add derived columns", () => {
   assert.match(html, /mode === "copy"/, "missing copy column mode");
 });
 
+test("users can create concatenated columns", () => {
+  for (const id of [
+    "concatenateColumnButton",
+    "concatenateColumnPopover",
+    "concatenateColumnNameInput",
+    "concatenateRows",
+    "addConcatenateRowButton",
+    "cancelConcatenateColumnButton",
+    "confirmConcatenateColumnButton",
+    "concatenateValidationStatus",
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);
+  }
+
+  assert.match(html, /openConcatenateColumnPopover/, "missing concatenate popover opener");
+  assert.match(html, /renderConcatenateRows/, "missing concatenate row renderer");
+  assert.match(html, /resolveConcatenateItems/, "missing concatenate item resolver");
+  assert.match(html, /buildConcatenatedValue/, "missing concatenated value builder");
+  assert.match(html, /addConcatenatedColumn/, "missing concatenated column creator");
+  assert.match(html, /```markdown/, "concatenated output should include markdown fences");
+  assert.match(html, /join\("\\n\\n"\)/, "concatenated blocks should be separated by a blank line");
+});
+
+test("users can rename and restore individual column names", () => {
+  for (const id of ["renameColumnInput", "renameColumnButton", "restoreColumnNameButton"]) {
+    assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);
+  }
+
+  assert.match(html, /originalHeaders/, "missing original header state");
+  assert.match(html, /renameColumn/, "missing column rename function");
+  assert.match(html, /restoreColumnName/, "missing restore column name function");
+});
+
 test("users can delete only custom columns", () => {
   assert.match(html, /deleteCustomColumn/, "missing custom column deletion function");
   assert.match(html, /isCustomColumn/, "missing custom column predicate");
@@ -110,6 +143,15 @@ test("file import button is protected from wrapping in the compact header", () =
 test("large text thresholds match current product requirements", () => {
   assert.match(html, /const PREVIEW_LIMIT = 500;/, "cell preview threshold should be 500 chars");
   assert.match(html, /const DETAIL_CHUNK = 100000;/, "detail chunk should be 100000 chars");
+});
+
+test("narrow tables keep natural column width", () => {
+  assert.doesNotMatch(
+    html,
+    /\.grid-canvas\s*{[\s\S]*?min-width:\s*100%/,
+    "grid canvas should not force narrow tables to stretch to viewport width",
+  );
+  assert.match(html, /getTotalWidth\(\)/, "grid should still use computed total column width");
 });
 
 test("inline application script parses", () => {
