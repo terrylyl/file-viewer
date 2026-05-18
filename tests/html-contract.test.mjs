@@ -184,6 +184,20 @@ test("table supports keyboard navigation and range selection", () => {
   assert.doesNotMatch(html, /button\.addEventListener\("click",\s*\(\) => toggleSort\(col\)\)/, "column header click should no longer sort");
 });
 
+test("selection copy is discoverable and supports keyboard shortcuts", () => {
+  assert.match(html, /id="copyCellButton" disabled>复制选区<\/button>/, "detail copy button should be labeled for selection copy");
+  assert.match(html, /function handleCopyShortcut\(/, "missing Ctrl/Cmd+C copy shortcut handler");
+  assert.match(html, /function isEditableShortcutTarget\(/, "copy shortcut should ignore editable fields");
+  assert.match(html, /copyText\(getSelectionText\(\)\)/, "copy shortcut should copy the active selection");
+  assert.match(html, /document\.addEventListener\("keydown",\s*handleCopyShortcut\)/, "document should listen for copy shortcuts");
+});
+
+test("context menu closes when focus moves away", () => {
+  assert.match(html, /document\.addEventListener\("pointerdown",\s*handleDocumentPointerDown\)/, "context menu should close on pointerdown outside");
+  assert.match(html, /function handleDocumentPointerDown\(/, "missing shared pointerdown close handler");
+  assert.match(html, /window\.addEventListener\("blur",\s*closeContextMenu\)/, "context menu should close when the window loses focus");
+});
+
 test("file import button is protected from wrapping in the compact header", () => {
   assert.match(html, /#chooseFileButton\s*{[\s\S]*?white-space:\s*nowrap/, "choose file button should not wrap");
   assert.match(html, /\.file-name-text\s*{[\s\S]*?text-overflow:\s*ellipsis/, "file name should ellipsize in the import area");

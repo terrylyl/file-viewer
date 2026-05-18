@@ -1083,7 +1083,7 @@
           <div>
             <div class="detail-tools">
               <input class="detail-search" id="detailSearchInput" type="search" placeholder="在全文中搜索" />
-              <button id="copyCellButton" disabled>复制全文</button>
+              <button id="copyCellButton" disabled>复制选区</button>
               <button id="openModalButton" disabled>放大</button>
               <label><input id="monoInput" type="checkbox" /> 等宽</label>
             </div>
@@ -2534,6 +2534,20 @@ self.onmessage = (event) => {
         if (moveSelectionByKeyboard(event)) event.preventDefault();
       }
 
+      function isEditableShortcutTarget(target) {
+        if (!(target instanceof Element)) return false;
+        const tagName = target.tagName.toLowerCase();
+        return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
+      }
+
+      function handleCopyShortcut(event) {
+        if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "c") return;
+        if (isEditableShortcutTarget(event.target)) return;
+        if (!state.selected) return;
+        event.preventDefault();
+        copyText(getSelectionText());
+      }
+
       function startSelectionDrag(type, anchorRowIndex, anchorColumnIndex, event) {
         if (event.button !== 0) return;
         event.preventDefault();
@@ -2908,6 +2922,10 @@ self.onmessage = (event) => {
 
       function closeContextMenu() {
         els.contextMenu.classList.remove("open");
+      }
+
+      function handleDocumentPointerDown(event) {
+        if (!eventPathContains(event, els.contextMenu)) closeContextMenu();
       }
 
       function eventPathContains(event, element) {
@@ -4165,6 +4183,7 @@ self.onmessage = (event) => {
         if (action === "view-full" && state.selected) openModalForCell(state.selected.rowIndex, state.selected.columnIndex);
         closeContextMenu();
       });
+      document.addEventListener("pointerdown", handleDocumentPointerDown);
       document.addEventListener("click", (event) => {
         if (!eventPathContains(event, els.columnsPopover) && !eventPathContains(event, els.columnsButton)) {
           els.columnsPopover.classList.remove("open");
@@ -4183,6 +4202,8 @@ self.onmessage = (event) => {
       document.addEventListener("mousemove", onResizeMove);
       document.addEventListener("mouseup", stopResize);
       document.addEventListener("mouseup", stopSelectionDrag);
+      document.addEventListener("keydown", handleCopyShortcut);
+      window.addEventListener("blur", closeContextMenu);
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
           closeContextMenu();
