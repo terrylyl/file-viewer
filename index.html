@@ -379,6 +379,17 @@
         box-shadow: inset 0 -2px 0 var(--danger);
       }
 
+      .header-cell.selected-column,
+      .row-number.selected-row {
+        background: #d7f2ec;
+        color: #0c514b;
+      }
+
+      .row-number.select-all-corner {
+        justify-content: center;
+        cursor: pointer;
+      }
+
       .header-sort-button {
         border: 0;
         background: transparent;
@@ -491,6 +502,10 @@
         outline: 2px solid var(--accent);
         outline-offset: -2px;
         background: var(--selected) !important;
+      }
+
+      .cell.range-selected {
+        background: #e6f7f2 !important;
       }
 
       .cell.long {
@@ -1735,6 +1750,9 @@ self.onmessage = (event) => {
         wrapCells: false,
         sort: { column: -1, direction: "none" },
         selected: null,
+        selectionAnchor: null,
+        selectionRange: null,
+        selectionDrag: null,
         detailVisibleChars: DETAIL_CHUNK,
         modalVisibleChars: MODAL_CHUNK,
         modalCell: null,
@@ -2084,6 +2102,7 @@ self.onmessage = (event) => {
         }
 
         state.viewIndices = base;
+        normalizeSelectionForCurrentView();
         els.rightStatus.textContent = `${state.viewIndices.length} / ${state.rows.length} 行 · ${state.headers.length} 列`;
         renderFilteredRowStats();
         renderColumnOverview();
@@ -2278,6 +2297,267 @@ self.onmessage = (event) => {
         appendLinkedText(container, text, query, meta?.link || "");
       }
 
+      function getVisibleRowPosition(rowIndex) {
+        return state.viewIndices.indexOf(rowIndex);
+      }
+
+      function getVisibleColumnPosition(columnIndex) {
+        return getVisibleColumnIndexes().indexOf(columnIndex);
+      }
+
+      function getFirstVisibleCell() {
+        const columns = getVisibleColumnIndexes();
+        if (!state.viewIndices.length || !columns.length) return null;
+        return { rowIndex: state.viewIndices[0], columnIndex: columns[0] };
+      }
+
+      function getSelectionEndpoints(range = state.selectionRange) {
+        if (!range) return null;
+        const columns = getVisibleColumnIndexes();
+        if (!state.viewIndices.length || !columns.length) return null;
+        if (range.type === "all") {
+          return {
+            startRowPosition: 0,
+            endRowPosition: state.viewIndices.length - 1,
+            startColumnPosition: 0,
+            endColumnPosition: columns.length - 1,
+          };
+        }
+        const anchorRowPosition = range.anchorRowIndex == null ? 0 : getVisibleRowPosition(range.anchorRowIndex);
+        const focusRowPosition = range.focusRowIndex == null ? state.viewIndices.length - 1 : getVisibleRowPosition(range.focusRowIndex);
+        const anchorColumnPosition = range.anchorColumnIndex == null ? 0 : getVisibleColumnPosition(range.anchorColumnIndex);
+        const focusColumnPosition = range.focusColumnIndex == null ? columns.length - 1 : getVisibleColumnPosition(range.focusColumnIndex);
+        const rowA = range.type === "columns" ? 0 : anchorRowPosition;
+        const rowB = range.type === "columns" ? state.viewIndices.length - 1 : focusRowPosition;
+        const colA = range.type === "rows" ? 0 : anchorColumnPosition;
+        const colB = range.type === "rows" ? columns.length - 1 : focusColumnPosition;
+        if (rowA < 0 || rowB < 0 || colA < 0 || colB < 0) return null;
+        return {
+          startRowPosition: Math.min(rowA, rowB),
+          endRowPosition: Math.max(rowA, rowB),
+          startColumnPosition: Math.min(colA, colB),
+          endColumnPosition: Math.max(colA, colB),
+        };
+      }
+
+      function isCellInSelection(rowIndex, columnIndex) {
+        const endpoints = getSelectionEndpoints();
+        if (!endpoints) return false;
+        const rowPosition = getVisibleRowPosition(rowIndex);
+        const columnPosition = getVisibleColumnPosition(columnIndex);
+        return (
+          rowPosition >= endpoints.startRowPosition &&
+          rowPosition <= endpoints.endRowPosition &&
+          columnPosition >= endpoints.startColumnPosition &&
+          columnPosition <= endpoints.endColumnPosition
+        );
+      }
+
+      function isRowInSelection(rowIndex) {
+        const endpoints = getSelectionEndpoints();
+        if (!endpoints) return false;
+        const rowPosition = getVisibleRowPosition(rowIndex);
+        return rowPosition >= endpoints.startRowPosition && rowPosition <= endpoints.endRowPosition;
+      }
+
+      function isColumnInSelection(columnIndex) {
+        const endpoints = getSelectionEndpoints();
+        if (!endpoints) return false;
+        const columnPosition = getVisibleColumnPosition(columnIndex);
+        return columnPosition >= endpoints.startColumnPosition && columnPosition <= endpoints.endColumnPosition;
+      }
+
+      function setFocusedCell(rowIndex, columnIndex) {
+        state.selected = { rowIndex, columnIndex };
+        state.detailVisibleChars = DETAIL_CHUNK;
+      }
+
+      function setSelection(range, focusCell = null) {
+        state.selectionRange = range;
+        if (focusCell) setFocusedCell(focusCell.rowIndex, focusCell.columnIndex);
+        else if (!state.selected) {
+          const first = getFirstVisibleCell();
+          if (first) setFocusedCell(first.rowIndex, first.columnIndex);
+        }
+      }
+
+      function selectCellRange(anchorRowIndex, anchorColumnIndex, focusRowIndex, focusColumnIndex, options = {}) {
+        const focusCell = { rowIndex: focusRowIndex, columnIndex: focusColumnIndex };
+        if (!options.preserveAnchor) state.selectionAnchor = { rowIndex: anchorRowIndex, columnIndex: anchorColumnIndex };
+        setSelection(
+          { type: "range", anchorRowIndex, anchorColumnIndex, focusRowIndex, focusColumnIndex },
+          focusCell,
+        );
+        if (!options.silent) {
+          ensureCellVisible(focusRowIndex, focusColumnIndex);
+          renderGrid();
+          renderDetail();
+        }
+      }
+
+      function selectRowRange(anchorRowIndex, focusRowIndex, options = {}) {
+        const columnIndex = state.selected?.columnIndex ?? getVisibleColumnIndexes()[0] ?? 0;
+        if (!options.preserveAnchor) state.selectionAnchor = { rowIndex: anchorRowIndex, columnIndex };
+        setSelection(
+          { type: "rows", anchorRowIndex, anchorColumnIndex: columnIndex, focusRowIndex, focusColumnIndex: columnIndex },
+          { rowIndex: focusRowIndex, columnIndex },
+        );
+        if (!options.silent) {
+          ensureCellVisible(focusRowIndex, columnIndex);
+          renderGrid();
+          renderDetail();
+        }
+      }
+
+      function selectColumnRange(anchorColumnIndex, focusColumnIndex, options = {}) {
+        const rowIndex = state.selected?.rowIndex ?? state.viewIndices[0] ?? 0;
+        if (!options.preserveAnchor) state.selectionAnchor = { rowIndex, columnIndex: anchorColumnIndex };
+        setSelection(
+          { type: "columns", anchorRowIndex: rowIndex, anchorColumnIndex, focusRowIndex: rowIndex, focusColumnIndex },
+          { rowIndex, columnIndex: focusColumnIndex },
+        );
+        if (!options.silent) {
+          ensureCellVisible(rowIndex, focusColumnIndex);
+          renderGrid();
+          renderDetail();
+        }
+      }
+
+      function selectAllVisibleCells() {
+        const first = getFirstVisibleCell();
+        if (!first) return;
+        const columns = getVisibleColumnIndexes();
+        const last = { rowIndex: state.viewIndices[state.viewIndices.length - 1], columnIndex: columns[columns.length - 1] };
+        state.selectionAnchor = first;
+        setSelection(
+          { type: "all", anchorRowIndex: first.rowIndex, anchorColumnIndex: first.columnIndex, focusRowIndex: last.rowIndex, focusColumnIndex: last.columnIndex },
+          first,
+        );
+        renderGrid();
+        renderDetail();
+      }
+
+      function clearSelectionToSelected() {
+        if (!state.selected) {
+          state.selectionAnchor = null;
+          state.selectionRange = null;
+          return;
+        }
+        state.selectionAnchor = { ...state.selected };
+        state.selectionRange = {
+          type: "range",
+          anchorRowIndex: state.selected.rowIndex,
+          anchorColumnIndex: state.selected.columnIndex,
+          focusRowIndex: state.selected.rowIndex,
+          focusColumnIndex: state.selected.columnIndex,
+        };
+      }
+
+      function normalizeSelectionForCurrentView() {
+        const columns = getVisibleColumnIndexes();
+        const first = getFirstVisibleCell();
+        if (!first) {
+          state.selected = null;
+          clearSelectionToSelected();
+          return;
+        }
+        if (
+          !state.selected ||
+          !state.viewIndices.includes(state.selected.rowIndex) ||
+          !columns.includes(state.selected.columnIndex)
+        ) {
+          state.selected = first;
+          clearSelectionToSelected();
+          return;
+        }
+        if (!getSelectionEndpoints()) clearSelectionToSelected();
+      }
+
+      function ensureCellVisible(rowIndex, columnIndex) {
+        const rowPosition = getVisibleRowPosition(rowIndex);
+        const visibleColumns = getVisibleColumnIndexes();
+        const columnPosition = visibleColumns.indexOf(columnIndex);
+        if (rowPosition < 0 || columnPosition < 0) return;
+        const rowHeight = getCurrentRowHeight();
+        const rowTop = HEADER_HEIGHT + rowPosition * rowHeight;
+        const rowBottom = rowTop + rowHeight;
+        const viewportTop = els.gridViewport.scrollTop;
+        const viewportBottom = viewportTop + els.gridViewport.clientHeight;
+        if (rowTop < viewportTop) els.gridViewport.scrollTop = rowTop;
+        else if (rowBottom > viewportBottom) els.gridViewport.scrollTop = rowBottom - els.gridViewport.clientHeight;
+
+        let columnLeft = ROW_NUMBER_WIDTH;
+        for (let index = 0; index < columnPosition; index += 1) {
+          columnLeft += state.columnWidths[visibleColumns[index]] || DEFAULT_COL_WIDTH;
+        }
+        const columnRight = columnLeft + (state.columnWidths[columnIndex] || DEFAULT_COL_WIDTH);
+        const viewportLeft = els.gridViewport.scrollLeft;
+        const viewportRight = viewportLeft + els.gridViewport.clientWidth;
+        if (columnLeft < viewportLeft + ROW_NUMBER_WIDTH) els.gridViewport.scrollLeft = Math.max(0, columnLeft - ROW_NUMBER_WIDTH);
+        else if (columnRight > viewportRight) els.gridViewport.scrollLeft = columnRight - els.gridViewport.clientWidth;
+      }
+
+      function moveSelectionByKeyboard(event) {
+        const deltas = {
+          ArrowUp: [-1, 0],
+          ArrowDown: [1, 0],
+          ArrowLeft: [0, -1],
+          ArrowRight: [0, 1],
+        };
+        const delta = deltas[event.key];
+        if (!delta) return false;
+        const columns = getVisibleColumnIndexes();
+        if (!state.viewIndices.length || !columns.length) return true;
+        const current = state.selected || getFirstVisibleCell();
+        let rowPosition = getVisibleRowPosition(current.rowIndex);
+        let columnPosition = columns.indexOf(current.columnIndex);
+        if (rowPosition < 0) rowPosition = 0;
+        if (columnPosition < 0) columnPosition = 0;
+        rowPosition = Math.max(0, Math.min(state.viewIndices.length - 1, rowPosition + delta[0]));
+        columnPosition = Math.max(0, Math.min(columns.length - 1, columnPosition + delta[1]));
+        const next = { rowIndex: state.viewIndices[rowPosition], columnIndex: columns[columnPosition] };
+        if (event.shiftKey) {
+          const anchor = state.selectionAnchor || current || next;
+          selectCellRange(anchor.rowIndex, anchor.columnIndex, next.rowIndex, next.columnIndex, { preserveAnchor: true });
+        } else {
+          selectCell(next.rowIndex, next.columnIndex);
+        }
+        return true;
+      }
+
+      function handleGridKeyDown(event) {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+          event.preventDefault();
+          selectAllVisibleCells();
+          return;
+        }
+        if (moveSelectionByKeyboard(event)) event.preventDefault();
+      }
+
+      function startSelectionDrag(type, anchorRowIndex, anchorColumnIndex, event) {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        els.gridViewport.focus();
+        state.selectionDrag = { type, anchorRowIndex, anchorColumnIndex };
+        updateSelectionDrag(type, anchorRowIndex, anchorColumnIndex);
+      }
+
+      function updateSelectionDrag(type, rowIndex, columnIndex) {
+        if (!state.selectionDrag) return;
+        const drag = state.selectionDrag;
+        if (type === "row" || drag.type === "row") {
+          selectRowRange(drag.anchorRowIndex, rowIndex, { preserveAnchor: true });
+        } else if (type === "column" || drag.type === "column") {
+          selectColumnRange(drag.anchorColumnIndex, columnIndex, { preserveAnchor: true });
+        } else {
+          selectCellRange(drag.anchorRowIndex, drag.anchorColumnIndex, rowIndex, columnIndex, { preserveAnchor: true });
+        }
+      }
+
+      function stopSelectionDrag() {
+        state.selectionDrag = null;
+      }
+
       function renderHeader() {
         const visibleColumns = getVisibleColumnIndexes();
         els.headerRow.innerHTML = "";
@@ -2285,36 +2565,32 @@ self.onmessage = (event) => {
         els.headerRow.style.height = `${HEADER_HEIGHT}px`;
 
         const rowNumber = document.createElement("div");
-        rowNumber.className = "row-number";
+        rowNumber.className = `row-number select-all-corner${state.selectionRange?.type === "all" ? " selected-row" : ""}`;
         rowNumber.textContent = "#";
+        rowNumber.title = "Select all visible cells";
+        rowNumber.addEventListener("mousedown", (event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          els.gridViewport.focus();
+          selectAllVisibleCells();
+        });
         els.headerRow.appendChild(rowNumber);
 
         for (const col of visibleColumns) {
           const cell = document.createElement("div");
           cell.className = "header-cell";
+          if (isColumnInSelection(col)) cell.classList.add("selected-column");
           const duplicate = isDuplicateColumn(col);
           if (duplicate) cell.classList.add("duplicate-column");
           cell.style.flex = `0 0 ${state.columnWidths[col] || DEFAULT_COL_WIDTH}px`;
-          cell.draggable = true;
+          cell.draggable = false;
           cell.dataset.column = String(col);
-          cell.addEventListener("dragstart", (event) => {
-            state.dragColumn = col;
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", String(col));
-          });
-          cell.addEventListener("dragover", (event) => {
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "move";
-          });
-          cell.addEventListener("drop", (event) => {
-            event.preventDefault();
-            const fromColumn = state.dragColumn ?? Number(event.dataTransfer.getData("text/plain"));
-            dragColumn(fromColumn, col);
-            state.dragColumn = null;
-          });
-          cell.addEventListener("dragend", () => {
-            state.dragColumn = null;
-          });
+          cell.addEventListener("mousedown", (event) =>
+            startSelectionDrag("column", state.selected?.rowIndex ?? state.viewIndices[0] ?? 0, col, event),
+          );
+          cell.addEventListener("mouseenter", () =>
+            updateSelectionDrag("column", state.selected?.rowIndex ?? state.viewIndices[0] ?? 0, col),
+          );
 
           const button = document.createElement("button");
           button.className = "header-sort-button";
@@ -2334,7 +2610,7 @@ self.onmessage = (event) => {
           sort.textContent =
             state.sort.column === col ? (state.sort.direction === "asc" ? "▲" : state.sort.direction === "desc" ? "▼" : "") : "";
           button.append(title, sort);
-          button.addEventListener("click", () => toggleSort(col));
+          button.addEventListener("click", () => selectColumnRange(col, col));
 
           const filterButton = document.createElement("button");
           filterButton.className = `header-filter-button${hasColumnFilter(col) ? " active" : ""}`;
@@ -2344,6 +2620,7 @@ self.onmessage = (event) => {
           filterIcon.className = "filter-indicator";
           filterIcon.textContent = hasColumnFilter(col) ? "●" : "▾";
           filterButton.appendChild(filterIcon);
+          filterButton.addEventListener("mousedown", (event) => event.stopPropagation());
           filterButton.addEventListener("click", (event) => {
             event.stopPropagation();
             openColumnFilterMenu(event.currentTarget, col);
@@ -2395,7 +2672,14 @@ self.onmessage = (event) => {
 
           const rowNumber = document.createElement("div");
           rowNumber.className = "row-number";
+          if (isRowInSelection(rowIndex)) rowNumber.classList.add("selected-row");
           rowNumber.textContent = String(rowIndex + 2);
+          rowNumber.addEventListener("mousedown", (event) =>
+            startSelectionDrag("row", rowIndex, state.selected?.columnIndex ?? visibleColumns[0] ?? 0, event),
+          );
+          rowNumber.addEventListener("mouseenter", () =>
+            updateSelectionDrag("row", rowIndex, state.selected?.columnIndex ?? visibleColumns[0] ?? 0),
+          );
           rowEl.appendChild(rowNumber);
 
           for (const col of visibleColumns) {
@@ -2404,6 +2688,9 @@ self.onmessage = (event) => {
             const meta = getCellMeta(rowIndex, col);
             const cell = document.createElement("div");
             cell.className = `cell${summary.isLong && !state.wrapCells ? " long" : ""}`;
+            if (isCellInSelection(rowIndex, col)) {
+              cell.classList.add("range-selected");
+            }
             if (state.selected && state.selected.rowIndex === rowIndex && state.selected.columnIndex === col) {
               cell.classList.add("selected");
             }
@@ -2414,6 +2701,11 @@ self.onmessage = (event) => {
             renderCellDisplayContent(cell, state.wrapCells ? value : summary.text, els.searchInput.value, meta, {
               allowHtml: !summary.isLong || state.wrapCells,
             });
+            cell.addEventListener("mousedown", (event) => {
+              if (event.target.closest?.("a")) return;
+              startSelectionDrag("cell", rowIndex, col, event);
+            });
+            cell.addEventListener("mouseenter", () => updateSelectionDrag("cell", rowIndex, col));
             cell.addEventListener("click", () => selectCell(rowIndex, col));
             cell.addEventListener("dblclick", () => openModalForCell(rowIndex, col));
             cell.addEventListener("contextmenu", (event) => openContextMenu(event, rowIndex, col));
@@ -2480,8 +2772,9 @@ self.onmessage = (event) => {
       }
 
       function selectCell(rowIndex, columnIndex) {
-        state.selected = { rowIndex, columnIndex };
-        state.detailVisibleChars = DETAIL_CHUNK;
+        setFocusedCell(rowIndex, columnIndex);
+        clearSelectionToSelected();
+        ensureCellVisible(rowIndex, columnIndex);
         renderGrid();
         renderDetail();
       }
@@ -2489,6 +2782,18 @@ self.onmessage = (event) => {
       function getSelectedValue() {
         if (!state.selected) return "";
         return state.rows[state.selected.rowIndex]?.[state.selected.columnIndex] || "";
+      }
+
+      function getSelectionText() {
+        const endpoints = getSelectionEndpoints();
+        if (!endpoints) return getSelectedValue();
+        const columns = getVisibleColumnIndexes().slice(endpoints.startColumnPosition, endpoints.endColumnPosition + 1);
+        const lines = [];
+        for (let rowPosition = endpoints.startRowPosition; rowPosition <= endpoints.endRowPosition; rowPosition += 1) {
+          const row = state.rows[state.viewIndices[rowPosition]];
+          lines.push(columns.map((columnIndex) => row?.[columnIndex] || "").join("\t"));
+        }
+        return lines.join("\n");
       }
 
       function getLineCount(text) {
@@ -3088,6 +3393,7 @@ self.onmessage = (event) => {
         if (columnIndex === removedColumnIndex) columnIndex = Math.min(removedColumnIndex, state.headers.length - 1);
         else if (columnIndex > removedColumnIndex) columnIndex -= 1;
         state.selected = { rowIndex, columnIndex };
+        clearSelectionToSelected();
       }
 
       function addDerivedColumn({ name, mode, sourceColumnIndex }) {
@@ -3130,6 +3436,7 @@ self.onmessage = (event) => {
         invalidateColumnValueCache();
         state.issues = analyzeRows(state.headers, state.rows);
         state.selected = state.rows.length ? { rowIndex: 0, columnIndex } : null;
+        clearSelectionToSelected();
         updateSearchColumns();
         renderColumnPopover();
         renderColumnOverview();
@@ -3161,6 +3468,7 @@ self.onmessage = (event) => {
         invalidateColumnValueCache();
         state.issues = analyzeRows(state.headers, state.rows);
         state.selected = state.rows.length ? { rowIndex: 0, columnIndex } : null;
+        clearSelectionToSelected();
         recomputeView();
         refreshColumnDependentViews();
         closeConcatenateColumnPopover();
@@ -3274,6 +3582,8 @@ self.onmessage = (event) => {
         state.columnFilterMenu = { columnIndex: -1, query: "" };
         state.sort = { column: -1, direction: "none" };
         state.selected = state.rows.length && state.headers.length ? { rowIndex: 0, columnIndex: 0 } : null;
+        state.selectionDrag = null;
+        clearSelectionToSelected();
         updateSearchColumns();
         renderColumnPopover();
         renderColumnOverview();
@@ -3713,6 +4023,7 @@ self.onmessage = (event) => {
       });
 
       els.gridViewport.addEventListener("scroll", renderGrid, { passive: true });
+      els.gridViewport.addEventListener("keydown", handleGridKeyDown);
       els.searchInput.addEventListener("input", debouncedSearch);
       els.searchColumnSelect.addEventListener("change", recomputeView);
       els.sheetSelect.addEventListener("change", () => loadExcelSheet(els.sheetSelect.value));
@@ -3735,7 +4046,7 @@ self.onmessage = (event) => {
       els.clearAllFiltersButton.addEventListener("click", clearAllFilters);
       els.exportCsvButton.addEventListener("click", exportFilteredCsv);
       els.exportIssuesButton.addEventListener("click", exportIssueReport);
-      els.copyCellButton.addEventListener("click", () => copyText(getSelectedValue()));
+      els.copyCellButton.addEventListener("click", () => copyText(getSelectionText()));
       els.openModalButton.addEventListener("click", () => {
         if (state.selected) openModalForCell(state.selected.rowIndex, state.selected.columnIndex);
       });
@@ -3871,6 +4182,7 @@ self.onmessage = (event) => {
       });
       document.addEventListener("mousemove", onResizeMove);
       document.addEventListener("mouseup", stopResize);
+      document.addEventListener("mouseup", stopSelectionDrag);
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
           closeContextMenu();

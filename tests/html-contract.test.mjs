@@ -166,6 +166,24 @@ test("large column filters avoid repeated full-table work", () => {
   );
 });
 
+test("table supports keyboard navigation and range selection", () => {
+  assert.match(html, /selectionAnchor/, "missing selection anchor state");
+  assert.match(html, /selectionRange/, "missing selection range state");
+  assert.match(html, /selectionDrag/, "missing drag selection state");
+  assert.match(html, /function moveSelectionByKeyboard\(/, "missing keyboard navigation handler");
+  assert.match(html, /function selectCellRange\(/, "missing rectangular cell selection");
+  assert.match(html, /function selectRowRange\(/, "missing row range selection");
+  assert.match(html, /function selectColumnRange\(/, "missing column range selection");
+  assert.match(html, /function selectAllVisibleCells\(/, "missing visible-table select all");
+  assert.match(html, /function startSelectionDrag\(/, "missing drag selection start");
+  assert.match(html, /function updateSelectionDrag\(/, "missing drag selection update");
+  assert.match(html, /function isCellInSelection\(/, "missing selection membership predicate");
+  assert.match(html, /gridViewport\.addEventListener\("keydown",\s*handleGridKeyDown\)/, "grid should handle keyboard navigation");
+  assert.match(html, /document\.addEventListener\("mouseup",\s*stopSelectionDrag\)/, "drag selection should end on document mouseup");
+  assert.match(html, /button\.addEventListener\("click",\s*\(\) => selectColumnRange\(col,\s*col\)\)/, "column header click should select columns");
+  assert.doesNotMatch(html, /button\.addEventListener\("click",\s*\(\) => toggleSort\(col\)\)/, "column header click should no longer sort");
+});
+
 test("file import button is protected from wrapping in the compact header", () => {
   assert.match(html, /#chooseFileButton\s*{[\s\S]*?white-space:\s*nowrap/, "choose file button should not wrap");
   assert.match(html, /\.file-name-text\s*{[\s\S]*?text-overflow:\s*ellipsis/, "file name should ellipsize in the import area");
