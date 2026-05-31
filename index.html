@@ -205,6 +205,13 @@
         white-space: nowrap;
       }
 
+      .file-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
       .drop-zone.dragover {
         border-color: var(--accent);
         background: #e8f7f3;
@@ -248,6 +255,10 @@
         max-width: 180px;
       }
 
+      .export-split-input {
+        width: 74px;
+      }
+
       .file-stats {
         display: flex;
         align-items: center;
@@ -256,16 +267,22 @@
         flex-wrap: wrap;
       }
 
+      .column-overview-row {
+        width: 100%;
+        min-width: 0;
+        border-top: 1px solid var(--line);
+        padding-top: 6px;
+      }
+
       .column-overview {
-        flex: 1 1 260px;
-        min-width: 220px;
-        max-height: 58px;
+        width: 100%;
+        max-height: 68px;
         overflow: auto;
         display: flex;
         align-items: flex-start;
         gap: 6px;
         flex-wrap: wrap;
-        padding: 1px 0 2px;
+        padding: 0 0 2px;
       }
 
       .column-overview .pill {
@@ -402,6 +419,11 @@
         gap: 8px;
         padding: 0 8px;
         min-width: 0;
+        cursor: grab;
+      }
+
+      .header-sort-button:active {
+        cursor: grabbing;
       }
 
       .header-filter-button {
@@ -721,6 +743,11 @@
         width: 320px;
       }
 
+      .clipboard-import-popover {
+        width: 320px;
+        padding: 10px;
+      }
+
       .concatenate-popover {
         width: min(760px, calc(100vw - 28px));
       }
@@ -754,6 +781,25 @@
         grid-template-columns: minmax(180px, 280px) 1fr;
         gap: 10px;
         margin-bottom: 10px;
+      }
+
+      .concatenate-scheme-row {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) auto;
+        gap: 8px;
+        margin-bottom: 10px;
+        align-items: end;
+      }
+
+      .concatenate-scheme-row label {
+        display: grid;
+        gap: 5px;
+        color: var(--text);
+        white-space: normal;
+      }
+
+      .concatenate-scheme-row select {
+        width: 100%;
       }
 
       .concatenate-rows {
@@ -1012,8 +1058,9 @@
               <p class="file-name-text" id="fileHint" title="CSV 离线处理，Excel 使用可选 SheetJS 读取">CSV 离线处理，Excel 使用可选 SheetJS 读取</p>
             </div>
           </div>
-          <div>
+          <div class="file-actions">
             <input id="fileInput" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden />
+            <button id="clipboardImportButton">导入剪贴板表格</button>
             <button class="primary" id="chooseFileButton">选择文件</button>
           </div>
         </div>
@@ -1049,9 +1096,22 @@
             <button id="addColumnButton" disabled>新增列</button>
             <button id="concatenateColumnButton" disabled>拼接列</button>
             <button id="clearAllFiltersButton" disabled>清除筛选</button>
-            <button id="exportCsvButton" disabled>导出筛选 CSV</button>
+            <label>
+              格式
+              <select id="exportFormatSelect" disabled>
+                <option value="csv" selected>CSV</option>
+                <option value="xlsx">XLSX</option>
+              </select>
+            </label>
+            <label>
+              拆分
+              <input class="export-split-input" id="exportSplitCountInput" type="number" min="1" step="1" value="1" disabled />
+            </label>
+            <button id="exportCsvButton" disabled>导出筛选</button>
             <button id="exportIssuesButton" disabled>导出异常报告</button>
             <div class="file-stats" id="fileStats"></div>
+          </div>
+          <div class="column-overview-row">
             <div class="column-overview" id="columnOverview" aria-label="全部列名"></div>
           </div>
         </div>
@@ -1113,6 +1173,18 @@
       <div class="column-list" id="columnList"></div>
     </div>
 
+    <div class="popover clipboard-import-popover" id="clipboardImportPopover">
+      <div class="filter-title">导入剪贴板表格</div>
+      <div class="form-stack">
+        <label><input id="clipboardFirstRowHeaderInput" type="checkbox" checked /> 第一行作为表头</label>
+        <div class="filter-summary">仅在未载入文件时导入；已载入数据请刷新页面后再导入。</div>
+      </div>
+      <div class="popover-actions">
+        <button id="cancelClipboardImportButton">取消</button>
+        <button class="primary" id="confirmClipboardImportButton">导入</button>
+      </div>
+    </div>
+
     <div class="popover add-column-popover" id="addColumnPopover">
       <div class="filter-title">新增列</div>
       <div class="form-stack">
@@ -1147,6 +1219,13 @@
           <input id="concatenateColumnNameInput" type="text" value="用户问题" />
         </label>
         <div class="filter-summary">按行顺序生成 Markdown 代码块；手动列名重复时必须用下拉选择。</div>
+      </div>
+      <div class="concatenate-scheme-row">
+        <label>
+          复用方案
+          <select id="concatenateSchemeSelect"></select>
+        </label>
+        <button id="applyConcatenateSchemeButton">应用方案</button>
       </div>
       <div class="concatenate-rows" id="concatenateRows"></div>
       <div class="validation-status" id="concatenateValidationStatus"></div>
@@ -1389,6 +1468,57 @@ function getMaxRecordColumns(records, minimumColumns = 0) {
   return maxColumns;
 }
 
+function getFormulaNestingDepth(value) {
+  const text = String(value == null ? "" : value);
+  let depth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    if (ch === ")" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+  }
+  return depth;
+}
+
+function repairFormulaRecord(record, expectedColumns, delimiter) {
+  if (!expectedColumns || record.length <= expectedColumns) return record;
+  const repaired = [];
+  let changed = false;
+
+  for (let index = 0; index < record.length; index += 1) {
+    const remainingOutput = expectedColumns - repaired.length;
+    const remainingFields = record.length - index;
+    if (remainingFields === remainingOutput) {
+      repaired.push(...record.slice(index));
+      break;
+    }
+
+    const startIndex = index;
+    let value = record[index];
+    if (String(value == null ? "" : value).trimStart().startsWith("=")) {
+      let depth = getFormulaNestingDepth(value);
+      while (
+        depth > 0 &&
+        index + 1 < record.length &&
+        record.length - (index + 2) >= remainingOutput - 1
+      ) {
+        index += 1;
+        value += delimiter + record[index];
+        depth = getFormulaNestingDepth(value);
+      }
+      if (depth === 0 && index > startIndex) {
+        repaired.push(value);
+        changed = true;
+        continue;
+      }
+      index = startIndex;
+    }
+
+    repaired.push(record[index]);
+  }
+
+  return changed && repaired.length === expectedColumns ? repaired : record;
+}
+
 function parseCsvText(text, options = {}) {
   const delimiter = options.delimiter || detectDelimiter(text);
   const previewLimit = options.previewLimit || DEFAULT_PREVIEW_LIMIT;
@@ -1452,7 +1582,10 @@ function parseCsvText(text, options = {}) {
   });
   const rawHeaders = nonEmptyRecords[0] || [];
   const expectedColumns = rawHeaders.length;
-  const maxColumns = getMaxRecordColumns(nonEmptyRecords, expectedColumns);
+  const recordsForAnalysis = expectedColumns
+    ? [rawHeaders, ...nonEmptyRecords.slice(1).map((row) => repairFormulaRecord(row, expectedColumns, delimiter))]
+    : nonEmptyRecords;
+  const maxColumns = getMaxRecordColumns(recordsForAnalysis, expectedColumns);
   const headers = normalizeHeaders(rawHeaders, maxColumns);
   const rows = [];
   const issues = {
@@ -1462,8 +1595,8 @@ function parseCsvText(text, options = {}) {
     duplicateColumns: detectDuplicateColumns(rawHeaders),
   };
 
-  for (let i = 1; i < nonEmptyRecords.length; i += 1) {
-    const rawRow = nonEmptyRecords[i];
+  for (let i = 1; i < recordsForAnalysis.length; i += 1) {
+    const rawRow = recordsForAnalysis[i];
     const rowNumber = i + 1;
     if (expectedColumns > 0 && rawRow.length !== expectedColumns) {
       issues.inconsistentRows.push(
@@ -1616,6 +1749,8 @@ self.onmessage = (event) => {
       const DEFAULT_COL_WIDTH = 180;
       const MIN_COL_WIDTH = 80;
       const MAX_COL_WIDTH = 720;
+      const CONCATENATE_SCHEMES_STORAGE_KEY = "file-viewer.concatenateSchemes.v1";
+      const MAX_CONCATENATE_SCHEMES = 20;
       const EXCEL_INDEXED_COLORS = {
         0: "#000000",
         1: "#ffffff",
@@ -1637,6 +1772,11 @@ self.onmessage = (event) => {
         dropZone: document.getElementById("dropZone"),
         fileInput: document.getElementById("fileInput"),
         chooseFileButton: document.getElementById("chooseFileButton"),
+        clipboardImportButton: document.getElementById("clipboardImportButton"),
+        clipboardImportPopover: document.getElementById("clipboardImportPopover"),
+        clipboardFirstRowHeaderInput: document.getElementById("clipboardFirstRowHeaderInput"),
+        cancelClipboardImportButton: document.getElementById("cancelClipboardImportButton"),
+        confirmClipboardImportButton: document.getElementById("confirmClipboardImportButton"),
         fileHint: document.getElementById("fileHint"),
         fileStats: document.getElementById("fileStats"),
         encodingSelect: document.getElementById("encodingSelect"),
@@ -1654,6 +1794,8 @@ self.onmessage = (event) => {
         concatenateColumnButton: document.getElementById("concatenateColumnButton"),
         clearAllFiltersButton: document.getElementById("clearAllFiltersButton"),
         exportCsvButton: document.getElementById("exportCsvButton"),
+        exportFormatSelect: document.getElementById("exportFormatSelect"),
+        exportSplitCountInput: document.getElementById("exportSplitCountInput"),
         exportIssuesButton: document.getElementById("exportIssuesButton"),
         gridViewport: document.getElementById("gridViewport"),
         gridCanvas: document.getElementById("gridCanvas"),
@@ -1687,6 +1829,8 @@ self.onmessage = (event) => {
         cancelAddColumnButton: document.getElementById("cancelAddColumnButton"),
         confirmAddColumnButton: document.getElementById("confirmAddColumnButton"),
         concatenateColumnPopover: document.getElementById("concatenateColumnPopover"),
+        concatenateSchemeSelect: document.getElementById("concatenateSchemeSelect"),
+        applyConcatenateSchemeButton: document.getElementById("applyConcatenateSchemeButton"),
         concatenateColumnNameInput: document.getElementById("concatenateColumnNameInput"),
         concatenateRows: document.getElementById("concatenateRows"),
         addConcatenateRowButton: document.getElementById("addConcatenateRowButton"),
@@ -1732,9 +1876,11 @@ self.onmessage = (event) => {
         excelFile: null,
         excelSheetNames: [],
         activeSheetName: "",
+        loadToken: 0,
         file: null,
         sourceFileHandle: null,
         viewIndices: [],
+        rowPositionMap: new Map(),
         matchedRows: new Set(),
         visibleColumns: [],
         columnOrder: [],
@@ -1744,6 +1890,7 @@ self.onmessage = (event) => {
         customColumns: new Set(),
         columnFilterMenu: { columnIndex: -1, query: "" },
         concatenateColumnItems: [],
+        concatenateSchemes: [],
         concatenateDragIndex: -1,
         hiddenRows: new Set(),
         dragColumn: null,
@@ -1764,7 +1911,21 @@ self.onmessage = (event) => {
       function createCsvWorker() {
         const source = document.getElementById("csv-worker-source").textContent;
         const blob = new Blob([source], { type: "text/javascript" });
-        return new Worker(URL.createObjectURL(blob));
+        const workerUrl = URL.createObjectURL(blob);
+        const worker = new Worker(workerUrl);
+        URL.revokeObjectURL(workerUrl);
+        return worker;
+      }
+
+      function beginLoad() {
+        state.loadToken += 1;
+        if (state.worker) state.worker.terminate();
+        state.worker = null;
+        return state.loadToken;
+      }
+
+      function isCurrentLoad(loadToken) {
+        return loadToken === state.loadToken;
       }
 
       function formatBytes(bytes) {
@@ -1800,8 +1961,12 @@ self.onmessage = (event) => {
         return text;
       }
 
-      function downloadText(filename, text, mime = "text/csv;charset=utf-8") {
-        const blob = new Blob(["\ufeff", text], { type: mime });
+      function normalizeTextParts(content) {
+        return Array.isArray(content) ? content : [content];
+      }
+
+      function downloadText(filename, content, mime = "text/csv;charset=utf-8") {
+        const blob = new Blob(["\ufeff", ...normalizeTextParts(content)], { type: mime });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
@@ -1812,7 +1977,8 @@ self.onmessage = (event) => {
         URL.revokeObjectURL(url);
       }
 
-      async function saveTextFile(filename, text, mime = "text/csv;charset=utf-8") {
+      async function saveTextFile(filename, content, mime = "text/csv;charset=utf-8") {
+        const parts = normalizeTextParts(content);
         if (window.showSaveFilePicker) {
           const options = {
             suggestedName: filename,
@@ -1827,7 +1993,7 @@ self.onmessage = (event) => {
           try {
             const handle = await window.showSaveFilePicker(options);
             const writable = await handle.createWritable();
-            await writable.write(new Blob(["\ufeff", text], { type: mime }));
+            await writable.write(new Blob(["\ufeff", ...parts], { type: mime }));
             await writable.close();
             els.leftStatus.textContent = "已导出文件";
             return;
@@ -1836,7 +2002,7 @@ self.onmessage = (event) => {
             try {
               const handle = await window.showSaveFilePicker({ suggestedName: filename });
               const writable = await handle.createWritable();
-              await writable.write(new Blob(["\ufeff", text], { type: mime }));
+              await writable.write(new Blob(["\ufeff", ...parts], { type: mime }));
               await writable.close();
               els.leftStatus.textContent = "已导出文件";
               return;
@@ -1845,7 +2011,7 @@ self.onmessage = (event) => {
             }
           }
         }
-        downloadText(filename, text, mime);
+        downloadText(filename, parts, mime);
       }
 
       async function copyText(text) {
@@ -2067,6 +2233,13 @@ self.onmessage = (event) => {
         return !state.hiddenRows.has(rowIndex);
       }
 
+      function rebuildVisibleRowPositionMap() {
+        state.rowPositionMap = new Map();
+        state.viewIndices.forEach((rowIndex, position) => {
+          state.rowPositionMap.set(rowIndex, position);
+        });
+      }
+
       function renderFilteredRowStats() {
         const hiddenCount = state.hiddenRows.size;
         const filterCount = Object.keys(state.columnFilters).length;
@@ -2102,6 +2275,7 @@ self.onmessage = (event) => {
         }
 
         state.viewIndices = base;
+        rebuildVisibleRowPositionMap();
         normalizeSelectionForCurrentView();
         els.rightStatus.textContent = `${state.viewIndices.length} / ${state.rows.length} 行 · ${state.headers.length} 列`;
         renderFilteredRowStats();
@@ -2298,7 +2472,7 @@ self.onmessage = (event) => {
       }
 
       function getVisibleRowPosition(rowIndex) {
-        return state.viewIndices.indexOf(rowIndex);
+        return state.rowPositionMap.get(rowIndex) ?? -1;
       }
 
       function getVisibleColumnPosition(columnIndex) {
@@ -2463,7 +2637,7 @@ self.onmessage = (event) => {
         }
         if (
           !state.selected ||
-          !state.viewIndices.includes(state.selected.rowIndex) ||
+          !state.rowPositionMap.has(state.selected.rowIndex) ||
           !columns.includes(state.selected.columnIndex)
         ) {
           state.selected = first;
@@ -2548,6 +2722,13 @@ self.onmessage = (event) => {
         copyText(getSelectionText());
       }
 
+      function handlePasteIntoCustomColumns(event) {
+        if (isEditableShortcutTarget(event.target)) return;
+        const text = event.clipboardData?.getData("text/plain") || "";
+        if (!text) return;
+        if (pasteClipboardTextIntoSelection(text)) event.preventDefault();
+      }
+
       function startSelectionDrag(type, anchorRowIndex, anchorColumnIndex, event) {
         if (event.button !== 0) return;
         event.preventDefault();
@@ -2610,6 +2791,7 @@ self.onmessage = (event) => {
           button.className = "header-sort-button";
           button.title = state.headers[col];
           button.dataset.column = String(col);
+          button.draggable = true;
           const title = document.createElement("span");
           title.className = "header-title";
           title.textContent = state.headers[col];
@@ -2624,7 +2806,28 @@ self.onmessage = (event) => {
           sort.textContent =
             state.sort.column === col ? (state.sort.direction === "asc" ? "▲" : state.sort.direction === "desc" ? "▼" : "") : "";
           button.append(title, sort);
+          button.addEventListener("mousedown", (event) => event.stopPropagation());
           button.addEventListener("click", () => selectColumnRange(col, col));
+          button.addEventListener("dragstart", (event) => {
+            state.dragColumn = col;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", String(col));
+          });
+          button.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+          });
+          button.addEventListener("drop", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const fromColumn =
+              state.dragColumn == null ? Number(event.dataTransfer.getData("text/plain")) : state.dragColumn;
+            state.dragColumn = null;
+            dragColumn(fromColumn, col);
+          });
+          button.addEventListener("dragend", () => {
+            state.dragColumn = null;
+          });
 
           const filterButton = document.createElement("button");
           filterButton.className = `header-filter-button${hasColumnFilter(col) ? " active" : ""}`;
@@ -2808,6 +3011,266 @@ self.onmessage = (event) => {
           lines.push(columns.map((columnIndex) => row?.[columnIndex] || "").join("\t"));
         }
         return lines.join("\n");
+      }
+
+      function parseClipboardTable(text) {
+        const source = String(text ?? "").replace(/(?:\r\n|\r|\n)$/, "");
+        if (!source) return [];
+        const rows = [];
+        let row = [];
+        let field = "";
+        let inQuotes = false;
+
+        for (let index = 0; index < source.length; index += 1) {
+          const ch = source[index];
+          if (ch === '"') {
+            if (inQuotes && source[index + 1] === '"') {
+              field += '"';
+              index += 1;
+            } else {
+              inQuotes = !inQuotes;
+            }
+            continue;
+          }
+
+          if (!inQuotes && ch === "\t") {
+            row.push(field);
+            field = "";
+            continue;
+          }
+
+          if (!inQuotes && (ch === "\r" || ch === "\n")) {
+            row.push(field);
+            rows.push(row);
+            row = [];
+            field = "";
+            if (ch === "\r" && source[index + 1] === "\n") index += 1;
+            continue;
+          }
+
+          field += ch;
+        }
+
+        row.push(field);
+        rows.push(row);
+        return rows;
+      }
+
+      function getPastedColumnCount(rows) {
+        let count = 0;
+        for (const row of rows) {
+          if (row.length > count) count = row.length;
+        }
+        return count;
+      }
+
+      function getFormulaNestingDepth(value) {
+        const text = String(value == null ? "" : value);
+        let depth = 0;
+        for (let index = 0; index < text.length; index += 1) {
+          const ch = text[index];
+          if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+          if (ch === ")" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+        }
+        return depth;
+      }
+
+      function repairFormulaRecord(record, expectedColumns, delimiter) {
+        if (!expectedColumns || record.length <= expectedColumns) return record;
+        const repaired = [];
+        let changed = false;
+
+        for (let index = 0; index < record.length; index += 1) {
+          const remainingOutput = expectedColumns - repaired.length;
+          const remainingFields = record.length - index;
+          if (remainingFields === remainingOutput) {
+            repaired.push(...record.slice(index));
+            break;
+          }
+
+          const startIndex = index;
+          let value = record[index];
+          if (String(value == null ? "" : value).trimStart().startsWith("=")) {
+            let depth = getFormulaNestingDepth(value);
+            while (
+              depth > 0 &&
+              index + 1 < record.length &&
+              record.length - (index + 2) >= remainingOutput - 1
+            ) {
+              index += 1;
+              value += delimiter + record[index];
+              depth = getFormulaNestingDepth(value);
+            }
+            if (depth === 0 && index > startIndex) {
+              repaired.push(value);
+              changed = true;
+              continue;
+            }
+            index = startIndex;
+          }
+
+          repaired.push(record[index]);
+        }
+
+        return changed && repaired.length === expectedColumns ? repaired : record;
+      }
+
+      function buildClipboardHeaders(rawHeaders, columnCount) {
+        return Array.from({ length: columnCount }, (_, index) => {
+          const value = rawHeaders[index] == null || rawHeaders[index] === "" ? `Column ${index + 1}` : rawHeaders[index];
+          return String(value);
+        });
+      }
+
+      function buildClipboardDataset(text, firstRowAsHeader) {
+        const startedAt = Date.now();
+        const rows = parseClipboardTable(text).filter((row) =>
+          row.some((cell) => String(cell == null ? "" : cell).trim() !== ""),
+        );
+        const columnCount = getPastedColumnCount(rows);
+        if (!rows.length || !columnCount) throw new Error("剪贴板中没有可导入的表格数据");
+        const rawHeaders = firstRowAsHeader ? rows[0] : [];
+        const sourceRows = firstRowAsHeader ? rows.slice(1) : rows;
+        const headers = buildClipboardHeaders(rawHeaders, columnCount);
+        const normalizedRows = sourceRows.map((row) =>
+          Array.from({ length: columnCount }, (_, index) => (row[index] == null ? "" : String(row[index]))),
+        );
+        return {
+          headers,
+          rows: normalizedRows,
+          issues: analyzeRows(headers, normalizedRows),
+          file: {
+            name: "剪贴板表格",
+            size: String(text || "").length,
+            encoding: "Clipboard",
+            delimiter: "Tab",
+            parseMs: Date.now() - startedAt,
+            kind: "Clipboard",
+          },
+        };
+      }
+
+      async function readClipboardText() {
+        if (!navigator.clipboard?.readText) throw new Error("当前浏览器不支持读取剪贴板，请改用文件导入");
+        return navigator.clipboard.readText();
+      }
+
+      function updateClipboardImportButton() {
+        els.clipboardImportButton.disabled = Boolean(state.headers.length || state.rows.length);
+        els.clipboardImportButton.title = els.clipboardImportButton.disabled
+          ? "已载入数据；如需从剪贴板导入，请刷新页面"
+          : "从剪贴板导入表格";
+      }
+
+      function openClipboardImportPopover(anchor) {
+        if (state.headers.length || state.rows.length) {
+          els.leftStatus.textContent = "已载入数据；如需从剪贴板导入，请刷新页面";
+          return;
+        }
+        els.clipboardFirstRowHeaderInput.checked = true;
+        const rect = anchor.getBoundingClientRect();
+        els.clipboardImportPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 340))}px`;
+        els.clipboardImportPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 220))}px`;
+        els.columnsPopover.classList.remove("open");
+        closeAddColumnPopover();
+        closeConcatenateColumnPopover();
+        closeColumnFilterMenu();
+        closeContextMenu();
+        els.clipboardImportPopover.classList.add("open");
+        els.confirmClipboardImportButton.focus();
+      }
+
+      function closeClipboardImportPopover() {
+        els.clipboardImportPopover.classList.remove("open");
+      }
+
+      async function importClipboardTable() {
+        if (state.headers.length || state.rows.length) {
+          els.leftStatus.textContent = "已载入数据；如需从剪贴板导入，请刷新页面";
+          return;
+        }
+        const loadToken = beginLoad();
+        resetExcelWorkbook();
+        try {
+          const text = await readClipboardText();
+          if (!isCurrentLoad(loadToken)) return;
+          const dataset = buildClipboardDataset(text, els.clipboardFirstRowHeaderInput.checked);
+          state.sourceFileHandle = null;
+          setDataset(dataset);
+          els.fileHint.textContent = dataset.file.name;
+          els.fileHint.title = "从剪贴板导入的表格";
+          closeClipboardImportPopover();
+          els.leftStatus.textContent = `已从剪贴板导入 ${dataset.rows.length.toLocaleString()} 行 × ${dataset.headers.length.toLocaleString()} 列`;
+        } catch (error) {
+          if (!isCurrentLoad(loadToken)) return;
+          els.leftStatus.textContent = `剪贴板导入失败：${error.message}`;
+        }
+      }
+
+      function pasteClipboardTextIntoSelection(text) {
+        const pastedRows = parseClipboardTable(text);
+        const pastedColumnCount = getPastedColumnCount(pastedRows);
+        if (!pastedRows.length || !pastedColumnCount) return false;
+        if (!state.selected) {
+          els.leftStatus.textContent = "请先选中一个自定义列单元格再粘贴";
+          return true;
+        }
+
+        const visibleColumns = getVisibleColumnIndexes();
+        const startRowPosition = getVisibleRowPosition(state.selected.rowIndex);
+        const startColumnPosition = visibleColumns.indexOf(state.selected.columnIndex);
+        if (startRowPosition < 0 || startColumnPosition < 0) {
+          els.leftStatus.textContent = "当前选区不可粘贴";
+          return true;
+        }
+
+        const targetColumns = visibleColumns.slice(startColumnPosition, startColumnPosition + pastedColumnCount);
+        if (targetColumns.length < pastedColumnCount) {
+          els.leftStatus.textContent = "粘贴区域超出可见列，请先新增或显示足够的自定义列";
+          return true;
+        }
+
+        if (!targetColumns.every((columnIndex) => isCustomColumn(columnIndex))) {
+          els.leftStatus.textContent = "只能向自定义列粘贴，原始导入列不可修改";
+          return true;
+        }
+
+        const writableRowCount = Math.min(pastedRows.length, state.viewIndices.length - startRowPosition);
+        if (writableRowCount <= 0) {
+          els.leftStatus.textContent = "粘贴区域超出当前可见行";
+          return true;
+        }
+
+        const anchor = { ...state.selected };
+        const touchedColumns = new Set(targetColumns);
+        const touchedRows = new Set();
+        for (let rowOffset = 0; rowOffset < writableRowCount; rowOffset += 1) {
+          const rowIndex = state.viewIndices[startRowPosition + rowOffset];
+          touchedRows.add(rowIndex);
+          const row = state.rows[rowIndex];
+          for (let columnOffset = 0; columnOffset < pastedColumnCount; columnOffset += 1) {
+            const columnIndex = targetColumns[columnOffset];
+            row[columnIndex] = pastedRows[rowOffset]?.[columnOffset] ?? "";
+            if (state.cellMeta?.size) state.cellMeta.delete(`${rowIndex}:${columnIndex}`);
+          }
+        }
+
+        for (const columnIndex of touchedColumns) invalidateColumnValueCache(columnIndex);
+        refreshIssuesAfterCellEdits(touchedRows);
+        const endRowIndex = state.viewIndices[startRowPosition + writableRowCount - 1];
+        const endColumnIndex = targetColumns[targetColumns.length - 1];
+        selectCellRange(anchor.rowIndex, anchor.columnIndex, endRowIndex, endColumnIndex, { silent: true });
+        recomputeView();
+        updateFileStats();
+        renderDetail();
+        if (targetColumns.includes(state.columnFilterMenu.columnIndex)) renderColumnFilterValues();
+
+        const truncatedRows = pastedRows.length - writableRowCount;
+        const baseStatus = `已粘贴 ${writableRowCount.toLocaleString()} 行 × ${pastedColumnCount.toLocaleString()} 列`;
+        els.leftStatus.textContent = truncatedRows > 0
+          ? `${baseStatus}，超出 ${truncatedRows.toLocaleString()} 行未写入`
+          : baseStatus;
+        return true;
       }
 
       function getLineCount(text) {
@@ -3137,6 +3600,127 @@ self.onmessage = (event) => {
         return `${index + 1}. ${name}`;
       }
 
+      function normalizeConcatenateScheme(raw) {
+        if (!raw || typeof raw !== "object") return null;
+        const items = Array.isArray(raw.items)
+          ? raw.items
+              .map((item) => ({
+                sourceName: String(item.sourceName || "").trim(),
+                alias: String(item.alias || "").trim(),
+              }))
+              .filter((item) => item.sourceName)
+          : [];
+        if (!items.length) return null;
+        const outputName = String(raw.outputName || raw.name || "").trim() || "用户问题";
+        const scheme = {
+          name: String(raw.name || outputName).trim() || outputName,
+          outputName,
+          items,
+          updatedAt: Number(raw.updatedAt) || Date.now(),
+        };
+        scheme.signature = getConcatenateSchemeSignature(scheme);
+        return scheme;
+      }
+
+      function getConcatenateSchemeSignature(scheme) {
+        return JSON.stringify({
+          outputName: String(scheme.outputName || "").trim(),
+          items: (scheme.items || []).map((item) => ({
+            sourceName: String(item.sourceName || "").trim(),
+            alias: String(item.alias || "").trim(),
+          })),
+        });
+      }
+
+      function getConcatenateSchemeLabel(scheme) {
+        const sources = (scheme.items || []).map((item) => item.sourceName).filter(Boolean).join(" + ");
+        return `${scheme.outputName || scheme.name || "用户问题"} · ${sources || "未命名方案"}`;
+      }
+
+      function loadConcatenateSchemes() {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(CONCATENATE_SCHEMES_STORAGE_KEY) || "[]");
+          if (!Array.isArray(parsed)) return [];
+          return parsed
+            .map(normalizeConcatenateScheme)
+            .filter(Boolean)
+            .slice(0, MAX_CONCATENATE_SCHEMES);
+        } catch (error) {
+          return [];
+        }
+      }
+
+      function persistConcatenateSchemes(schemes) {
+        try {
+          localStorage.setItem(CONCATENATE_SCHEMES_STORAGE_KEY, JSON.stringify(schemes.slice(0, MAX_CONCATENATE_SCHEMES)));
+        } catch (error) {
+          // localStorage can be unavailable in private or restricted contexts.
+        }
+      }
+
+      function buildConcatenateSchemeFromSelection({ name, items }) {
+        const outputName = String(name || "").trim() || "用户问题";
+        const scheme = {
+          name: outputName,
+          outputName,
+          items: items.map((item) => ({
+            sourceName: state.headers[item.columnIndex] || `Column ${item.columnIndex + 1}`,
+            alias: String(item.alias || "").trim() || state.headers[item.columnIndex] || `Column ${item.columnIndex + 1}`,
+          })),
+          updatedAt: Date.now(),
+        };
+        scheme.signature = getConcatenateSchemeSignature(scheme);
+        return scheme;
+      }
+
+      function saveConcatenateScheme({ name, items }) {
+        if (!items?.length) return;
+        const scheme = buildConcatenateSchemeFromSelection({ name, items });
+        const schemes = [scheme, ...loadConcatenateSchemes().filter((item) => item.signature !== scheme.signature)]
+          .slice(0, MAX_CONCATENATE_SCHEMES);
+        state.concatenateSchemes = schemes;
+        persistConcatenateSchemes(schemes);
+        if (els.concatenateColumnPopover.classList.contains("open")) renderConcatenateSchemeOptions();
+      }
+
+      function renderConcatenateSchemeOptions() {
+        els.concatenateSchemeSelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = state.concatenateSchemes.length ? "选择已保存方案" : "暂无可复用方案";
+        els.concatenateSchemeSelect.appendChild(placeholder);
+        state.concatenateSchemes.forEach((scheme) => {
+          const option = document.createElement("option");
+          option.value = scheme.signature;
+          option.textContent = getConcatenateSchemeLabel(scheme);
+          els.concatenateSchemeSelect.appendChild(option);
+        });
+        els.concatenateSchemeSelect.disabled = !state.concatenateSchemes.length;
+        els.applyConcatenateSchemeButton.disabled = !state.concatenateSchemes.length;
+      }
+
+      function applyConcatenateScheme() {
+        const signature = els.concatenateSchemeSelect.value;
+        const scheme = state.concatenateSchemes.find((item) => item.signature === signature);
+        if (!scheme) return;
+        els.concatenateColumnNameInput.value = scheme.outputName || scheme.name || "用户问题";
+        state.concatenateColumnItems = scheme.items.map((item) => {
+          const sourceName = String(item.sourceName || "").trim();
+          const matches = state.headers
+            .map((header, headerIndex) => ({ header, headerIndex }))
+            .filter(({ header }) => header === sourceName);
+          return {
+            columnIndex: matches[0]?.headerIndex ?? 0,
+            manualName: matches.length === 1 ? "" : sourceName,
+            alias: String(item.alias || "").trim() || sourceName,
+          };
+        });
+        if (!state.concatenateColumnItems.length) state.concatenateColumnItems = [createDefaultConcatenateItem(0)];
+        renderConcatenateRows();
+        const resolved = resolveConcatenateItems(state.concatenateColumnItems);
+        setConcatenateValidation(resolved.errors);
+      }
+
       function createDefaultConcatenateItem(columnIndex = 0) {
         const index = Math.max(0, Math.min(Number(columnIndex) || 0, Math.max(0, state.headers.length - 1)));
         return {
@@ -3230,6 +3814,7 @@ self.onmessage = (event) => {
         els.addColumnPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 340))}px`;
         els.addColumnPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 260))}px`;
         els.columnsPopover.classList.remove("open");
+        closeClipboardImportPopover();
         closeConcatenateColumnPopover();
         closeColumnFilterMenu();
         closeContextMenu();
@@ -3341,14 +3926,17 @@ self.onmessage = (event) => {
 
       function openConcatenateColumnPopover(anchor) {
         if (!state.headers.length) return;
+        state.concatenateSchemes = loadConcatenateSchemes();
         els.concatenateColumnNameInput.value = "用户问题";
         state.concatenateColumnItems = [createDefaultConcatenateItem(0)];
         setConcatenateValidation();
+        renderConcatenateSchemeOptions();
         renderConcatenateRows();
         const rect = anchor.getBoundingClientRect();
         els.concatenateColumnPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 780))}px`;
         els.concatenateColumnPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 460))}px`;
         els.columnsPopover.classList.remove("open");
+        closeClipboardImportPopover();
         closeAddColumnPopover();
         closeColumnFilterMenu();
         closeContextMenu();
@@ -3469,6 +4057,7 @@ self.onmessage = (event) => {
         if (!state.headers.length || !items.length) return;
         const columnIndex = state.headers.length;
         const columnName = String(name || "").trim() || "用户问题";
+        saveConcatenateScheme({ name: columnName, items });
         state.headers.push(columnName);
         state.originalHeaders.push(columnName);
         state.rows.forEach((row) => {
@@ -3596,6 +4185,7 @@ self.onmessage = (event) => {
         state.customColumns = new Set();
         state.concatenateColumnItems = [];
         state.concatenateDragIndex = -1;
+        state.dragColumn = null;
         state.hiddenRows = new Set();
         state.columnFilterMenu = { columnIndex: -1, query: "" };
         state.sort = { column: -1, direction: "none" };
@@ -3612,8 +4202,11 @@ self.onmessage = (event) => {
         els.addColumnButton.disabled = !state.headers.length;
         els.concatenateColumnButton.disabled = !state.headers.length;
         els.clearAllFiltersButton.disabled = !state.headers.length;
+        els.exportFormatSelect.disabled = !state.rows.length;
+        els.exportSplitCountInput.disabled = !state.rows.length;
         els.exportCsvButton.disabled = !state.rows.length;
         els.exportIssuesButton.disabled = !state.rows.length;
+        updateClipboardImportButton();
         setProgress(1, "解析完成");
       }
 
@@ -3682,13 +4275,17 @@ self.onmessage = (event) => {
         };
       }
 
-      function loadExcelSheet(sheetName, startedAt = Date.now()) {
+      function loadExcelSheet(sheetName, startedAt = Date.now(), loadToken = state.loadToken) {
         if (!sheetName) return;
+        if (!isCurrentLoad(loadToken)) return;
         try {
           setProgress(0.58, `转换 Sheet：${sheetName}`);
           updateSheetSelect(state.excelSheetNames, sheetName);
-          setDataset(buildExcelDatasetFromSheet(sheetName, startedAt));
+          const result = buildExcelDatasetFromSheet(sheetName, startedAt);
+          if (!isCurrentLoad(loadToken)) return;
+          setDataset(result);
         } catch (error) {
+          if (!isCurrentLoad(loadToken)) return;
           setProgress(0, `Excel Sheet 读取失败：${error.message}`);
           els.emptyState.style.display = "grid";
           els.emptyState.querySelector("strong").textContent = "Excel Sheet 读取失败";
@@ -3697,31 +4294,34 @@ self.onmessage = (event) => {
       }
 
       async function parseCsvFile(file) {
+        const loadToken = beginLoad();
         resetExcelWorkbook();
-        if (state.worker) state.worker.terminate();
-        state.worker = createCsvWorker();
         setProgress(0.02, "读取文件");
         els.emptyState.style.display = "grid";
         els.emptyState.querySelector("strong").textContent = "正在解析";
         els.emptyState.querySelector("span").textContent = file.name;
         const buffer = await file.arrayBuffer();
+        if (!isCurrentLoad(loadToken)) return;
 
-        state.worker.onmessage = (event) => {
+        const worker = createCsvWorker();
+        state.worker = worker;
+        worker.onmessage = (event) => {
+          if (!isCurrentLoad(loadToken)) return;
           const message = event.data || {};
           if (message.type === "progress") {
             setProgress(message.progress, message.stage);
           } else if (message.type === "complete") {
             setDataset(message.result);
-            state.worker.terminate();
-            state.worker = null;
+            worker.terminate();
+            if (state.worker === worker) state.worker = null;
           } else if (message.type === "error") {
             setProgress(0, `解析失败：${message.message}`);
-            state.worker.terminate();
-            state.worker = null;
+            worker.terminate();
+            if (state.worker === worker) state.worker = null;
           }
         };
 
-        state.worker.postMessage(
+        worker.postMessage(
           {
             kind: "parse-csv",
             fileName: file.name,
@@ -3756,7 +4356,7 @@ self.onmessage = (event) => {
             continue;
           }
         }
-        throw new Error("无法加载 SheetJS，Excel 读取需要网络或 vendor/xlsx.full.min.js");
+        throw new Error("无法加载 SheetJS，Excel 读取或 XLSX 导出需要网络或 vendor/xlsx.full.min.js");
       }
 
       function normalizeExcelColor(color) {
@@ -3841,66 +4441,88 @@ self.onmessage = (event) => {
           }));
       }
 
+      function appendRowIssues(issues, headers, row, index) {
+        if (!row) return;
+        const expected = headers.length;
+        const rowNumber = index + 2;
+        if (row.length !== expected) {
+          issues.inconsistentRows.push({
+            type: "列数不一致",
+            rowNumber,
+            columnIndex: -1,
+            columnName: "",
+            detail: `期望 ${expected} 列，实际 ${row.length} 列`,
+            sample: row.join(",").slice(0, 300),
+          });
+        }
+        const emptyCount = row.filter((cell) => cell === "").length;
+        if (expected > 1 && emptyCount / expected >= 0.6) {
+          issues.sparseRows.push({
+            type: "空字段比例高",
+            rowNumber,
+            columnIndex: -1,
+            columnName: "",
+            detail: `空字段 ${emptyCount}/${expected}`,
+            sample: row.join(",").slice(0, 300),
+          });
+        }
+        row.forEach((cell, col) => {
+          const text = cell == null ? "" : String(cell);
+          if (text.length >= 50000) {
+            issues.longFields.push({
+              type: "超长字段",
+              rowNumber,
+              columnIndex: col,
+              columnName: headers[col] || `Column ${col + 1}`,
+              detail: `${text.length} 字符`,
+              sample: text.slice(0, 300),
+            });
+          }
+        });
+      }
+
       function analyzeRows(headers, rows) {
         const issues = { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: detectDuplicateHeaderIssues(headers) };
-        const expected = headers.length;
-        rows.forEach((row, index) => {
-          const rowNumber = index + 2;
-          if (row.length !== expected) {
-            issues.inconsistentRows.push({
-              type: "列数不一致",
-              rowNumber,
-              columnIndex: -1,
-              columnName: "",
-              detail: `期望 ${expected} 列，实际 ${row.length} 列`,
-              sample: row.join(",").slice(0, 300),
-            });
-          }
-          const emptyCount = row.filter((cell) => cell === "").length;
-          if (expected > 1 && emptyCount / expected >= 0.6) {
-            issues.sparseRows.push({
-              type: "空字段比例高",
-              rowNumber,
-              columnIndex: -1,
-              columnName: "",
-              detail: `空字段 ${emptyCount}/${expected}`,
-              sample: row.join(",").slice(0, 300),
-            });
-          }
-          row.forEach((cell, col) => {
-            const text = cell == null ? "" : String(cell);
-            if (text.length >= 50000) {
-              issues.longFields.push({
-                type: "超长字段",
-                rowNumber,
-                columnIndex: col,
-                columnName: headers[col] || `Column ${col + 1}`,
-                detail: `${text.length} 字符`,
-                sample: text.slice(0, 300),
-              });
-            }
-          });
-        });
+        rows.forEach((row, index) => appendRowIssues(issues, headers, row, index));
         return issues;
       }
 
+      function refreshIssuesAfterCellEdits(rowIndexes) {
+        const touchedRows = new Set([...rowIndexes].filter((rowIndex) => Number.isInteger(rowIndex) && rowIndex >= 0));
+        const keepUntouchedRowIssue = (issue) => !touchedRows.has((issue.rowNumber || 0) - 2);
+        state.issues = {
+          duplicateColumns: detectDuplicateHeaderIssues(state.headers),
+          inconsistentRows: (state.issues.inconsistentRows || []).filter(keepUntouchedRowIssue),
+          sparseRows: (state.issues.sparseRows || []).filter(keepUntouchedRowIssue),
+          longFields: (state.issues.longFields || []).filter(keepUntouchedRowIssue),
+        };
+        [...touchedRows]
+          .sort((left, right) => left - right)
+          .forEach((rowIndex) => appendRowIssues(state.issues, state.headers, state.rows[rowIndex], rowIndex));
+      }
+
       async function parseExcelFile(file) {
+        const loadToken = beginLoad();
         const startedAt = Date.now();
         setProgress(0.05, "加载 Excel 解析器");
         try {
           resetExcelWorkbook();
           const XLSX = await ensureSheetJs();
+          if (!isCurrentLoad(loadToken)) return;
           setProgress(0.2, "读取 Excel");
           const buffer = await file.arrayBuffer();
+          if (!isCurrentLoad(loadToken)) return;
           const workbook = XLSX.read(buffer, { type: "array", cellDates: false, dense: true, cellStyles: true, cellHTML: true });
+          if (!isCurrentLoad(loadToken)) return;
           const sheetName = workbook.SheetNames[0];
           if (!sheetName) throw new Error("工作簿中没有可读取的 Sheet");
           state.excelWorkbook = workbook;
           state.excelXLSX = XLSX;
           state.excelFile = file;
           updateSheetSelect(workbook.SheetNames, sheetName);
-          loadExcelSheet(sheetName, startedAt);
+          loadExcelSheet(sheetName, startedAt, loadToken);
         } catch (error) {
+          if (!isCurrentLoad(loadToken)) return;
           setProgress(0, `Excel 解析失败：${error.message}`);
           els.emptyState.style.display = "grid";
           els.emptyState.querySelector("strong").textContent = "Excel 解析失败";
@@ -3947,6 +4569,7 @@ self.onmessage = (event) => {
         els.searchInput.value = "";
         els.detailSearchInput.value = "";
         els.modalSearchInput.value = "";
+        closeClipboardImportPopover();
         if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
           parseExcelFile(file);
         } else {
@@ -3954,17 +4577,80 @@ self.onmessage = (event) => {
         }
       }
 
-      async function exportFilteredCsv() {
+      function getExportSplitCount() {
+        const value = Math.floor(Number(els.exportSplitCountInput.value));
+        const splitCount = Number.isFinite(value) && value > 0 ? value : 1;
+        els.exportSplitCountInput.value = String(splitCount);
+        return splitCount;
+      }
+
+      function getFilteredExportRowGroups() {
+        const rowIndexes = [...state.viewIndices];
+        if (!rowIndexes.length) return [];
+        const splitCount = Math.min(getExportSplitCount(), rowIndexes.length);
+        const rowsPerPart = Math.ceil(rowIndexes.length / splitCount);
+        const groups = [];
+        for (let index = 0; index < rowIndexes.length; index += rowsPerPart) {
+          groups.push(rowIndexes.slice(index, index + rowsPerPart));
+        }
+        return groups;
+      }
+
+      async function exportFilteredCsv(rowIndexes = state.viewIndices, suffix = "") {
         if (!state.rows.length) return;
         const visibleColumns = getVisibleColumnIndexes();
-        const lines = [];
-        lines.push(visibleColumns.map((col) => escapeCsv(state.headers[col])).join(","));
-        for (const rowIndex of state.viewIndices) {
+        const parts = [visibleColumns.map((col) => escapeCsv(state.headers[col])).join(",")];
+        let chunk = [];
+        for (const rowIndex of rowIndexes) {
           const row = state.rows[rowIndex];
-          lines.push(visibleColumns.map((col) => escapeCsv(row[col] || "")).join(","));
+          chunk.push("\r\n", visibleColumns.map((col) => escapeCsv(row[col] || "")).join(","));
+          if (chunk.length >= 2000) {
+            parts.push(chunk.join(""));
+            chunk = [];
+          }
         }
+        if (chunk.length) parts.push(chunk.join(""));
         const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
-        await saveTextFile(`${base}-filtered.csv`, lines.join("\r\n"));
+        await saveTextFile(`${base}-filtered${suffix}.csv`, parts);
+      }
+
+      function getFilteredExportMatrix(rowIndexes = state.viewIndices) {
+        const visibleColumns = getVisibleColumnIndexes();
+        const matrix = [visibleColumns.map((col) => state.headers[col])];
+        for (const rowIndex of rowIndexes) {
+          const row = state.rows[rowIndex];
+          matrix.push(visibleColumns.map((col) => row[col] || ""));
+        }
+        return matrix;
+      }
+
+      async function exportFilteredXlsx(rowIndexes = state.viewIndices, suffix = "") {
+        if (!state.rows.length) return;
+        const XLSX = await ensureSheetJs();
+        const matrix = getFilteredExportMatrix(rowIndexes);
+        const worksheet = XLSX.utils.aoa_to_sheet(matrix);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Filtered");
+        const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
+        XLSX.writeFile(workbook, `${base}-filtered${suffix}.xlsx`);
+        els.leftStatus.textContent = "已导出 XLSX 文件";
+      }
+
+      async function exportFilteredTable() {
+        try {
+          const rowGroups = getFilteredExportRowGroups();
+          for (let partIndex = 0; partIndex < rowGroups.length; partIndex += 1) {
+            const suffix = rowGroups.length > 1 ? `_part${partIndex + 1}` : "";
+            if (els.exportFormatSelect.value === "xlsx") {
+              await exportFilteredXlsx(rowGroups[partIndex], suffix);
+            } else {
+              await exportFilteredCsv(rowGroups[partIndex], suffix);
+            }
+          }
+          if (rowGroups.length > 1) els.leftStatus.textContent = `已导出 ${rowGroups.length} 个拆分文件`;
+        } catch (error) {
+          els.leftStatus.textContent = `导出失败：${error.message}`;
+        }
       }
 
       function flattenIssues() {
@@ -4028,6 +4714,9 @@ self.onmessage = (event) => {
       }, 120);
 
       els.chooseFileButton.addEventListener("click", openFileWithPicker);
+      els.clipboardImportButton.addEventListener("click", (event) => openClipboardImportPopover(event.currentTarget));
+      els.cancelClipboardImportButton.addEventListener("click", closeClipboardImportPopover);
+      els.confirmClipboardImportButton.addEventListener("click", importClipboardTable);
       els.fileInput.addEventListener("change", (event) => handleFiles(event.target.files, null));
       els.dropZone.addEventListener("dragover", (event) => {
         event.preventDefault();
@@ -4062,7 +4751,7 @@ self.onmessage = (event) => {
         recomputeView();
       });
       els.clearAllFiltersButton.addEventListener("click", clearAllFilters);
-      els.exportCsvButton.addEventListener("click", exportFilteredCsv);
+      els.exportCsvButton.addEventListener("click", exportFilteredTable);
       els.exportIssuesButton.addEventListener("click", exportIssueReport);
       els.copyCellButton.addEventListener("click", () => copyText(getSelectionText()));
       els.openModalButton.addEventListener("click", () => {
@@ -4099,6 +4788,7 @@ self.onmessage = (event) => {
         const rect = event.currentTarget.getBoundingClientRect();
         els.columnsPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 310))}px`;
         els.columnsPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 430))}px`;
+        closeClipboardImportPopover();
         closeAddColumnPopover();
         closeConcatenateColumnPopover();
         els.columnsPopover.classList.toggle("open");
@@ -4120,6 +4810,7 @@ self.onmessage = (event) => {
         renderConcatenateRows();
       });
       els.cancelConcatenateColumnButton.addEventListener("click", closeConcatenateColumnPopover);
+      els.applyConcatenateSchemeButton.addEventListener("click", applyConcatenateScheme);
       els.confirmConcatenateColumnButton.addEventListener("click", () => {
         const resolved = resolveConcatenateItems(state.concatenateColumnItems);
         if (resolved.errors.length) {
@@ -4188,6 +4879,9 @@ self.onmessage = (event) => {
         if (!eventPathContains(event, els.columnsPopover) && !eventPathContains(event, els.columnsButton)) {
           els.columnsPopover.classList.remove("open");
         }
+        if (!eventPathContains(event, els.clipboardImportPopover) && !eventPathContains(event, els.clipboardImportButton)) {
+          closeClipboardImportPopover();
+        }
         if (!eventPathContains(event, els.addColumnPopover) && !eventPathContains(event, els.addColumnButton)) {
           closeAddColumnPopover();
         }
@@ -4203,12 +4897,14 @@ self.onmessage = (event) => {
       document.addEventListener("mouseup", stopResize);
       document.addEventListener("mouseup", stopSelectionDrag);
       document.addEventListener("keydown", handleCopyShortcut);
+      document.addEventListener("paste", handlePasteIntoCustomColumns);
       window.addEventListener("blur", closeContextMenu);
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
           closeContextMenu();
           closeModal();
           els.columnsPopover.classList.remove("open");
+          closeClipboardImportPopover();
           closeAddColumnPopover();
           closeConcatenateColumnPopover();
           closeColumnFilterMenu();

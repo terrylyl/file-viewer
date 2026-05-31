@@ -48,6 +48,21 @@ test("parseCsvText handles quoted commas and quoted newlines", () => {
   assert.equal(parsed.meta.columnCount, 2);
 });
 
+test("parseCsvText repairs unescaped formula delimiters without adding columns", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText(
+    "id,formula,result\n1,=IF(A1 > 0, B1, C1),ok\n2,=ROUND(SUM(A2, B2), 2),done",
+    { delimiter: ",", previewLimit: 300 },
+  );
+
+  assert.equal(JSON.stringify(parsed.headers), JSON.stringify(["id", "formula", "result"]));
+  assert.equal(parsed.meta.columnCount, 3);
+  assert.equal(parsed.rows[0][1], "=IF(A1 > 0, B1, C1)");
+  assert.equal(parsed.rows[0][2], "ok");
+  assert.equal(parsed.rows[1][1], "=ROUND(SUM(A2, B2), 2)");
+  assert.equal(parsed.rows[1][2], "done");
+});
+
 test("parseCsvText handles more rows than the JavaScript argument limit", () => {
   const core = loadWorkerCore();
   const rowCount = 200_000;
