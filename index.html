@@ -1,0 +1,4921 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>本地表格文件查看器</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f6f7;
+        --panel: #ffffff;
+        --panel-2: #f8fafb;
+        --line: #d7dee3;
+        --line-strong: #aebbc4;
+        --text: #192026;
+        --muted: #687783;
+        --accent: #0f766e;
+        --accent-2: #b45309;
+        --danger: #b42318;
+        --ok: #067647;
+        --mark: #ffe08a;
+        --row: #ffffff;
+        --row-alt: #f9fbfc;
+        --row-hit: #fff8df;
+        --selected: #d7f2ec;
+        --shadow: 0 18px 40px rgba(25, 32, 38, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+        color: var(--text);
+        background: var(--bg);
+        font-family:
+          ui-sans-serif,
+          "Segoe UI",
+          "Microsoft YaHei",
+          "PingFang SC",
+          sans-serif;
+        font-size: 13px;
+        overflow: hidden;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      button {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--text);
+        height: 30px;
+        padding: 0 10px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+
+      button:hover {
+        border-color: var(--line-strong);
+        background: #f2f6f7;
+      }
+
+      button.primary {
+        border-color: #0f766e;
+        background: #0f766e;
+        color: #ffffff;
+      }
+
+      button.ghost {
+        border-color: transparent;
+        background: transparent;
+      }
+
+      button.danger {
+        border-color: #f1b8b3;
+        color: var(--danger);
+      }
+
+      button.danger:hover {
+        border-color: #d92d20;
+        background: #fff1f1;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      input,
+      select {
+        min-height: 30px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 9px;
+        color: var(--text);
+        background: var(--panel);
+        outline: none;
+      }
+
+      input:focus,
+      select:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.12);
+      }
+
+      label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .app {
+        height: 100vh;
+        display: grid;
+        grid-template-rows: auto 1fr 28px;
+      }
+
+      .topbar {
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        display: grid;
+        grid-template-columns: minmax(260px, 360px) 1fr;
+        gap: 12px;
+        padding: 10px 12px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
+      .file-title-block {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .brand-mark {
+        width: 32px;
+        height: 32px;
+        border-radius: 7px;
+        border: 1px solid #24423d;
+        background:
+          linear-gradient(90deg, transparent 31%, rgba(255, 255, 255, 0.5) 32%, transparent 33%),
+          linear-gradient(0deg, transparent 31%, rgba(255, 255, 255, 0.5) 32%, transparent 33%),
+          #0f766e;
+        background-size: 10px 10px;
+        flex: 0 0 auto;
+      }
+
+      .brand h1 {
+        margin: 0;
+        font-size: 16px;
+        line-height: 1.2;
+        font-weight: 700;
+      }
+
+      .brand p {
+        margin: 3px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .file-name-text {
+        display: block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .drop-zone {
+        min-height: 68px;
+        border: 1px dashed var(--line-strong);
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        background: var(--panel-2);
+        min-width: 0;
+      }
+
+      #chooseFileButton {
+        flex: 0 0 auto;
+        min-width: 104px;
+        white-space: nowrap;
+      }
+
+      .file-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .drop-zone.dragover {
+        border-color: var(--accent);
+        background: #e8f7f3;
+      }
+
+      .drop-zone strong {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 3px;
+      }
+
+      .drop-zone span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .toolbar {
+        min-width: 0;
+        display: grid;
+        grid-template-rows: auto auto;
+        gap: 8px;
+      }
+
+      .toolbar-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        flex-wrap: wrap;
+      }
+
+      .toolbar-row.metrics-row {
+        align-items: flex-start;
+      }
+
+      .search-input {
+        width: min(360px, 35vw);
+      }
+
+      .sheet-control select {
+        max-width: 180px;
+      }
+
+      .export-split-input {
+        width: 74px;
+      }
+
+      .file-stats {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        flex-wrap: wrap;
+      }
+
+      .column-overview-row {
+        width: 100%;
+        min-width: 0;
+        border-top: 1px solid var(--line);
+        padding-top: 6px;
+      }
+
+      .column-overview {
+        width: 100%;
+        max-height: 68px;
+        overflow: auto;
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        flex-wrap: wrap;
+        padding: 0 0 2px;
+      }
+
+      .column-overview .pill {
+        max-width: 220px;
+        background: #eef7f5;
+        border-color: #c8ded9;
+        color: #31524c;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        min-height: 24px;
+        max-width: 260px;
+        padding: 0 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--panel-2);
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .pill.warning {
+        color: var(--accent-2);
+        border-color: #f3ca8d;
+        background: #fff7ed;
+      }
+
+      .main {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 380px;
+        gap: 0;
+      }
+
+      .main.detail-collapsed {
+        grid-template-columns: minmax(0, 1fr) 42px;
+      }
+
+      .table-region {
+        min-width: 0;
+        min-height: 0;
+        position: relative;
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .grid-viewport {
+        position: absolute;
+        inset: 0;
+        overflow: auto;
+        background: var(--panel);
+      }
+
+      .grid-canvas {
+        position: relative;
+      }
+
+      .header-row,
+      .data-row {
+        display: flex;
+        position: absolute;
+        left: 0;
+      }
+
+      .header-row {
+        top: 0;
+        height: 38px;
+        z-index: 5;
+        position: sticky;
+        background: #eef3f5;
+        border-bottom: 1px solid var(--line-strong);
+      }
+
+      .data-row {
+        height: 34px;
+      }
+
+      .data-row:nth-child(even) .cell {
+        background: var(--row-alt);
+      }
+
+      .data-row.hit .cell {
+        background: var(--row-hit);
+      }
+
+      .cell,
+      .header-cell,
+      .row-number {
+        height: 100%;
+        border-right: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .header-cell {
+        position: relative;
+        background: #eef3f5;
+        font-weight: 650;
+        color: #28343b;
+        user-select: none;
+      }
+
+      .header-cell.duplicate-column {
+        background: #fff1f1;
+        box-shadow: inset 0 -2px 0 var(--danger);
+      }
+
+      .header-cell.selected-column,
+      .row-number.selected-row {
+        background: #d7f2ec;
+        color: #0c514b;
+      }
+
+      .row-number.select-all-corner {
+        justify-content: center;
+        cursor: pointer;
+      }
+
+      .header-sort-button {
+        border: 0;
+        background: transparent;
+        flex: 1 1 auto;
+        height: 100%;
+        border-radius: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 0 8px;
+        min-width: 0;
+        cursor: grab;
+      }
+
+      .header-sort-button:active {
+        cursor: grabbing;
+      }
+
+      .header-filter-button {
+        flex: 0 0 30px;
+        width: 30px;
+        height: 100%;
+        border: 0;
+        border-left: 1px solid transparent;
+        border-radius: 0;
+        padding: 0;
+        background: transparent;
+        color: var(--muted);
+      }
+
+      .header-filter-button:hover,
+      .header-filter-button.active {
+        border-left-color: var(--line);
+        background: #dfe8eb;
+        color: var(--accent);
+      }
+
+      .header-title {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .duplicate-column-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--danger);
+        box-shadow: 0 0 0 2px #ffffff;
+        flex: 0 0 auto;
+      }
+
+      .sort-indicator {
+        color: var(--accent);
+        width: 14px;
+        text-align: center;
+        flex: 0 0 auto;
+      }
+
+      .filter-indicator {
+        display: inline-flex;
+        width: 16px;
+        height: 16px;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        line-height: 1;
+      }
+
+      .resize-handle {
+        position: absolute;
+        top: 0;
+        right: -3px;
+        width: 7px;
+        height: 100%;
+        cursor: col-resize;
+        z-index: 3;
+      }
+
+      .resize-handle:hover {
+        background: rgba(15, 118, 110, 0.18);
+      }
+
+      .row-number {
+        justify-content: flex-end;
+        padding: 0 8px;
+        color: var(--muted);
+        background: #f2f5f6;
+        font-variant-numeric: tabular-nums;
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        flex: 0 0 64px;
+      }
+
+      .header-row .row-number {
+        z-index: 7;
+        font-weight: 650;
+        color: #40505a;
+      }
+
+      .cell {
+        padding: 0 8px;
+        background: var(--row);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        cursor: default;
+      }
+
+      .cell.selected {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+        background: var(--selected) !important;
+      }
+
+      .cell.range-selected {
+        background: #e6f7f2 !important;
+      }
+
+      .cell.long {
+        color: #665000;
+      }
+
+      .grid-viewport.wrap-cells .cell {
+        align-items: flex-start;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        white-space: pre-wrap;
+        overflow: auto;
+        overflow-wrap: anywhere;
+        text-overflow: clip;
+        line-height: 1.45;
+      }
+
+      .cell a,
+      .detail-content a {
+        color: #075985;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+
+      mark {
+        background: var(--mark);
+        color: inherit;
+        padding: 0 1px;
+      }
+
+      .empty-state {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        text-align: center;
+        color: var(--muted);
+        padding: 24px;
+        pointer-events: none;
+      }
+
+      .empty-state strong {
+        color: var(--text);
+        display: block;
+        margin-bottom: 8px;
+        font-size: 15px;
+      }
+
+      .detail-panel {
+        min-width: 0;
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto auto 1fr auto;
+        background: #fbfcfd;
+      }
+
+      .detail-panel.collapsed {
+        display: flex;
+        align-items: stretch;
+        justify-content: center;
+      }
+
+      .detail-panel.collapsed > :not(.detail-collapsed-button) {
+        display: none;
+      }
+
+      .detail-collapsed-button {
+        width: 100%;
+        height: 100%;
+        writing-mode: vertical-rl;
+        border: 0;
+        border-radius: 0;
+        background: #eef3f5;
+        color: var(--muted);
+      }
+
+      .detail-head {
+        border-bottom: 1px solid var(--line);
+        padding: 10px 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .detail-head strong {
+        font-size: 14px;
+      }
+
+      .detail-meta {
+        padding: 9px 12px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .detail-tools {
+        padding: 8px 12px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .detail-search {
+        flex: 1 1 140px;
+        min-width: 0;
+      }
+
+      .detail-content {
+        overflow: auto;
+        padding: 12px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        line-height: 1.55;
+        background: #ffffff;
+      }
+
+      .detail-content.mono {
+        font-family:
+          ui-monospace,
+          "SFMono-Regular",
+          Consolas,
+          "Liberation Mono",
+          monospace;
+      }
+
+      .detail-foot {
+        border-top: 1px solid var(--line);
+        padding: 8px 12px;
+        display: flex;
+        gap: 8px;
+        justify-content: space-between;
+        align-items: center;
+        color: var(--muted);
+      }
+
+      .statusbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        border-top: 1px solid var(--line);
+        background: #eef3f5;
+        color: var(--muted);
+        padding: 0 10px;
+        min-width: 0;
+        font-size: 12px;
+      }
+
+      .statusbar span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .progress-shell {
+        width: min(280px, 28vw);
+        height: 7px;
+        border-radius: 999px;
+        background: #dce4e8;
+        overflow: hidden;
+      }
+
+      .progress {
+        width: 0%;
+        height: 100%;
+        background: var(--accent);
+        transition: width 120ms linear;
+      }
+
+      .popover,
+      .context-menu {
+        position: fixed;
+        background: var(--panel);
+        border: 1px solid var(--line-strong);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+        z-index: 30;
+      }
+
+      .popover {
+        width: 300px;
+        max-height: min(520px, 70vh);
+        padding: 10px;
+        display: none;
+      }
+
+      .popover.open {
+        display: block;
+      }
+
+      .column-list {
+        max-height: 390px;
+        overflow: auto;
+        display: grid;
+        gap: 5px;
+        margin-top: 8px;
+      }
+
+      .column-list label {
+        justify-content: flex-start;
+        color: var(--text);
+      }
+
+      .filter-popover {
+        width: 340px;
+        padding: 10px;
+      }
+
+      .add-column-popover {
+        width: 320px;
+      }
+
+      .clipboard-import-popover {
+        width: 320px;
+        padding: 10px;
+      }
+
+      .concatenate-popover {
+        width: min(760px, calc(100vw - 28px));
+      }
+
+      .form-stack {
+        display: grid;
+        gap: 9px;
+      }
+
+      .form-stack label {
+        display: grid;
+        gap: 5px;
+        color: var(--text);
+        white-space: normal;
+      }
+
+      .form-stack input,
+      .form-stack select {
+        width: 100%;
+      }
+
+      .popover-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .concatenate-head {
+        display: grid;
+        grid-template-columns: minmax(180px, 280px) 1fr;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+
+      .concatenate-scheme-row {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) auto;
+        gap: 8px;
+        margin-bottom: 10px;
+        align-items: end;
+      }
+
+      .concatenate-scheme-row label {
+        display: grid;
+        gap: 5px;
+        color: var(--text);
+        white-space: normal;
+      }
+
+      .concatenate-scheme-row select {
+        width: 100%;
+      }
+
+      .concatenate-rows {
+        display: grid;
+        gap: 7px;
+        max-height: 300px;
+        overflow: auto;
+        padding: 2px 1px;
+      }
+
+      .concatenate-row {
+        display: grid;
+        grid-template-columns: 28px minmax(160px, 1.1fr) minmax(150px, 1fr) minmax(150px, 1fr) 32px;
+        gap: 7px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 7px;
+        background: var(--panel-2);
+      }
+
+      .drag-handle,
+      .icon-button {
+        width: 30px;
+        padding: 0;
+      }
+
+      .drag-handle {
+        cursor: grab;
+        color: var(--muted);
+        background: #edf3f4;
+      }
+
+      .concatenate-row select,
+      .concatenate-row input {
+        width: 100%;
+      }
+
+      .validation-status {
+        min-height: 20px;
+        color: var(--danger);
+        font-size: 12px;
+        margin-top: 8px;
+        white-space: pre-wrap;
+      }
+
+      .filter-rename {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        gap: 8px;
+        margin: 8px 0;
+      }
+
+      .filter-rename input {
+        min-width: 0;
+      }
+
+      .filter-title {
+        font-weight: 650;
+        margin-bottom: 8px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .filter-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .filter-actions button {
+        width: 100%;
+      }
+
+      .filter-search-row {
+        display: flex;
+        gap: 8px;
+        margin: 8px 0;
+      }
+
+      .filter-search-row input {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
+      .filter-summary {
+        color: var(--muted);
+        font-size: 12px;
+        margin: 6px 0;
+      }
+
+      .filter-values {
+        max-height: 260px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel-2);
+      }
+
+      .filter-values label {
+        display: flex;
+        align-items: flex-start;
+        gap: 7px;
+        padding: 6px 8px;
+        color: var(--text);
+        white-space: normal;
+      }
+
+      .filter-values label + label {
+        border-top: 1px solid var(--line);
+      }
+
+      .filter-value-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .filter-value-count {
+        margin-left: auto;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .context-menu {
+        display: none;
+        min-width: 180px;
+        padding: 6px;
+      }
+
+      .context-menu.open {
+        display: grid;
+      }
+
+      .context-menu button {
+        border: 0;
+        border-radius: 5px;
+        justify-content: flex-start;
+        text-align: left;
+        width: 100%;
+        background: transparent;
+      }
+
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        display: none;
+        place-items: center;
+        background: rgba(14, 21, 26, 0.42);
+        z-index: 50;
+        padding: 22px;
+      }
+
+      .modal-backdrop.open {
+        display: grid;
+      }
+
+      .modal {
+        width: min(1100px, 96vw);
+        height: min(780px, 92vh);
+        background: var(--panel);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+        display: grid;
+        grid-template-rows: auto auto 1fr auto;
+        overflow: hidden;
+      }
+
+      .modal-head,
+      .modal-tools,
+      .modal-foot {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .modal-foot {
+        border-top: 1px solid var(--line);
+        border-bottom: 0;
+        color: var(--muted);
+      }
+
+      .modal-content {
+        padding: 14px;
+        overflow: auto;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        line-height: 1.55;
+      }
+
+      .modal-content.mono {
+        font-family:
+          ui-monospace,
+          "SFMono-Regular",
+          Consolas,
+          "Liberation Mono",
+          monospace;
+      }
+
+      .issue-button {
+        color: var(--accent-2);
+      }
+
+      @media (max-width: 980px) {
+        .topbar {
+          grid-template-columns: 1fr;
+        }
+
+        .main {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(0, 1fr) 320px;
+        }
+
+        .main.detail-collapsed {
+          grid-template-rows: minmax(0, 1fr) 38px;
+          grid-template-columns: 1fr;
+        }
+
+        .table-region {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .search-input {
+          width: min(100%, 420px);
+        }
+
+        .concatenate-head,
+        .concatenate-row,
+        .filter-rename {
+          grid-template-columns: 1fr;
+        }
+
+        .drag-handle,
+        .icon-button {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="drop-zone" id="dropZone">
+          <div class="brand">
+            <div class="brand-mark" aria-hidden="true"></div>
+            <div class="file-title-block">
+              <h1>本地表格文件查看器</h1>
+              <p class="file-name-text" id="fileHint" title="CSV 离线处理，Excel 使用可选 SheetJS 读取">CSV 离线处理，Excel 使用可选 SheetJS 读取</p>
+            </div>
+          </div>
+          <div class="file-actions">
+            <input id="fileInput" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden />
+            <button id="clipboardImportButton">导入剪贴板表格</button>
+            <button class="primary" id="chooseFileButton">选择文件</button>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <div class="toolbar-row">
+            <input class="search-input" id="searchInput" type="search" placeholder="全表关键词搜索" />
+            <select id="searchColumnSelect" title="搜索范围">
+              <option value="-1">全部列</option>
+            </select>
+            <label><input id="caseSensitiveInput" type="checkbox" /> 大小写敏感</label>
+            <label><input id="matchedOnlyInput" type="checkbox" /> 只看命中行</label>
+            <label><input id="wrapCellsInput" type="checkbox" /> 单元格换行全文</label>
+            <button id="clearSearchButton">清除</button>
+            <span class="pill" id="filteredRowStats">0 / 0 行</span>
+          </div>
+          <div class="toolbar-row metrics-row">
+            <label>
+              编码
+              <select id="encodingSelect">
+                <option value="auto">自动</option>
+                <option value="utf-8">UTF-8</option>
+                <option value="gb18030">GB18030 / GBK</option>
+              </select>
+            </label>
+            <label class="sheet-control" id="sheetSelectLabel" hidden>
+              Sheet
+              <select id="sheetSelect" disabled>
+                <option value="">未加载</option>
+              </select>
+            </label>
+            <button id="columnsButton" disabled>列显示</button>
+            <button id="addColumnButton" disabled>新增列</button>
+            <button id="concatenateColumnButton" disabled>拼接列</button>
+            <button id="clearAllFiltersButton" disabled>清除筛选</button>
+            <label>
+              格式
+              <select id="exportFormatSelect" disabled>
+                <option value="csv" selected>CSV</option>
+                <option value="xlsx">XLSX</option>
+              </select>
+            </label>
+            <label>
+              拆分
+              <input class="export-split-input" id="exportSplitCountInput" type="number" min="1" step="1" value="1" disabled />
+            </label>
+            <button id="exportCsvButton" disabled>导出筛选</button>
+            <button id="exportIssuesButton" disabled>导出异常报告</button>
+            <div class="file-stats" id="fileStats"></div>
+          </div>
+          <div class="column-overview-row">
+            <div class="column-overview" id="columnOverview" aria-label="全部列名"></div>
+          </div>
+        </div>
+      </header>
+
+      <main class="main" id="mainLayout">
+        <section class="table-region">
+          <div class="grid-viewport" id="gridViewport" tabindex="0" aria-label="表格视图">
+            <div class="grid-canvas" id="gridCanvas">
+              <div class="header-row" id="headerRow"></div>
+              <div id="rowLayer"></div>
+            </div>
+          </div>
+          <div class="empty-state" id="emptyState">
+            <div>
+              <strong>未加载文件</strong>
+              <span>拖拽或选择 CSV、TSV、TXT、XLSX、XLS 文件</span>
+            </div>
+          </div>
+        </section>
+
+        <aside class="detail-panel" id="detailPanel">
+          <button class="detail-collapsed-button" id="restoreDetailButton" hidden>单元格详情</button>
+          <div class="detail-head">
+            <strong>单元格详情</strong>
+            <button class="ghost" id="toggleDetailButton">收起</button>
+          </div>
+          <div class="detail-meta" id="detailMeta"></div>
+          <div>
+            <div class="detail-tools">
+              <input class="detail-search" id="detailSearchInput" type="search" placeholder="在全文中搜索" />
+              <button id="copyCellButton" disabled>复制选区</button>
+              <button id="openModalButton" disabled>放大</button>
+              <label><input id="monoInput" type="checkbox" /> 等宽</label>
+            </div>
+          </div>
+          <div class="detail-content" id="detailContent"></div>
+          <div class="detail-foot">
+            <span id="detailStatus">未选择单元格</span>
+            <button id="loadMoreDetailButton" disabled>加载更多</button>
+          </div>
+        </aside>
+      </main>
+
+      <footer class="statusbar">
+        <span id="leftStatus">就绪</span>
+        <div class="progress-shell" aria-label="解析进度">
+          <div class="progress" id="progressBar"></div>
+        </div>
+        <span id="rightStatus">0 行 · 0 列</span>
+      </footer>
+    </div>
+
+    <div class="popover" id="columnsPopover">
+      <div class="toolbar-row">
+        <button id="showAllColumnsButton">全选</button>
+        <button id="hideAllColumnsButton">全不选</button>
+      </div>
+      <div class="column-list" id="columnList"></div>
+    </div>
+
+    <div class="popover clipboard-import-popover" id="clipboardImportPopover">
+      <div class="filter-title">导入剪贴板表格</div>
+      <div class="form-stack">
+        <label><input id="clipboardFirstRowHeaderInput" type="checkbox" checked /> 第一行作为表头</label>
+        <div class="filter-summary">仅在未载入文件时导入；已载入数据请刷新页面后再导入。</div>
+      </div>
+      <div class="popover-actions">
+        <button id="cancelClipboardImportButton">取消</button>
+        <button class="primary" id="confirmClipboardImportButton">导入</button>
+      </div>
+    </div>
+
+    <div class="popover add-column-popover" id="addColumnPopover">
+      <div class="filter-title">新增列</div>
+      <div class="form-stack">
+        <label>
+          列名
+          <input id="newColumnNameInput" type="text" placeholder="输入新列名" />
+        </label>
+        <label>
+          内容来源
+          <select id="newColumnModeSelect">
+            <option value="empty">空列</option>
+            <option value="sequence">序列号（从 1 开始）</option>
+            <option value="copy">复制已有列</option>
+          </select>
+        </label>
+        <label>
+          复制来源列
+          <select id="copyColumnSelect" disabled></select>
+        </label>
+      </div>
+      <div class="popover-actions">
+        <button id="cancelAddColumnButton">取消</button>
+        <button class="primary" id="confirmAddColumnButton">添加</button>
+      </div>
+    </div>
+
+    <div class="popover concatenate-popover" id="concatenateColumnPopover">
+      <div class="filter-title">拼接列</div>
+      <div class="concatenate-head">
+        <label>
+          输出列名
+          <input id="concatenateColumnNameInput" type="text" value="用户问题" />
+        </label>
+        <div class="filter-summary">按行顺序生成 Markdown 代码块；手动列名重复时必须用下拉选择。</div>
+      </div>
+      <div class="concatenate-scheme-row">
+        <label>
+          复用方案
+          <select id="concatenateSchemeSelect"></select>
+        </label>
+        <button id="applyConcatenateSchemeButton">应用方案</button>
+      </div>
+      <div class="concatenate-rows" id="concatenateRows"></div>
+      <div class="validation-status" id="concatenateValidationStatus"></div>
+      <div class="popover-actions">
+        <button id="addConcatenateRowButton">添加拼接项</button>
+        <button id="cancelConcatenateColumnButton">取消</button>
+        <button class="primary" id="confirmConcatenateColumnButton">生成拼接列</button>
+      </div>
+    </div>
+
+    <div class="popover filter-popover" id="columnFilterPopover">
+      <div class="filter-title" id="columnFilterTitle">列筛选</div>
+      <div class="filter-rename">
+        <input id="renameColumnInput" type="text" placeholder="列名" />
+        <button id="renameColumnButton">重命名列</button>
+        <button id="restoreColumnNameButton">恢复原始列名</button>
+      </div>
+      <div class="filter-actions">
+        <button id="filterSortAscButton">升序</button>
+        <button id="filterSortDescButton">降序</button>
+      </div>
+      <div class="filter-search-row">
+        <input id="columnFilterSearchInput" type="search" placeholder="搜索本列值" />
+        <button id="clearColumnFilterButton">清除</button>
+      </div>
+      <div class="filter-actions">
+        <button id="selectAllFilterValuesButton">全选</button>
+        <button id="selectNoFilterValuesButton">全不选</button>
+      </div>
+      <div class="filter-actions">
+        <button id="hideFilteredRowsButton">隐藏当前结果行</button>
+        <button id="showHiddenRowsButton">显示隐藏行</button>
+      </div>
+      <div class="filter-actions">
+        <button id="deleteCustomColumnButton" class="danger" disabled>删除此自定义列</button>
+      </div>
+      <div class="filter-summary" id="columnFilterSummary">未选择列</div>
+      <div class="filter-values" id="columnFilterValues"></div>
+    </div>
+
+    <div class="context-menu" id="contextMenu">
+      <button data-action="copy-cell">复制单元格</button>
+      <button data-action="copy-row">复制整行</button>
+      <button data-action="copy-header">复制列名</button>
+      <button data-action="view-full">查看完整内容</button>
+    </div>
+
+    <div class="modal-backdrop" id="modalBackdrop" role="dialog" aria-modal="true" aria-label="完整内容">
+      <div class="modal">
+        <div class="modal-head">
+          <strong id="modalTitle">完整内容</strong>
+          <button id="closeModalButton">关闭</button>
+        </div>
+        <div class="modal-tools">
+          <input class="detail-search" id="modalSearchInput" type="search" placeholder="在全文中搜索" />
+          <button id="copyModalButton">复制全文</button>
+          <label><input id="modalMonoInput" type="checkbox" /> 等宽</label>
+        </div>
+        <div class="modal-content" id="modalContent"></div>
+        <div class="modal-foot">
+          <span id="modalStatus"></span>
+          <button id="loadMoreModalButton">加载更多</button>
+        </div>
+      </div>
+    </div>
+
+    <script id="csv-worker-source" type="text/plain">
+const DEFAULT_PREVIEW_LIMIT = 500;
+const DEFAULT_LONG_FIELD_THRESHOLD = 50000;
+const EMPTY_RATIO_THRESHOLD = 0.6;
+
+function normalizeNewline(ch, text, index) {
+  if (ch === "\r") {
+    return { isNewline: true, nextIndex: text[index + 1] === "\n" ? index + 1 : index };
+  }
+  return { isNewline: ch === "\n", nextIndex: index };
+}
+
+function getSampleRecords(text, limit = 20) {
+  const records = [];
+  let field = "";
+  let record = [];
+  let inQuotes = false;
+  let started = false;
+
+  for (let i = 0; i < text.length && records.length < limit; i += 1) {
+    const ch = text[i];
+    if (ch === '"') {
+      if (inQuotes && text[i + 1] === '"') {
+        field += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      started = true;
+      continue;
+    }
+
+    const newline = normalizeNewline(ch, text, i);
+    if (!inQuotes && newline.isNewline) {
+      record.push(field);
+      records.push(record);
+      field = "";
+      record = [];
+      started = false;
+      i = newline.nextIndex;
+      continue;
+    }
+
+    field += ch;
+    started = true;
+  }
+
+  if (records.length < limit && (started || field.length > 0 || record.length > 0)) {
+    record.push(field);
+    records.push(record);
+  }
+  return records;
+}
+
+function countDelimiterOutsideQuotes(recordText, delimiter) {
+  let count = 0;
+  let inQuotes = false;
+  for (let i = 0; i < recordText.length; i += 1) {
+    const ch = recordText[i];
+    if (ch === '"') {
+      if (inQuotes && recordText[i + 1] === '"') {
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (!inQuotes && ch === delimiter) count += 1;
+  }
+  return count;
+}
+
+function samplePhysicalRecords(text, limit = 20) {
+  const records = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length && records.length < limit; i += 1) {
+    const ch = text[i];
+    if (ch === '"') {
+      if (inQuotes && text[i + 1] === '"') {
+        current += ch + text[i + 1];
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+        current += ch;
+      }
+      continue;
+    }
+    const newline = normalizeNewline(ch, text, i);
+    if (!inQuotes && newline.isNewline) {
+      records.push(current);
+      current = "";
+      i = newline.nextIndex;
+      continue;
+    }
+    current += ch;
+  }
+  if (current.length > 0) records.push(current);
+  return records.filter((line) => line.trim().length > 0);
+}
+
+function detectDelimiter(text) {
+  const candidates = [",", "\t", ";", "|"];
+  const sample = samplePhysicalRecords(text.slice(0, Math.min(text.length, 256 * 1024)));
+  let best = ",";
+  let bestScore = -Infinity;
+
+  for (const delimiter of candidates) {
+    const counts = sample.map((line) => countDelimiterOutsideQuotes(line, delimiter));
+    const nonZero = counts.filter((count) => count > 0);
+    if (nonZero.length === 0) continue;
+    const avg = nonZero.reduce((sum, count) => sum + count, 0) / nonZero.length;
+    const variance =
+      nonZero.reduce((sum, count) => sum + Math.abs(count - avg), 0) / Math.max(1, nonZero.length);
+    const consistency = nonZero.length / Math.max(1, sample.length);
+    const score = avg * 4 + consistency * 8 - variance * 3;
+    if (score > bestScore) {
+      best = delimiter;
+      bestScore = score;
+    }
+  }
+
+  return best;
+}
+
+function normalizeHeaders(rawHeaders, columnCount) {
+  const used = new Map();
+  const headers = [];
+  for (let i = 0; i < columnCount; i += 1) {
+    const raw = rawHeaders[i] == null || rawHeaders[i] === "" ? `Column ${i + 1}` : String(rawHeaders[i]);
+    const seen = used.get(raw) || 0;
+    used.set(raw, seen + 1);
+    headers.push(seen === 0 ? raw : `${raw} (${seen + 1})`);
+  }
+  return headers;
+}
+
+function buildIssueSummary(type, rowNumber, columnIndex, columnName, detail, sample) {
+  return {
+    type,
+    rowNumber,
+    columnIndex,
+    columnName,
+    detail,
+    sample: sample == null ? "" : String(sample).slice(0, 300),
+  };
+}
+
+function detectDuplicateColumns(rawHeaders) {
+  const groups = new Map();
+  rawHeaders.forEach((header, index) => {
+    const name = header == null || header === "" ? `Column ${index + 1}` : String(header);
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(index);
+  });
+  return [...groups.entries()]
+    .filter(([, indexes]) => indexes.length > 1)
+    .map(([columnName, columnIndexes]) => ({
+      type: "重复列名",
+      rowNumber: 1,
+      columnIndex: columnIndexes[0],
+      columnIndexes,
+      columnName,
+      detail: `列名出现 ${columnIndexes.length} 次：${columnIndexes.map((index) => index + 1).join(", ")}`,
+      sample: columnName,
+    }));
+}
+
+function getMaxRecordColumns(records, minimumColumns = 0) {
+  let maxColumns = minimumColumns;
+  for (const row of records) {
+    if (row.length > maxColumns) maxColumns = row.length;
+  }
+  return maxColumns;
+}
+
+function getFormulaNestingDepth(value) {
+  const text = String(value == null ? "" : value);
+  let depth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    if (ch === ")" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+  }
+  return depth;
+}
+
+function repairFormulaRecord(record, expectedColumns, delimiter) {
+  if (!expectedColumns || record.length <= expectedColumns) return record;
+  const repaired = [];
+  let changed = false;
+
+  for (let index = 0; index < record.length; index += 1) {
+    const remainingOutput = expectedColumns - repaired.length;
+    const remainingFields = record.length - index;
+    if (remainingFields === remainingOutput) {
+      repaired.push(...record.slice(index));
+      break;
+    }
+
+    const startIndex = index;
+    let value = record[index];
+    if (String(value == null ? "" : value).trimStart().startsWith("=")) {
+      let depth = getFormulaNestingDepth(value);
+      while (
+        depth > 0 &&
+        index + 1 < record.length &&
+        record.length - (index + 2) >= remainingOutput - 1
+      ) {
+        index += 1;
+        value += delimiter + record[index];
+        depth = getFormulaNestingDepth(value);
+      }
+      if (depth === 0 && index > startIndex) {
+        repaired.push(value);
+        changed = true;
+        continue;
+      }
+      index = startIndex;
+    }
+
+    repaired.push(record[index]);
+  }
+
+  return changed && repaired.length === expectedColumns ? repaired : record;
+}
+
+function parseCsvText(text, options = {}) {
+  const delimiter = options.delimiter || detectDelimiter(text);
+  const previewLimit = options.previewLimit || DEFAULT_PREVIEW_LIMIT;
+  const longFieldThreshold = options.longFieldThreshold || DEFAULT_LONG_FIELD_THRESHOLD;
+  const records = [];
+  let field = "";
+  let record = [];
+  let inQuotes = false;
+  let started = false;
+  let lastProgressAt = 0;
+  const progressEvery = Math.max(1024 * 256, Math.floor(text.length / 100));
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === '"') {
+      if (inQuotes && text[i + 1] === '"') {
+        field += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      started = true;
+      continue;
+    }
+
+    if (!inQuotes && ch === delimiter) {
+      record.push(field);
+      field = "";
+      started = true;
+      continue;
+    }
+
+    const newline = normalizeNewline(ch, text, i);
+    if (!inQuotes && newline.isNewline) {
+      record.push(field);
+      records.push(record);
+      field = "";
+      record = [];
+      started = false;
+      i = newline.nextIndex;
+      continue;
+    }
+
+    field += ch;
+    started = true;
+
+    if (options.onProgress && i - lastProgressAt >= progressEvery) {
+      lastProgressAt = i;
+      options.onProgress(Math.min(0.98, i / Math.max(1, text.length)));
+    }
+  }
+
+  if (started || field.length > 0 || record.length > 0) {
+    record.push(field);
+    records.push(record);
+  }
+
+  const nonEmptyRecords = records.filter((row, index) => {
+    if (index === 0) return true;
+    return row.some((cell) => cell !== "");
+  });
+  const rawHeaders = nonEmptyRecords[0] || [];
+  const expectedColumns = rawHeaders.length;
+  const recordsForAnalysis = expectedColumns
+    ? [rawHeaders, ...nonEmptyRecords.slice(1).map((row) => repairFormulaRecord(row, expectedColumns, delimiter))]
+    : nonEmptyRecords;
+  const maxColumns = getMaxRecordColumns(recordsForAnalysis, expectedColumns);
+  const headers = normalizeHeaders(rawHeaders, maxColumns);
+  const rows = [];
+  const issues = {
+    inconsistentRows: [],
+    sparseRows: [],
+    longFields: [],
+    duplicateColumns: detectDuplicateColumns(rawHeaders),
+  };
+
+  for (let i = 1; i < recordsForAnalysis.length; i += 1) {
+    const rawRow = recordsForAnalysis[i];
+    const rowNumber = i + 1;
+    if (expectedColumns > 0 && rawRow.length !== expectedColumns) {
+      issues.inconsistentRows.push(
+        buildIssueSummary(
+          "列数不一致",
+          rowNumber,
+          -1,
+          "",
+          `期望 ${expectedColumns} 列，实际 ${rawRow.length} 列`,
+          rawRow.join(delimiter),
+        ),
+      );
+    }
+
+    const emptyCount = rawRow.filter((cell) => cell === "").length + Math.max(0, maxColumns - rawRow.length);
+    if (maxColumns > 1 && emptyCount / maxColumns >= EMPTY_RATIO_THRESHOLD) {
+      issues.sparseRows.push(
+        buildIssueSummary(
+          "空字段比例高",
+          rowNumber,
+          -1,
+          "",
+          `空字段 ${emptyCount}/${maxColumns}`,
+          rawRow.join(delimiter),
+        ),
+      );
+    }
+
+    for (let col = 0; col < rawRow.length; col += 1) {
+      const value = rawRow[col] == null ? "" : String(rawRow[col]);
+      if (value.length >= longFieldThreshold) {
+        issues.longFields.push(
+          buildIssueSummary(
+            "超长字段",
+            rowNumber,
+            col,
+            headers[col] || `Column ${col + 1}`,
+            `${value.length} 字符`,
+            value,
+          ),
+        );
+      }
+    }
+
+    const padded = Array.from({ length: maxColumns }, (_, col) => rawRow[col] == null ? "" : String(rawRow[col]));
+    rows.push(padded);
+  }
+
+  return {
+    headers,
+    rows,
+    issues,
+    meta: {
+      rowCount: rows.length,
+      columnCount: headers.length,
+      delimiter,
+      previewLimit,
+      longFieldThreshold,
+    },
+  };
+}
+
+function decodeBuffer(buffer, encodingPreference = "auto") {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  if (encodingPreference !== "auto") {
+    return {
+      text: new TextDecoder(encodingPreference).decode(bytes),
+      encoding: encodingPreference.toUpperCase(),
+    };
+  }
+
+  try {
+    return {
+      text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      encoding: "UTF-8",
+    };
+  } catch (error) {
+    const labels = ["gb18030", "gbk"];
+    for (const label of labels) {
+      try {
+        return {
+          text: new TextDecoder(label).decode(bytes),
+          encoding: "GB18030/GBK",
+        };
+      } catch (innerError) {
+        continue;
+      }
+    }
+    return {
+      text: new TextDecoder("utf-8").decode(bytes),
+      encoding: "UTF-8 (replacement)",
+    };
+  }
+}
+
+self.__CSV_CORE__ = {
+  detectDelimiter,
+  parseCsvText,
+  decodeBuffer,
+};
+
+self.onmessage = (event) => {
+  const message = event.data || {};
+  if (message.kind !== "parse-csv") return;
+
+  const startedAt = Date.now();
+  try {
+    self.postMessage({ type: "progress", stage: "解码文件", progress: 0.04 });
+    const decoded = decodeBuffer(message.buffer, message.encoding || "auto");
+    self.postMessage({ type: "progress", stage: "识别分隔符", progress: 0.1 });
+    const delimiter = message.delimiter || detectDelimiter(decoded.text);
+    const result = parseCsvText(decoded.text, {
+      delimiter,
+      previewLimit: message.previewLimit || DEFAULT_PREVIEW_LIMIT,
+      longFieldThreshold: message.longFieldThreshold || DEFAULT_LONG_FIELD_THRESHOLD,
+      onProgress(progress) {
+        self.postMessage({
+          type: "progress",
+          stage: "解析 CSV",
+          progress: 0.1 + progress * 0.86,
+        });
+      },
+    });
+    result.file = {
+      name: message.fileName,
+      size: message.fileSize,
+      encoding: decoded.encoding,
+      delimiter,
+      parseMs: Date.now() - startedAt,
+      kind: "CSV",
+    };
+    self.postMessage({ type: "complete", result });
+  } catch (error) {
+    self.postMessage({
+      type: "error",
+      message: error && error.message ? error.message : String(error),
+    });
+  }
+};
+    </script>
+
+    <script>
+      const PREVIEW_LIMIT = 500;
+      const DETAIL_CHUNK = 100000;
+      const MODAL_CHUNK = 100000;
+      const ROW_HEIGHT = 34;
+      const WRAP_ROW_HEIGHT = 180;
+      const HEADER_HEIGHT = 38;
+      const ROW_NUMBER_WIDTH = 64;
+      const DEFAULT_COL_WIDTH = 180;
+      const MIN_COL_WIDTH = 80;
+      const MAX_COL_WIDTH = 720;
+      const CONCATENATE_SCHEMES_STORAGE_KEY = "file-viewer.concatenateSchemes.v1";
+      const MAX_CONCATENATE_SCHEMES = 20;
+      const EXCEL_INDEXED_COLORS = {
+        0: "#000000",
+        1: "#ffffff",
+        2: "#ff0000",
+        3: "#00ff00",
+        4: "#0000ff",
+        5: "#ffff00",
+        6: "#ff00ff",
+        7: "#00ffff",
+        8: "#000000",
+        9: "#ffffff",
+        10: "#ff0000",
+        13: "#ffff00",
+        64: "",
+        65: "",
+      };
+
+      const els = {
+        dropZone: document.getElementById("dropZone"),
+        fileInput: document.getElementById("fileInput"),
+        chooseFileButton: document.getElementById("chooseFileButton"),
+        clipboardImportButton: document.getElementById("clipboardImportButton"),
+        clipboardImportPopover: document.getElementById("clipboardImportPopover"),
+        clipboardFirstRowHeaderInput: document.getElementById("clipboardFirstRowHeaderInput"),
+        cancelClipboardImportButton: document.getElementById("cancelClipboardImportButton"),
+        confirmClipboardImportButton: document.getElementById("confirmClipboardImportButton"),
+        fileHint: document.getElementById("fileHint"),
+        fileStats: document.getElementById("fileStats"),
+        encodingSelect: document.getElementById("encodingSelect"),
+        sheetSelectLabel: document.getElementById("sheetSelectLabel"),
+        sheetSelect: document.getElementById("sheetSelect"),
+        searchInput: document.getElementById("searchInput"),
+        searchColumnSelect: document.getElementById("searchColumnSelect"),
+        caseSensitiveInput: document.getElementById("caseSensitiveInput"),
+        matchedOnlyInput: document.getElementById("matchedOnlyInput"),
+        wrapCellsInput: document.getElementById("wrapCellsInput"),
+        clearSearchButton: document.getElementById("clearSearchButton"),
+        filteredRowStats: document.getElementById("filteredRowStats"),
+        columnsButton: document.getElementById("columnsButton"),
+        addColumnButton: document.getElementById("addColumnButton"),
+        concatenateColumnButton: document.getElementById("concatenateColumnButton"),
+        clearAllFiltersButton: document.getElementById("clearAllFiltersButton"),
+        exportCsvButton: document.getElementById("exportCsvButton"),
+        exportFormatSelect: document.getElementById("exportFormatSelect"),
+        exportSplitCountInput: document.getElementById("exportSplitCountInput"),
+        exportIssuesButton: document.getElementById("exportIssuesButton"),
+        gridViewport: document.getElementById("gridViewport"),
+        gridCanvas: document.getElementById("gridCanvas"),
+        headerRow: document.getElementById("headerRow"),
+        rowLayer: document.getElementById("rowLayer"),
+        emptyState: document.getElementById("emptyState"),
+        mainLayout: document.getElementById("mainLayout"),
+        detailPanel: document.getElementById("detailPanel"),
+        restoreDetailButton: document.getElementById("restoreDetailButton"),
+        toggleDetailButton: document.getElementById("toggleDetailButton"),
+        detailMeta: document.getElementById("detailMeta"),
+        detailSearchInput: document.getElementById("detailSearchInput"),
+        copyCellButton: document.getElementById("copyCellButton"),
+        openModalButton: document.getElementById("openModalButton"),
+        monoInput: document.getElementById("monoInput"),
+        detailContent: document.getElementById("detailContent"),
+        detailStatus: document.getElementById("detailStatus"),
+        loadMoreDetailButton: document.getElementById("loadMoreDetailButton"),
+        leftStatus: document.getElementById("leftStatus"),
+        rightStatus: document.getElementById("rightStatus"),
+        progressBar: document.getElementById("progressBar"),
+        columnsPopover: document.getElementById("columnsPopover"),
+        columnOverview: document.getElementById("columnOverview"),
+        columnList: document.getElementById("columnList"),
+        showAllColumnsButton: document.getElementById("showAllColumnsButton"),
+        hideAllColumnsButton: document.getElementById("hideAllColumnsButton"),
+        addColumnPopover: document.getElementById("addColumnPopover"),
+        newColumnNameInput: document.getElementById("newColumnNameInput"),
+        newColumnModeSelect: document.getElementById("newColumnModeSelect"),
+        copyColumnSelect: document.getElementById("copyColumnSelect"),
+        cancelAddColumnButton: document.getElementById("cancelAddColumnButton"),
+        confirmAddColumnButton: document.getElementById("confirmAddColumnButton"),
+        concatenateColumnPopover: document.getElementById("concatenateColumnPopover"),
+        concatenateSchemeSelect: document.getElementById("concatenateSchemeSelect"),
+        applyConcatenateSchemeButton: document.getElementById("applyConcatenateSchemeButton"),
+        concatenateColumnNameInput: document.getElementById("concatenateColumnNameInput"),
+        concatenateRows: document.getElementById("concatenateRows"),
+        addConcatenateRowButton: document.getElementById("addConcatenateRowButton"),
+        cancelConcatenateColumnButton: document.getElementById("cancelConcatenateColumnButton"),
+        confirmConcatenateColumnButton: document.getElementById("confirmConcatenateColumnButton"),
+        concatenateValidationStatus: document.getElementById("concatenateValidationStatus"),
+        columnFilterPopover: document.getElementById("columnFilterPopover"),
+        columnFilterTitle: document.getElementById("columnFilterTitle"),
+        renameColumnInput: document.getElementById("renameColumnInput"),
+        renameColumnButton: document.getElementById("renameColumnButton"),
+        restoreColumnNameButton: document.getElementById("restoreColumnNameButton"),
+        filterSortAscButton: document.getElementById("filterSortAscButton"),
+        filterSortDescButton: document.getElementById("filterSortDescButton"),
+        columnFilterSearchInput: document.getElementById("columnFilterSearchInput"),
+        clearColumnFilterButton: document.getElementById("clearColumnFilterButton"),
+        selectAllFilterValuesButton: document.getElementById("selectAllFilterValuesButton"),
+        selectNoFilterValuesButton: document.getElementById("selectNoFilterValuesButton"),
+        hideFilteredRowsButton: document.getElementById("hideFilteredRowsButton"),
+        showHiddenRowsButton: document.getElementById("showHiddenRowsButton"),
+        deleteCustomColumnButton: document.getElementById("deleteCustomColumnButton"),
+        columnFilterSummary: document.getElementById("columnFilterSummary"),
+        columnFilterValues: document.getElementById("columnFilterValues"),
+        contextMenu: document.getElementById("contextMenu"),
+        modalBackdrop: document.getElementById("modalBackdrop"),
+        modalTitle: document.getElementById("modalTitle"),
+        closeModalButton: document.getElementById("closeModalButton"),
+        modalSearchInput: document.getElementById("modalSearchInput"),
+        copyModalButton: document.getElementById("copyModalButton"),
+        modalMonoInput: document.getElementById("modalMonoInput"),
+        modalContent: document.getElementById("modalContent"),
+        modalStatus: document.getElementById("modalStatus"),
+        loadMoreModalButton: document.getElementById("loadMoreModalButton"),
+      };
+
+      const state = {
+        headers: [],
+        originalHeaders: [],
+        rows: [],
+        issues: { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: [] },
+        cellMeta: new Map(),
+        excelWorkbook: null,
+        excelXLSX: null,
+        excelFile: null,
+        excelSheetNames: [],
+        activeSheetName: "",
+        loadToken: 0,
+        file: null,
+        sourceFileHandle: null,
+        viewIndices: [],
+        rowPositionMap: new Map(),
+        matchedRows: new Set(),
+        visibleColumns: [],
+        columnOrder: [],
+        columnWidths: [],
+        columnFilters: {},
+        columnValueCache: new Map(),
+        customColumns: new Set(),
+        columnFilterMenu: { columnIndex: -1, query: "" },
+        concatenateColumnItems: [],
+        concatenateSchemes: [],
+        concatenateDragIndex: -1,
+        hiddenRows: new Set(),
+        dragColumn: null,
+        wrapCells: false,
+        sort: { column: -1, direction: "none" },
+        selected: null,
+        selectionAnchor: null,
+        selectionRange: null,
+        selectionDrag: null,
+        detailVisibleChars: DETAIL_CHUNK,
+        modalVisibleChars: MODAL_CHUNK,
+        modalCell: null,
+        worker: null,
+        resize: null,
+        renderQueued: false,
+      };
+
+      function createCsvWorker() {
+        const source = document.getElementById("csv-worker-source").textContent;
+        const blob = new Blob([source], { type: "text/javascript" });
+        const workerUrl = URL.createObjectURL(blob);
+        const worker = new Worker(workerUrl);
+        URL.revokeObjectURL(workerUrl);
+        return worker;
+      }
+
+      function beginLoad() {
+        state.loadToken += 1;
+        if (state.worker) state.worker.terminate();
+        state.worker = null;
+        return state.loadToken;
+      }
+
+      function isCurrentLoad(loadToken) {
+        return loadToken === state.loadToken;
+      }
+
+      function formatBytes(bytes) {
+        if (!Number.isFinite(bytes)) return "0 B";
+        const units = ["B", "KB", "MB", "GB"];
+        let value = bytes;
+        let index = 0;
+        while (value >= 1024 && index < units.length - 1) {
+          value /= 1024;
+          index += 1;
+        }
+        return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
+      }
+
+      function delimiterLabel(delimiter) {
+        if (delimiter === "\t") return "Tab";
+        if (delimiter === ",") return "逗号";
+        if (delimiter === ";") return "分号";
+        if (delimiter === "|") return "竖线";
+        return delimiter || "";
+      }
+
+      function setProgress(progress, label) {
+        els.progressBar.style.width = `${Math.max(0, Math.min(100, progress * 100))}%`;
+        if (label) els.leftStatus.textContent = label;
+      }
+
+      function escapeCsv(value) {
+        const text = value == null ? "" : String(value);
+        if (/[",\r\n\t;]/.test(text)) {
+          return `"${text.replaceAll('"', '""')}"`;
+        }
+        return text;
+      }
+
+      function normalizeTextParts(content) {
+        return Array.isArray(content) ? content : [content];
+      }
+
+      function downloadText(filename, content, mime = "text/csv;charset=utf-8") {
+        const blob = new Blob(["\ufeff", ...normalizeTextParts(content)], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      async function saveTextFile(filename, content, mime = "text/csv;charset=utf-8") {
+        const parts = normalizeTextParts(content);
+        if (window.showSaveFilePicker) {
+          const options = {
+            suggestedName: filename,
+            types: [
+              {
+                description: "CSV file",
+                accept: { "text/csv": [".csv"] },
+              },
+            ],
+          };
+          if (state.sourceFileHandle) options.startIn = state.sourceFileHandle;
+          try {
+            const handle = await window.showSaveFilePicker(options);
+            const writable = await handle.createWritable();
+            await writable.write(new Blob(["\ufeff", ...parts], { type: mime }));
+            await writable.close();
+            els.leftStatus.textContent = "已导出文件";
+            return;
+          } catch (error) {
+            if (error && error.name === "AbortError") return;
+            try {
+              const handle = await window.showSaveFilePicker({ suggestedName: filename });
+              const writable = await handle.createWritable();
+              await writable.write(new Blob(["\ufeff", ...parts], { type: mime }));
+              await writable.close();
+              els.leftStatus.textContent = "已导出文件";
+              return;
+            } catch (fallbackError) {
+              if (fallbackError && fallbackError.name === "AbortError") return;
+            }
+          }
+        }
+        downloadText(filename, parts, mime);
+      }
+
+      async function copyText(text) {
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch (error) {
+          const area = document.createElement("textarea");
+          area.value = text;
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.select();
+          document.execCommand("copy");
+          area.remove();
+        }
+        els.leftStatus.textContent = "已复制到剪贴板";
+      }
+
+      function getVisibleColumnIndexes() {
+        const order = state.columnOrder.length ? state.columnOrder : state.headers.map((_, index) => index);
+        return order
+          .filter((index) => state.visibleColumns[index]);
+      }
+
+      function getCurrentRowHeight() {
+        return state.wrapCells ? WRAP_ROW_HEIGHT : ROW_HEIGHT;
+      }
+
+      function getTotalWidth() {
+        return (
+          ROW_NUMBER_WIDTH +
+          getVisibleColumnIndexes().reduce((sum, col) => sum + (state.columnWidths[col] || DEFAULT_COL_WIDTH), 0)
+        );
+      }
+
+      function summarize(value) {
+        const text = value == null ? "" : String(value);
+        if (text.length <= PREVIEW_LIMIT) return { text, isLong: false };
+        return {
+          text: `文本过长，已截断显示，点击查看全文 · ${text.slice(0, PREVIEW_LIMIT)}`,
+          isLong: true,
+        };
+      }
+
+      function normalizeForSearch(value, caseSensitive) {
+        const text = value == null ? "" : String(value);
+        return caseSensitive ? text : text.toLocaleLowerCase();
+      }
+
+      function rowMatches(row) {
+        const query = els.searchInput.value;
+        if (!query) return false;
+        const needle = normalizeForSearch(query, els.caseSensitiveInput.checked);
+        const selectedColumn = Number(els.searchColumnSelect.value);
+        if (selectedColumn >= 0) {
+          return normalizeForSearch(row[selectedColumn] || "", els.caseSensitiveInput.checked).includes(needle);
+        }
+        for (const cell of row) {
+          if (normalizeForSearch(cell, els.caseSensitiveInput.checked).includes(needle)) return true;
+        }
+        return false;
+      }
+
+      function getColumnUniqueValues(columnIndex) {
+        return getCachedColumnUniqueValues(columnIndex);
+      }
+
+      function invalidateColumnValueCache(columnIndex = null) {
+        if (columnIndex == null) {
+          state.columnValueCache.clear();
+          return;
+        }
+        state.columnValueCache.delete(String(columnIndex));
+      }
+
+      function getCachedColumnUniqueValues(columnIndex) {
+        const cacheKey = String(columnIndex);
+        const cached = state.columnValueCache.get(cacheKey);
+        if (cached) return cached;
+        const counts = new Map();
+        for (const row of state.rows) {
+          const value = row[columnIndex] == null ? "" : String(row[columnIndex]);
+          counts.set(value, (counts.get(value) || 0) + 1);
+        }
+        const values = [...counts.entries()]
+          .map(([value, count]) => ({ value, count }))
+          .sort((a, b) => compareCells(a.value, b.value));
+        state.columnValueCache.set(cacheKey, values);
+        return values;
+      }
+
+      function getColumnFilter(columnIndex) {
+        return state.columnFilters[String(columnIndex)] || null;
+      }
+
+      function hasColumnFilter(columnIndex) {
+        return Boolean(getColumnFilter(columnIndex));
+      }
+
+      function cloneColumnFilter(filter) {
+        if (!filter) return null;
+        if (filter.allowedValues) return { mode: "include", values: new Set(filter.allowedValues) };
+        return {
+          mode: filter.mode === "exclude" ? "exclude" : "include",
+          values: new Set(filter.values || []),
+        };
+      }
+
+      function isColumnFilterValueSelected(columnIndex, value) {
+        const filter = getColumnFilter(columnIndex);
+        if (!filter) return true;
+        if (filter.allowedValues) return filter.allowedValues.has(value);
+        if (filter.mode === "exclude") return !filter.values.has(value);
+        return filter.values.has(value);
+      }
+
+      function getColumnFilterSelectedCount(columnIndex, allValues) {
+        const filter = getColumnFilter(columnIndex);
+        if (!filter) return allValues.length;
+        if (filter.allowedValues) return Math.min(filter.allowedValues.size, allValues.length);
+        if (filter.mode === "exclude") return Math.max(0, allValues.length - filter.values.size);
+        return Math.min(filter.values.size, allValues.length);
+      }
+
+      function normalizeColumnFilter(columnIndex, filter, allValues = getColumnUniqueValues(columnIndex)) {
+        const key = String(columnIndex);
+        const next = cloneColumnFilter(filter);
+        if (!next) {
+          delete state.columnFilters[key];
+          return;
+        }
+        if (next.mode === "exclude") {
+          if (!next.values.size) delete state.columnFilters[key];
+          else state.columnFilters[key] = next;
+          return;
+        }
+        const selectedEveryValue = allValues.length > 0 && allValues.every((item) => next.values.has(item.value));
+        if (selectedEveryValue) {
+          delete state.columnFilters[key];
+          return;
+        }
+        state.columnFilters[key] = next;
+      }
+
+      function updateColumnFilterValue(columnIndex, value, checked, allValues = getColumnUniqueValues(columnIndex)) {
+        let next = cloneColumnFilter(getColumnFilter(columnIndex));
+        if (!next) {
+          if (checked) return;
+          next = { mode: "exclude", values: new Set([value]) };
+        } else if (next.mode === "exclude") {
+          if (checked) next.values.delete(value);
+          else next.values.add(value);
+        } else if (checked) {
+          next.values.add(value);
+        } else {
+          next.values.delete(value);
+        }
+        normalizeColumnFilter(columnIndex, next, allValues);
+      }
+
+      function updateColumnFilterValues(columnIndex, items, checked, allValues = getColumnUniqueValues(columnIndex)) {
+        if (checked && items.length === allValues.length) {
+          clearColumnFilter(columnIndex);
+          return;
+        }
+        const itemValues = items.map((item) => item.value);
+        let next = cloneColumnFilter(getColumnFilter(columnIndex));
+        if (!next) {
+          if (checked) return;
+          next = itemValues.length === allValues.length
+            ? { mode: "include", values: new Set() }
+            : { mode: "exclude", values: new Set(itemValues) };
+        } else if (next.mode === "exclude") {
+          for (const value of itemValues) {
+            if (checked) next.values.delete(value);
+            else next.values.add(value);
+          }
+        } else {
+          for (const value of itemValues) {
+            if (checked) next.values.add(value);
+            else next.values.delete(value);
+          }
+        }
+        normalizeColumnFilter(columnIndex, next, allValues);
+      }
+
+      function getActiveColumnFilters() {
+        return Object.entries(state.columnFilters).map(([columnKey, filter]) => ({
+          columnIndex: Number(columnKey),
+          filter,
+        }));
+      }
+
+      function columnFilterAllowsValue(filter, value) {
+        if (!filter) return true;
+        if (filter.allowedValues) return filter.allowedValues.has(value);
+        if (filter.mode === "exclude") return !filter.values.has(value);
+        return filter.values.has(value);
+      }
+
+      function rowPassesColumnFilters(row, activeColumnFilters = getActiveColumnFilters()) {
+        for (const { columnIndex, filter } of activeColumnFilters) {
+          const value = row[columnIndex] == null ? "" : String(row[columnIndex]);
+          if (!columnFilterAllowsValue(filter, value)) return false;
+        }
+        return true;
+      }
+
+      function clearColumnFilter(columnIndex) {
+        if (columnIndex < 0) return;
+        delete state.columnFilters[String(columnIndex)];
+      }
+
+      function clearAllColumnFilters() {
+        state.columnFilters = {};
+      }
+
+      function rowPassesHiddenRows(rowIndex) {
+        return !state.hiddenRows.has(rowIndex);
+      }
+
+      function rebuildVisibleRowPositionMap() {
+        state.rowPositionMap = new Map();
+        state.viewIndices.forEach((rowIndex, position) => {
+          state.rowPositionMap.set(rowIndex, position);
+        });
+      }
+
+      function renderFilteredRowStats() {
+        const hiddenCount = state.hiddenRows.size;
+        const filterCount = Object.keys(state.columnFilters).length;
+        const searchActive = Boolean(els.searchInput.value && els.matchedOnlyInput.checked);
+        const parts = [`${state.viewIndices.length.toLocaleString()} / ${state.rows.length.toLocaleString()} 行`];
+        if (filterCount) parts.push(`${filterCount} 列筛选`);
+        if (searchActive) parts.push("搜索筛选");
+        if (hiddenCount) parts.push(`隐藏 ${hiddenCount.toLocaleString()} 行`);
+        els.filteredRowStats.textContent = parts.join(" · ");
+        els.filteredRowStats.classList.toggle("warning", filterCount > 0 || searchActive || hiddenCount > 0);
+      }
+
+      function recomputeView() {
+        const query = els.searchInput.value;
+        const matchedOnly = els.matchedOnlyInput.checked;
+        const activeColumnFilters = getActiveColumnFilters();
+        state.matchedRows = new Set();
+        const base = [];
+
+        for (let index = 0; index < state.rows.length; index += 1) {
+          const row = state.rows[index];
+          if (!rowPassesHiddenRows(index)) continue;
+          if (!rowPassesColumnFilters(row, activeColumnFilters)) continue;
+          const hit = query ? rowMatches(row) : false;
+          if (hit) state.matchedRows.add(index);
+          if (!query || !matchedOnly || hit) base.push(index);
+        }
+
+        if (state.sort.column >= 0 && state.sort.direction !== "none") {
+          const column = state.sort.column;
+          const direction = state.sort.direction === "asc" ? 1 : -1;
+          base.sort((a, b) => compareCells(state.rows[a][column], state.rows[b][column]) * direction);
+        }
+
+        state.viewIndices = base;
+        rebuildVisibleRowPositionMap();
+        normalizeSelectionForCurrentView();
+        els.rightStatus.textContent = `${state.viewIndices.length} / ${state.rows.length} 行 · ${state.headers.length} 列`;
+        renderFilteredRowStats();
+        renderColumnOverview();
+        renderGrid();
+      }
+
+      function compareCells(a, b) {
+        const left = a == null ? "" : String(a);
+        const right = b == null ? "" : String(b);
+        const leftNumber = Number(left);
+        const rightNumber = Number(right);
+        if (left.trim() !== "" && right.trim() !== "" && Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+          return leftNumber - rightNumber;
+        }
+        return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+      }
+
+      function appendHighlightedText(parent, text, query) {
+        const value = text == null ? "" : String(text);
+        if (!query) {
+          parent.appendChild(document.createTextNode(value));
+          return;
+        }
+        const caseSensitive = els.caseSensitiveInput.checked;
+        const haystack = normalizeForSearch(value, caseSensitive);
+        const needle = normalizeForSearch(query, caseSensitive);
+        if (!needle) {
+          parent.appendChild(document.createTextNode(value));
+          return;
+        }
+        let offset = 0;
+        let found = haystack.indexOf(needle, offset);
+        while (found >= 0) {
+          if (found > offset) parent.appendChild(document.createTextNode(value.slice(offset, found)));
+          const mark = document.createElement("mark");
+          mark.textContent = value.slice(found, found + needle.length);
+          parent.appendChild(mark);
+          offset = found + needle.length;
+          found = haystack.indexOf(needle, offset);
+        }
+        if (offset < value.length) parent.appendChild(document.createTextNode(value.slice(offset)));
+      }
+
+      function appendHighlighted(parent, text, query) {
+        parent.textContent = "";
+        appendHighlightedText(parent, text, query);
+      }
+
+      function normalizeLinkHref(value) {
+        const text = String(value || "").trim();
+        if (!text) return "";
+        let href = text;
+        if (/^www\./i.test(href)) href = `https://${href}`;
+        if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(href)) href = `mailto:${href}`;
+        try {
+          const url = new URL(href);
+          return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.href : "";
+        } catch (error) {
+          return "";
+        }
+      }
+
+      function detectCellLinks(text) {
+        const value = text == null ? "" : String(text);
+        const linkPattern = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/gi;
+        const segments = [];
+        let offset = 0;
+        let match;
+        while ((match = linkPattern.exec(value)) !== null) {
+          const raw = match[0];
+          const trailing = raw.match(/[.,;:!?)]*$/)?.[0] || "";
+          const linkText = trailing ? raw.slice(0, -trailing.length) : raw;
+          const href = normalizeLinkHref(linkText);
+          if (!href) continue;
+          if (match.index > offset) segments.push({ text: value.slice(offset, match.index) });
+          segments.push({ text: linkText, href });
+          if (trailing) segments.push({ text: trailing });
+          offset = match.index + raw.length;
+        }
+        if (offset < value.length) segments.push({ text: value.slice(offset) });
+        return segments.some((segment) => segment.href) ? segments : [];
+      }
+
+      function appendLinkedText(parent, text, query, forcedHref = "") {
+        const value = text == null ? "" : String(text);
+        const href = normalizeLinkHref(forcedHref);
+        const segments = href ? [{ text: value, href }] : detectCellLinks(value);
+        if (!segments.length) {
+          appendHighlighted(parent, value, query);
+          return;
+        }
+        parent.textContent = "";
+        for (const segment of segments) {
+          if (!segment.href) {
+            appendHighlightedText(parent, segment.text, query);
+            continue;
+          }
+          const anchor = document.createElement("a");
+          anchor.href = segment.href;
+          anchor.target = "_blank";
+          anchor.rel = "noopener noreferrer";
+          anchor.title = segment.href;
+          appendHighlightedText(anchor, segment.text, query);
+          parent.appendChild(anchor);
+        }
+      }
+
+      function isDuplicateColumn(columnIndex) {
+        return (state.issues.duplicateColumns || []).some((issue) => {
+          if (Array.isArray(issue.columnIndexes)) return issue.columnIndexes.includes(columnIndex);
+          return issue.columnIndex === columnIndex;
+        });
+      }
+
+      function isCustomColumn(columnIndex) {
+        return state.customColumns.has(columnIndex);
+      }
+
+      function getCellMeta(rowIndex, columnIndex) {
+        if (!state.cellMeta || !state.cellMeta.size) return null;
+        return state.cellMeta.get(`${rowIndex}:${columnIndex}`) || null;
+      }
+
+      function applyCellMetaStyle(element, meta) {
+        element.style.removeProperty("background-color");
+        element.style.removeProperty("color");
+        if (!meta) return;
+        if (meta.backgroundColor) element.style.backgroundColor = meta.backgroundColor;
+        if (meta.color) element.style.color = meta.color;
+      }
+
+      function sanitizeStyleAttribute(value) {
+        const allowed = new Set(["color", "background-color", "font-weight", "font-style", "text-decoration"]);
+        return String(value || "")
+          .split(";")
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .map((part) => {
+            const splitAt = part.indexOf(":");
+            if (splitAt < 0) return "";
+            const name = part.slice(0, splitAt).trim().toLowerCase();
+            const rawValue = part.slice(splitAt + 1).trim();
+            if (!allowed.has(name)) return "";
+            if (/url\s*\(|expression\s*\(|javascript:/i.test(rawValue)) return "";
+            return `${name}: ${rawValue}`;
+          })
+          .filter(Boolean)
+          .join("; ");
+      }
+
+      function appendSanitizedExcelHtml(parent, html) {
+        const allowedTags = new Set(["span", "b", "strong", "i", "em", "u", "s", "sub", "sup", "br"]);
+        const template = document.createElement("template");
+        template.innerHTML = String(html || "");
+
+        const cleanNode = (node) => {
+          if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(node.textContent || "");
+          if (node.nodeType !== Node.ELEMENT_NODE) return document.createDocumentFragment();
+
+          const sourceTag = node.tagName.toLowerCase();
+          if (sourceTag === "br") return document.createElement("br");
+          const targetTag = sourceTag === "font" ? "span" : sourceTag;
+          const fragment = document.createDocumentFragment();
+          if (!allowedTags.has(targetTag)) {
+            for (const child of node.childNodes) fragment.appendChild(cleanNode(child));
+            return fragment;
+          }
+
+          const element = document.createElement(targetTag);
+          const style = sanitizeStyleAttribute(node.getAttribute("style"));
+          if (style) element.setAttribute("style", style);
+          if (sourceTag === "font") {
+            const color = node.getAttribute("color");
+            if (color && !/url\s*\(|expression\s*\(|javascript:/i.test(color)) element.style.color = color;
+          }
+          for (const child of node.childNodes) element.appendChild(cleanNode(child));
+          return element;
+        };
+
+        for (const child of template.content.childNodes) parent.appendChild(cleanNode(child));
+      }
+
+      function renderCellDisplayContent(container, value, query, meta, options = {}) {
+        container.innerHTML = "";
+        const text = value == null ? "" : String(value);
+        applyCellMetaStyle(container, meta);
+        const hasInlineLink = Boolean(meta?.link) || detectCellLinks(text).length > 0;
+        if (meta?.html && options.allowHtml && !query && !hasInlineLink) {
+          appendSanitizedExcelHtml(container, meta.html);
+          return;
+        }
+        appendLinkedText(container, text, query, meta?.link || "");
+      }
+
+      function getVisibleRowPosition(rowIndex) {
+        return state.rowPositionMap.get(rowIndex) ?? -1;
+      }
+
+      function getVisibleColumnPosition(columnIndex) {
+        return getVisibleColumnIndexes().indexOf(columnIndex);
+      }
+
+      function getFirstVisibleCell() {
+        const columns = getVisibleColumnIndexes();
+        if (!state.viewIndices.length || !columns.length) return null;
+        return { rowIndex: state.viewIndices[0], columnIndex: columns[0] };
+      }
+
+      function getSelectionEndpoints(range = state.selectionRange) {
+        if (!range) return null;
+        const columns = getVisibleColumnIndexes();
+        if (!state.viewIndices.length || !columns.length) return null;
+        if (range.type === "all") {
+          return {
+            startRowPosition: 0,
+            endRowPosition: state.viewIndices.length - 1,
+            startColumnPosition: 0,
+            endColumnPosition: columns.length - 1,
+          };
+        }
+        const anchorRowPosition = range.anchorRowIndex == null ? 0 : getVisibleRowPosition(range.anchorRowIndex);
+        const focusRowPosition = range.focusRowIndex == null ? state.viewIndices.length - 1 : getVisibleRowPosition(range.focusRowIndex);
+        const anchorColumnPosition = range.anchorColumnIndex == null ? 0 : getVisibleColumnPosition(range.anchorColumnIndex);
+        const focusColumnPosition = range.focusColumnIndex == null ? columns.length - 1 : getVisibleColumnPosition(range.focusColumnIndex);
+        const rowA = range.type === "columns" ? 0 : anchorRowPosition;
+        const rowB = range.type === "columns" ? state.viewIndices.length - 1 : focusRowPosition;
+        const colA = range.type === "rows" ? 0 : anchorColumnPosition;
+        const colB = range.type === "rows" ? columns.length - 1 : focusColumnPosition;
+        if (rowA < 0 || rowB < 0 || colA < 0 || colB < 0) return null;
+        return {
+          startRowPosition: Math.min(rowA, rowB),
+          endRowPosition: Math.max(rowA, rowB),
+          startColumnPosition: Math.min(colA, colB),
+          endColumnPosition: Math.max(colA, colB),
+        };
+      }
+
+      function isCellInSelection(rowIndex, columnIndex) {
+        const endpoints = getSelectionEndpoints();
+        if (!endpoints) return false;
+        const rowPosition = getVisibleRowPosition(rowIndex);
+        const columnPosition = getVisibleColumnPosition(columnIndex);
+        return (
+          rowPosition >= endpoints.startRowPosition &&
+          rowPosition <= endpoints.endRowPosition &&
+          columnPosition >= endpoints.startColumnPosition &&
+          columnPosition <= endpoints.endColumnPosition
+        );
+      }
+
+      function isRowInSelection(rowIndex) {
+        const endpoints = getSelectionEndpoints();
+        if (!endpoints) return false;
+        const rowPosition = getVisibleRowPosition(rowIndex);
+        return rowPosition >= endpoints.startRowPosition && rowPosition <= endpoints.endRowPosition;
+      }
+
+      function isColumnInSelection(columnIndex) {
+        const endpoints = getSelectionEndpoints();
+        if (!endpoints) return false;
+        const columnPosition = getVisibleColumnPosition(columnIndex);
+        return columnPosition >= endpoints.startColumnPosition && columnPosition <= endpoints.endColumnPosition;
+      }
+
+      function setFocusedCell(rowIndex, columnIndex) {
+        state.selected = { rowIndex, columnIndex };
+        state.detailVisibleChars = DETAIL_CHUNK;
+      }
+
+      function setSelection(range, focusCell = null) {
+        state.selectionRange = range;
+        if (focusCell) setFocusedCell(focusCell.rowIndex, focusCell.columnIndex);
+        else if (!state.selected) {
+          const first = getFirstVisibleCell();
+          if (first) setFocusedCell(first.rowIndex, first.columnIndex);
+        }
+      }
+
+      function selectCellRange(anchorRowIndex, anchorColumnIndex, focusRowIndex, focusColumnIndex, options = {}) {
+        const focusCell = { rowIndex: focusRowIndex, columnIndex: focusColumnIndex };
+        if (!options.preserveAnchor) state.selectionAnchor = { rowIndex: anchorRowIndex, columnIndex: anchorColumnIndex };
+        setSelection(
+          { type: "range", anchorRowIndex, anchorColumnIndex, focusRowIndex, focusColumnIndex },
+          focusCell,
+        );
+        if (!options.silent) {
+          ensureCellVisible(focusRowIndex, focusColumnIndex);
+          renderGrid();
+          renderDetail();
+        }
+      }
+
+      function selectRowRange(anchorRowIndex, focusRowIndex, options = {}) {
+        const columnIndex = state.selected?.columnIndex ?? getVisibleColumnIndexes()[0] ?? 0;
+        if (!options.preserveAnchor) state.selectionAnchor = { rowIndex: anchorRowIndex, columnIndex };
+        setSelection(
+          { type: "rows", anchorRowIndex, anchorColumnIndex: columnIndex, focusRowIndex, focusColumnIndex: columnIndex },
+          { rowIndex: focusRowIndex, columnIndex },
+        );
+        if (!options.silent) {
+          ensureCellVisible(focusRowIndex, columnIndex);
+          renderGrid();
+          renderDetail();
+        }
+      }
+
+      function selectColumnRange(anchorColumnIndex, focusColumnIndex, options = {}) {
+        const rowIndex = state.selected?.rowIndex ?? state.viewIndices[0] ?? 0;
+        if (!options.preserveAnchor) state.selectionAnchor = { rowIndex, columnIndex: anchorColumnIndex };
+        setSelection(
+          { type: "columns", anchorRowIndex: rowIndex, anchorColumnIndex, focusRowIndex: rowIndex, focusColumnIndex },
+          { rowIndex, columnIndex: focusColumnIndex },
+        );
+        if (!options.silent) {
+          ensureCellVisible(rowIndex, focusColumnIndex);
+          renderGrid();
+          renderDetail();
+        }
+      }
+
+      function selectAllVisibleCells() {
+        const first = getFirstVisibleCell();
+        if (!first) return;
+        const columns = getVisibleColumnIndexes();
+        const last = { rowIndex: state.viewIndices[state.viewIndices.length - 1], columnIndex: columns[columns.length - 1] };
+        state.selectionAnchor = first;
+        setSelection(
+          { type: "all", anchorRowIndex: first.rowIndex, anchorColumnIndex: first.columnIndex, focusRowIndex: last.rowIndex, focusColumnIndex: last.columnIndex },
+          first,
+        );
+        renderGrid();
+        renderDetail();
+      }
+
+      function clearSelectionToSelected() {
+        if (!state.selected) {
+          state.selectionAnchor = null;
+          state.selectionRange = null;
+          return;
+        }
+        state.selectionAnchor = { ...state.selected };
+        state.selectionRange = {
+          type: "range",
+          anchorRowIndex: state.selected.rowIndex,
+          anchorColumnIndex: state.selected.columnIndex,
+          focusRowIndex: state.selected.rowIndex,
+          focusColumnIndex: state.selected.columnIndex,
+        };
+      }
+
+      function normalizeSelectionForCurrentView() {
+        const columns = getVisibleColumnIndexes();
+        const first = getFirstVisibleCell();
+        if (!first) {
+          state.selected = null;
+          clearSelectionToSelected();
+          return;
+        }
+        if (
+          !state.selected ||
+          !state.rowPositionMap.has(state.selected.rowIndex) ||
+          !columns.includes(state.selected.columnIndex)
+        ) {
+          state.selected = first;
+          clearSelectionToSelected();
+          return;
+        }
+        if (!getSelectionEndpoints()) clearSelectionToSelected();
+      }
+
+      function ensureCellVisible(rowIndex, columnIndex) {
+        const rowPosition = getVisibleRowPosition(rowIndex);
+        const visibleColumns = getVisibleColumnIndexes();
+        const columnPosition = visibleColumns.indexOf(columnIndex);
+        if (rowPosition < 0 || columnPosition < 0) return;
+        const rowHeight = getCurrentRowHeight();
+        const rowTop = HEADER_HEIGHT + rowPosition * rowHeight;
+        const rowBottom = rowTop + rowHeight;
+        const viewportTop = els.gridViewport.scrollTop;
+        const viewportBottom = viewportTop + els.gridViewport.clientHeight;
+        if (rowTop < viewportTop) els.gridViewport.scrollTop = rowTop;
+        else if (rowBottom > viewportBottom) els.gridViewport.scrollTop = rowBottom - els.gridViewport.clientHeight;
+
+        let columnLeft = ROW_NUMBER_WIDTH;
+        for (let index = 0; index < columnPosition; index += 1) {
+          columnLeft += state.columnWidths[visibleColumns[index]] || DEFAULT_COL_WIDTH;
+        }
+        const columnRight = columnLeft + (state.columnWidths[columnIndex] || DEFAULT_COL_WIDTH);
+        const viewportLeft = els.gridViewport.scrollLeft;
+        const viewportRight = viewportLeft + els.gridViewport.clientWidth;
+        if (columnLeft < viewportLeft + ROW_NUMBER_WIDTH) els.gridViewport.scrollLeft = Math.max(0, columnLeft - ROW_NUMBER_WIDTH);
+        else if (columnRight > viewportRight) els.gridViewport.scrollLeft = columnRight - els.gridViewport.clientWidth;
+      }
+
+      function moveSelectionByKeyboard(event) {
+        const deltas = {
+          ArrowUp: [-1, 0],
+          ArrowDown: [1, 0],
+          ArrowLeft: [0, -1],
+          ArrowRight: [0, 1],
+        };
+        const delta = deltas[event.key];
+        if (!delta) return false;
+        const columns = getVisibleColumnIndexes();
+        if (!state.viewIndices.length || !columns.length) return true;
+        const current = state.selected || getFirstVisibleCell();
+        let rowPosition = getVisibleRowPosition(current.rowIndex);
+        let columnPosition = columns.indexOf(current.columnIndex);
+        if (rowPosition < 0) rowPosition = 0;
+        if (columnPosition < 0) columnPosition = 0;
+        rowPosition = Math.max(0, Math.min(state.viewIndices.length - 1, rowPosition + delta[0]));
+        columnPosition = Math.max(0, Math.min(columns.length - 1, columnPosition + delta[1]));
+        const next = { rowIndex: state.viewIndices[rowPosition], columnIndex: columns[columnPosition] };
+        if (event.shiftKey) {
+          const anchor = state.selectionAnchor || current || next;
+          selectCellRange(anchor.rowIndex, anchor.columnIndex, next.rowIndex, next.columnIndex, { preserveAnchor: true });
+        } else {
+          selectCell(next.rowIndex, next.columnIndex);
+        }
+        return true;
+      }
+
+      function handleGridKeyDown(event) {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+          event.preventDefault();
+          selectAllVisibleCells();
+          return;
+        }
+        if (moveSelectionByKeyboard(event)) event.preventDefault();
+      }
+
+      function isEditableShortcutTarget(target) {
+        if (!(target instanceof Element)) return false;
+        const tagName = target.tagName.toLowerCase();
+        return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
+      }
+
+      function handleCopyShortcut(event) {
+        if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "c") return;
+        if (isEditableShortcutTarget(event.target)) return;
+        if (!state.selected) return;
+        event.preventDefault();
+        copyText(getSelectionText());
+      }
+
+      function handlePasteIntoCustomColumns(event) {
+        if (isEditableShortcutTarget(event.target)) return;
+        const text = event.clipboardData?.getData("text/plain") || "";
+        if (!text) return;
+        if (pasteClipboardTextIntoSelection(text)) event.preventDefault();
+      }
+
+      function startSelectionDrag(type, anchorRowIndex, anchorColumnIndex, event) {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        els.gridViewport.focus();
+        state.selectionDrag = { type, anchorRowIndex, anchorColumnIndex };
+        updateSelectionDrag(type, anchorRowIndex, anchorColumnIndex);
+      }
+
+      function updateSelectionDrag(type, rowIndex, columnIndex) {
+        if (!state.selectionDrag) return;
+        const drag = state.selectionDrag;
+        if (type === "row" || drag.type === "row") {
+          selectRowRange(drag.anchorRowIndex, rowIndex, { preserveAnchor: true });
+        } else if (type === "column" || drag.type === "column") {
+          selectColumnRange(drag.anchorColumnIndex, columnIndex, { preserveAnchor: true });
+        } else {
+          selectCellRange(drag.anchorRowIndex, drag.anchorColumnIndex, rowIndex, columnIndex, { preserveAnchor: true });
+        }
+      }
+
+      function stopSelectionDrag() {
+        state.selectionDrag = null;
+      }
+
+      function renderHeader() {
+        const visibleColumns = getVisibleColumnIndexes();
+        els.headerRow.innerHTML = "";
+        els.headerRow.style.width = `${getTotalWidth()}px`;
+        els.headerRow.style.height = `${HEADER_HEIGHT}px`;
+
+        const rowNumber = document.createElement("div");
+        rowNumber.className = `row-number select-all-corner${state.selectionRange?.type === "all" ? " selected-row" : ""}`;
+        rowNumber.textContent = "#";
+        rowNumber.title = "Select all visible cells";
+        rowNumber.addEventListener("mousedown", (event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          els.gridViewport.focus();
+          selectAllVisibleCells();
+        });
+        els.headerRow.appendChild(rowNumber);
+
+        for (const col of visibleColumns) {
+          const cell = document.createElement("div");
+          cell.className = "header-cell";
+          if (isColumnInSelection(col)) cell.classList.add("selected-column");
+          const duplicate = isDuplicateColumn(col);
+          if (duplicate) cell.classList.add("duplicate-column");
+          cell.style.flex = `0 0 ${state.columnWidths[col] || DEFAULT_COL_WIDTH}px`;
+          cell.draggable = false;
+          cell.dataset.column = String(col);
+          cell.addEventListener("mousedown", (event) =>
+            startSelectionDrag("column", state.selected?.rowIndex ?? state.viewIndices[0] ?? 0, col, event),
+          );
+          cell.addEventListener("mouseenter", () =>
+            updateSelectionDrag("column", state.selected?.rowIndex ?? state.viewIndices[0] ?? 0, col),
+          );
+
+          const button = document.createElement("button");
+          button.className = "header-sort-button";
+          button.title = state.headers[col];
+          button.dataset.column = String(col);
+          button.draggable = true;
+          const title = document.createElement("span");
+          title.className = "header-title";
+          title.textContent = state.headers[col];
+          if (duplicate) {
+            const dot = document.createElement("span");
+            dot.className = "duplicate-column-dot";
+            dot.title = "Duplicate column name";
+            button.appendChild(dot);
+          }
+          const sort = document.createElement("span");
+          sort.className = "sort-indicator";
+          sort.textContent =
+            state.sort.column === col ? (state.sort.direction === "asc" ? "▲" : state.sort.direction === "desc" ? "▼" : "") : "";
+          button.append(title, sort);
+          button.addEventListener("mousedown", (event) => event.stopPropagation());
+          button.addEventListener("click", () => selectColumnRange(col, col));
+          button.addEventListener("dragstart", (event) => {
+            state.dragColumn = col;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", String(col));
+          });
+          button.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+          });
+          button.addEventListener("drop", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const fromColumn =
+              state.dragColumn == null ? Number(event.dataTransfer.getData("text/plain")) : state.dragColumn;
+            state.dragColumn = null;
+            dragColumn(fromColumn, col);
+          });
+          button.addEventListener("dragend", () => {
+            state.dragColumn = null;
+          });
+
+          const filterButton = document.createElement("button");
+          filterButton.className = `header-filter-button${hasColumnFilter(col) ? " active" : ""}`;
+          filterButton.title = "筛选 / 排序";
+          filterButton.dataset.column = String(col);
+          const filterIcon = document.createElement("span");
+          filterIcon.className = "filter-indicator";
+          filterIcon.textContent = hasColumnFilter(col) ? "●" : "▾";
+          filterButton.appendChild(filterIcon);
+          filterButton.addEventListener("mousedown", (event) => event.stopPropagation());
+          filterButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            openColumnFilterMenu(event.currentTarget, col);
+          });
+
+          const handle = document.createElement("span");
+          handle.className = "resize-handle";
+          handle.dataset.column = String(col);
+          handle.addEventListener("mousedown", startResize);
+          cell.append(button, filterButton, handle);
+          els.headerRow.appendChild(cell);
+        }
+      }
+
+      function renderGrid() {
+        if (state.renderQueued) return;
+        state.renderQueued = true;
+        requestAnimationFrame(() => {
+          state.renderQueued = false;
+          renderHeader();
+          renderRows();
+          els.emptyState.style.display = state.rows.length ? "none" : "grid";
+        });
+      }
+
+      function renderRows() {
+        const scrollTop = els.gridViewport.scrollTop;
+        const viewportHeight = els.gridViewport.clientHeight || 1;
+        const rowHeight = getCurrentRowHeight();
+        const totalRows = state.viewIndices.length;
+        const start = Math.max(0, Math.floor(Math.max(0, scrollTop - HEADER_HEIGHT) / rowHeight) - 8);
+        const end = Math.min(totalRows, Math.ceil((Math.max(0, scrollTop - HEADER_HEIGHT) + viewportHeight) / rowHeight) + 10);
+        const visibleColumns = getVisibleColumnIndexes();
+        const totalWidth = getTotalWidth();
+        els.gridViewport.classList.toggle("wrap-cells", state.wrapCells);
+        els.gridCanvas.style.height = `${HEADER_HEIGHT + totalRows * rowHeight}px`;
+        els.gridCanvas.style.width = `${totalWidth}px`;
+        els.rowLayer.innerHTML = "";
+
+        for (let virtualIndex = start; virtualIndex < end; virtualIndex += 1) {
+          const rowIndex = state.viewIndices[virtualIndex];
+          const row = state.rows[rowIndex];
+          const hit = state.matchedRows.has(rowIndex);
+          const rowEl = document.createElement("div");
+          rowEl.className = `data-row${hit ? " hit" : ""}`;
+          rowEl.style.top = `${HEADER_HEIGHT + virtualIndex * rowHeight}px`;
+          rowEl.style.width = `${totalWidth}px`;
+          rowEl.style.height = `${rowHeight}px`;
+
+          const rowNumber = document.createElement("div");
+          rowNumber.className = "row-number";
+          if (isRowInSelection(rowIndex)) rowNumber.classList.add("selected-row");
+          rowNumber.textContent = String(rowIndex + 2);
+          rowNumber.addEventListener("mousedown", (event) =>
+            startSelectionDrag("row", rowIndex, state.selected?.columnIndex ?? visibleColumns[0] ?? 0, event),
+          );
+          rowNumber.addEventListener("mouseenter", () =>
+            updateSelectionDrag("row", rowIndex, state.selected?.columnIndex ?? visibleColumns[0] ?? 0),
+          );
+          rowEl.appendChild(rowNumber);
+
+          for (const col of visibleColumns) {
+            const value = row[col] || "";
+            const summary = summarize(value);
+            const meta = getCellMeta(rowIndex, col);
+            const cell = document.createElement("div");
+            cell.className = `cell${summary.isLong && !state.wrapCells ? " long" : ""}`;
+            if (isCellInSelection(rowIndex, col)) {
+              cell.classList.add("range-selected");
+            }
+            if (state.selected && state.selected.rowIndex === rowIndex && state.selected.columnIndex === col) {
+              cell.classList.add("selected");
+            }
+            cell.style.flex = `0 0 ${state.columnWidths[col] || DEFAULT_COL_WIDTH}px`;
+            cell.title = state.wrapCells ? value.slice(0, 1000) : summary.isLong ? "文本过长，点击查看全文" : value.slice(0, 1000);
+            cell.dataset.row = String(rowIndex);
+            cell.dataset.column = String(col);
+            renderCellDisplayContent(cell, state.wrapCells ? value : summary.text, els.searchInput.value, meta, {
+              allowHtml: !summary.isLong || state.wrapCells,
+            });
+            cell.addEventListener("mousedown", (event) => {
+              if (event.target.closest?.("a")) return;
+              startSelectionDrag("cell", rowIndex, col, event);
+            });
+            cell.addEventListener("mouseenter", () => updateSelectionDrag("cell", rowIndex, col));
+            cell.addEventListener("click", () => selectCell(rowIndex, col));
+            cell.addEventListener("dblclick", () => openModalForCell(rowIndex, col));
+            cell.addEventListener("contextmenu", (event) => openContextMenu(event, rowIndex, col));
+            rowEl.appendChild(cell);
+          }
+
+          els.rowLayer.appendChild(rowEl);
+        }
+      }
+
+      function toggleSort(column) {
+        if (state.sort.column !== column) {
+          state.sort = { column, direction: "asc" };
+        } else if (state.sort.direction === "asc") {
+          state.sort.direction = "desc";
+        } else if (state.sort.direction === "desc") {
+          state.sort = { column: -1, direction: "none" };
+        } else {
+          state.sort = { column, direction: "asc" };
+        }
+        recomputeView();
+      }
+
+      function dragColumn(fromColumn, toColumn) {
+        if (!Number.isInteger(fromColumn) || !Number.isInteger(toColumn) || fromColumn === toColumn) return;
+        const order = state.columnOrder.length ? [...state.columnOrder] : state.headers.map((_, index) => index);
+        const fromIndex = order.indexOf(fromColumn);
+        const toIndex = order.indexOf(toColumn);
+        if (fromIndex < 0 || toIndex < 0) return;
+        order.splice(fromIndex, 1);
+        order.splice(toIndex, 0, fromColumn);
+        state.columnOrder = order;
+        renderColumnPopover();
+        renderColumnOverview();
+        renderGrid();
+      }
+
+      function startResize(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const column = Number(event.currentTarget.dataset.column);
+        state.resize = {
+          column,
+          startX: event.clientX,
+          startWidth: state.columnWidths[column] || DEFAULT_COL_WIDTH,
+        };
+        document.body.style.cursor = "col-resize";
+      }
+
+      function onResizeMove(event) {
+        if (!state.resize) return;
+        const delta = event.clientX - state.resize.startX;
+        state.columnWidths[state.resize.column] = Math.max(
+          MIN_COL_WIDTH,
+          Math.min(MAX_COL_WIDTH, state.resize.startWidth + delta),
+        );
+        renderGrid();
+      }
+
+      function stopResize() {
+        if (!state.resize) return;
+        state.resize = null;
+        document.body.style.cursor = "";
+      }
+
+      function selectCell(rowIndex, columnIndex) {
+        setFocusedCell(rowIndex, columnIndex);
+        clearSelectionToSelected();
+        ensureCellVisible(rowIndex, columnIndex);
+        renderGrid();
+        renderDetail();
+      }
+
+      function getSelectedValue() {
+        if (!state.selected) return "";
+        return state.rows[state.selected.rowIndex]?.[state.selected.columnIndex] || "";
+      }
+
+      function getSelectionText() {
+        const endpoints = getSelectionEndpoints();
+        if (!endpoints) return getSelectedValue();
+        const columns = getVisibleColumnIndexes().slice(endpoints.startColumnPosition, endpoints.endColumnPosition + 1);
+        const lines = [];
+        for (let rowPosition = endpoints.startRowPosition; rowPosition <= endpoints.endRowPosition; rowPosition += 1) {
+          const row = state.rows[state.viewIndices[rowPosition]];
+          lines.push(columns.map((columnIndex) => row?.[columnIndex] || "").join("\t"));
+        }
+        return lines.join("\n");
+      }
+
+      function parseClipboardTable(text) {
+        const source = String(text ?? "").replace(/(?:\r\n|\r|\n)$/, "");
+        if (!source) return [];
+        const rows = [];
+        let row = [];
+        let field = "";
+        let inQuotes = false;
+
+        for (let index = 0; index < source.length; index += 1) {
+          const ch = source[index];
+          if (ch === '"') {
+            if (inQuotes && source[index + 1] === '"') {
+              field += '"';
+              index += 1;
+            } else {
+              inQuotes = !inQuotes;
+            }
+            continue;
+          }
+
+          if (!inQuotes && ch === "\t") {
+            row.push(field);
+            field = "";
+            continue;
+          }
+
+          if (!inQuotes && (ch === "\r" || ch === "\n")) {
+            row.push(field);
+            rows.push(row);
+            row = [];
+            field = "";
+            if (ch === "\r" && source[index + 1] === "\n") index += 1;
+            continue;
+          }
+
+          field += ch;
+        }
+
+        row.push(field);
+        rows.push(row);
+        return rows;
+      }
+
+      function getPastedColumnCount(rows) {
+        let count = 0;
+        for (const row of rows) {
+          if (row.length > count) count = row.length;
+        }
+        return count;
+      }
+
+      function getFormulaNestingDepth(value) {
+        const text = String(value == null ? "" : value);
+        let depth = 0;
+        for (let index = 0; index < text.length; index += 1) {
+          const ch = text[index];
+          if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+          if (ch === ")" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+        }
+        return depth;
+      }
+
+      function repairFormulaRecord(record, expectedColumns, delimiter) {
+        if (!expectedColumns || record.length <= expectedColumns) return record;
+        const repaired = [];
+        let changed = false;
+
+        for (let index = 0; index < record.length; index += 1) {
+          const remainingOutput = expectedColumns - repaired.length;
+          const remainingFields = record.length - index;
+          if (remainingFields === remainingOutput) {
+            repaired.push(...record.slice(index));
+            break;
+          }
+
+          const startIndex = index;
+          let value = record[index];
+          if (String(value == null ? "" : value).trimStart().startsWith("=")) {
+            let depth = getFormulaNestingDepth(value);
+            while (
+              depth > 0 &&
+              index + 1 < record.length &&
+              record.length - (index + 2) >= remainingOutput - 1
+            ) {
+              index += 1;
+              value += delimiter + record[index];
+              depth = getFormulaNestingDepth(value);
+            }
+            if (depth === 0 && index > startIndex) {
+              repaired.push(value);
+              changed = true;
+              continue;
+            }
+            index = startIndex;
+          }
+
+          repaired.push(record[index]);
+        }
+
+        return changed && repaired.length === expectedColumns ? repaired : record;
+      }
+
+      function buildClipboardHeaders(rawHeaders, columnCount) {
+        return Array.from({ length: columnCount }, (_, index) => {
+          const value = rawHeaders[index] == null || rawHeaders[index] === "" ? `Column ${index + 1}` : rawHeaders[index];
+          return String(value);
+        });
+      }
+
+      function buildClipboardDataset(text, firstRowAsHeader) {
+        const startedAt = Date.now();
+        const rows = parseClipboardTable(text).filter((row) =>
+          row.some((cell) => String(cell == null ? "" : cell).trim() !== ""),
+        );
+        const columnCount = getPastedColumnCount(rows);
+        if (!rows.length || !columnCount) throw new Error("剪贴板中没有可导入的表格数据");
+        const rawHeaders = firstRowAsHeader ? rows[0] : [];
+        const sourceRows = firstRowAsHeader ? rows.slice(1) : rows;
+        const headers = buildClipboardHeaders(rawHeaders, columnCount);
+        const normalizedRows = sourceRows.map((row) =>
+          Array.from({ length: columnCount }, (_, index) => (row[index] == null ? "" : String(row[index]))),
+        );
+        return {
+          headers,
+          rows: normalizedRows,
+          issues: analyzeRows(headers, normalizedRows),
+          file: {
+            name: "剪贴板表格",
+            size: String(text || "").length,
+            encoding: "Clipboard",
+            delimiter: "Tab",
+            parseMs: Date.now() - startedAt,
+            kind: "Clipboard",
+          },
+        };
+      }
+
+      async function readClipboardText() {
+        if (!navigator.clipboard?.readText) throw new Error("当前浏览器不支持读取剪贴板，请改用文件导入");
+        return navigator.clipboard.readText();
+      }
+
+      function updateClipboardImportButton() {
+        els.clipboardImportButton.disabled = Boolean(state.headers.length || state.rows.length);
+        els.clipboardImportButton.title = els.clipboardImportButton.disabled
+          ? "已载入数据；如需从剪贴板导入，请刷新页面"
+          : "从剪贴板导入表格";
+      }
+
+      function openClipboardImportPopover(anchor) {
+        if (state.headers.length || state.rows.length) {
+          els.leftStatus.textContent = "已载入数据；如需从剪贴板导入，请刷新页面";
+          return;
+        }
+        els.clipboardFirstRowHeaderInput.checked = true;
+        const rect = anchor.getBoundingClientRect();
+        els.clipboardImportPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 340))}px`;
+        els.clipboardImportPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 220))}px`;
+        els.columnsPopover.classList.remove("open");
+        closeAddColumnPopover();
+        closeConcatenateColumnPopover();
+        closeColumnFilterMenu();
+        closeContextMenu();
+        els.clipboardImportPopover.classList.add("open");
+        els.confirmClipboardImportButton.focus();
+      }
+
+      function closeClipboardImportPopover() {
+        els.clipboardImportPopover.classList.remove("open");
+      }
+
+      async function importClipboardTable() {
+        if (state.headers.length || state.rows.length) {
+          els.leftStatus.textContent = "已载入数据；如需从剪贴板导入，请刷新页面";
+          return;
+        }
+        const loadToken = beginLoad();
+        resetExcelWorkbook();
+        try {
+          const text = await readClipboardText();
+          if (!isCurrentLoad(loadToken)) return;
+          const dataset = buildClipboardDataset(text, els.clipboardFirstRowHeaderInput.checked);
+          state.sourceFileHandle = null;
+          setDataset(dataset);
+          els.fileHint.textContent = dataset.file.name;
+          els.fileHint.title = "从剪贴板导入的表格";
+          closeClipboardImportPopover();
+          els.leftStatus.textContent = `已从剪贴板导入 ${dataset.rows.length.toLocaleString()} 行 × ${dataset.headers.length.toLocaleString()} 列`;
+        } catch (error) {
+          if (!isCurrentLoad(loadToken)) return;
+          els.leftStatus.textContent = `剪贴板导入失败：${error.message}`;
+        }
+      }
+
+      function pasteClipboardTextIntoSelection(text) {
+        const pastedRows = parseClipboardTable(text);
+        const pastedColumnCount = getPastedColumnCount(pastedRows);
+        if (!pastedRows.length || !pastedColumnCount) return false;
+        if (!state.selected) {
+          els.leftStatus.textContent = "请先选中一个自定义列单元格再粘贴";
+          return true;
+        }
+
+        const visibleColumns = getVisibleColumnIndexes();
+        const startRowPosition = getVisibleRowPosition(state.selected.rowIndex);
+        const startColumnPosition = visibleColumns.indexOf(state.selected.columnIndex);
+        if (startRowPosition < 0 || startColumnPosition < 0) {
+          els.leftStatus.textContent = "当前选区不可粘贴";
+          return true;
+        }
+
+        const targetColumns = visibleColumns.slice(startColumnPosition, startColumnPosition + pastedColumnCount);
+        if (targetColumns.length < pastedColumnCount) {
+          els.leftStatus.textContent = "粘贴区域超出可见列，请先新增或显示足够的自定义列";
+          return true;
+        }
+
+        if (!targetColumns.every((columnIndex) => isCustomColumn(columnIndex))) {
+          els.leftStatus.textContent = "只能向自定义列粘贴，原始导入列不可修改";
+          return true;
+        }
+
+        const writableRowCount = Math.min(pastedRows.length, state.viewIndices.length - startRowPosition);
+        if (writableRowCount <= 0) {
+          els.leftStatus.textContent = "粘贴区域超出当前可见行";
+          return true;
+        }
+
+        const anchor = { ...state.selected };
+        const touchedColumns = new Set(targetColumns);
+        const touchedRows = new Set();
+        for (let rowOffset = 0; rowOffset < writableRowCount; rowOffset += 1) {
+          const rowIndex = state.viewIndices[startRowPosition + rowOffset];
+          touchedRows.add(rowIndex);
+          const row = state.rows[rowIndex];
+          for (let columnOffset = 0; columnOffset < pastedColumnCount; columnOffset += 1) {
+            const columnIndex = targetColumns[columnOffset];
+            row[columnIndex] = pastedRows[rowOffset]?.[columnOffset] ?? "";
+            if (state.cellMeta?.size) state.cellMeta.delete(`${rowIndex}:${columnIndex}`);
+          }
+        }
+
+        for (const columnIndex of touchedColumns) invalidateColumnValueCache(columnIndex);
+        refreshIssuesAfterCellEdits(touchedRows);
+        const endRowIndex = state.viewIndices[startRowPosition + writableRowCount - 1];
+        const endColumnIndex = targetColumns[targetColumns.length - 1];
+        selectCellRange(anchor.rowIndex, anchor.columnIndex, endRowIndex, endColumnIndex, { silent: true });
+        recomputeView();
+        updateFileStats();
+        renderDetail();
+        if (targetColumns.includes(state.columnFilterMenu.columnIndex)) renderColumnFilterValues();
+
+        const truncatedRows = pastedRows.length - writableRowCount;
+        const baseStatus = `已粘贴 ${writableRowCount.toLocaleString()} 行 × ${pastedColumnCount.toLocaleString()} 列`;
+        els.leftStatus.textContent = truncatedRows > 0
+          ? `${baseStatus}，超出 ${truncatedRows.toLocaleString()} 行未写入`
+          : baseStatus;
+        return true;
+      }
+
+      function getLineCount(text) {
+        if (!text) return 0;
+        return String(text).split(/\r\n|\r|\n/).length;
+      }
+
+      function countOccurrences(text, query, caseSensitive) {
+        if (!query) return 0;
+        const haystack = normalizeForSearch(text, caseSensitive);
+        const needle = normalizeForSearch(query, caseSensitive);
+        if (!needle) return 0;
+        let count = 0;
+        let offset = 0;
+        let found = haystack.indexOf(needle, offset);
+        while (found >= 0) {
+          count += 1;
+          offset = found + needle.length;
+          found = haystack.indexOf(needle, offset);
+          if (count > 100000) break;
+        }
+        return count;
+      }
+
+      function renderTextContent(container, value, query, limit, meta = null) {
+        const text = value == null ? "" : String(value);
+        const shown = text.slice(0, limit);
+        renderCellDisplayContent(container, shown, query, meta, {
+          allowHtml: Boolean(meta?.html) && shown.length === text.length,
+        });
+        if (shown.length < text.length) {
+          const tail = document.createElement("div");
+          tail.style.marginTop = "12px";
+          tail.style.color = "var(--muted)";
+          tail.textContent = `已显示 ${shown.length.toLocaleString()} / ${text.length.toLocaleString()} 字符`;
+          container.appendChild(tail);
+        }
+      }
+
+      function renderDetail() {
+        const selected = state.selected;
+        const value = getSelectedValue();
+        const hasSelection = Boolean(selected);
+        els.copyCellButton.disabled = !hasSelection;
+        els.openModalButton.disabled = !hasSelection;
+        els.loadMoreDetailButton.disabled = !hasSelection || value.length <= state.detailVisibleChars;
+        els.detailContent.classList.toggle("mono", els.monoInput.checked);
+
+        if (!selected) {
+          els.detailMeta.innerHTML = "";
+          applyCellMetaStyle(els.detailContent, null);
+          els.detailContent.textContent = "";
+          els.detailStatus.textContent = "未选择单元格";
+          return;
+        }
+
+        const cellMeta = getCellMeta(selected.rowIndex, selected.columnIndex);
+        els.detailMeta.innerHTML = "";
+        const metaItems = [
+          `行 ${selected.rowIndex + 2}`,
+          `列 ${selected.columnIndex + 1}`,
+          state.headers[selected.columnIndex] || "",
+          `${String(value).length.toLocaleString()} 字符`,
+          `${getLineCount(value).toLocaleString()} 行文本`,
+        ];
+        for (const item of metaItems) {
+          const pill = document.createElement("span");
+          pill.className = "pill";
+          pill.textContent = item;
+          els.detailMeta.appendChild(pill);
+        }
+
+        const occurrences = countOccurrences(value, els.detailSearchInput.value, els.caseSensitiveInput.checked);
+        renderTextContent(els.detailContent, value, els.detailSearchInput.value, state.detailVisibleChars, cellMeta);
+        els.detailStatus.textContent = `${Math.min(value.length, state.detailVisibleChars).toLocaleString()} / ${value.length.toLocaleString()} 字符 · 命中 ${occurrences.toLocaleString()}`;
+        els.leftStatus.textContent = `选中 R${selected.rowIndex + 2}C${selected.columnIndex + 1}`;
+      }
+
+      function renderModal() {
+        const cell = state.modalCell;
+        if (!cell) return;
+        const value = state.rows[cell.rowIndex]?.[cell.columnIndex] || "";
+        const cellMeta = getCellMeta(cell.rowIndex, cell.columnIndex);
+        els.modalContent.classList.toggle("mono", els.modalMonoInput.checked);
+        els.modalTitle.textContent = `R${cell.rowIndex + 2}C${cell.columnIndex + 1} · ${state.headers[cell.columnIndex] || ""}`;
+        renderTextContent(els.modalContent, value, els.modalSearchInput.value, state.modalVisibleChars, cellMeta);
+        const occurrences = countOccurrences(value, els.modalSearchInput.value, els.caseSensitiveInput.checked);
+        els.modalStatus.textContent = `${Math.min(value.length, state.modalVisibleChars).toLocaleString()} / ${value.length.toLocaleString()} 字符 · 命中 ${occurrences.toLocaleString()}`;
+        els.loadMoreModalButton.disabled = value.length <= state.modalVisibleChars;
+      }
+
+      function openModalForCell(rowIndex, columnIndex) {
+        state.modalCell = { rowIndex, columnIndex };
+        state.modalVisibleChars = MODAL_CHUNK;
+        els.modalSearchInput.value = els.detailSearchInput.value;
+        els.modalBackdrop.classList.add("open");
+        renderModal();
+      }
+
+      function closeModal() {
+        els.modalBackdrop.classList.remove("open");
+        state.modalCell = null;
+      }
+
+      function openContextMenu(event, rowIndex, columnIndex) {
+        event.preventDefault();
+        selectCell(rowIndex, columnIndex);
+        els.contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 190)}px`;
+        els.contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 150)}px`;
+        els.contextMenu.classList.add("open");
+      }
+
+      function closeContextMenu() {
+        els.contextMenu.classList.remove("open");
+      }
+
+      function handleDocumentPointerDown(event) {
+        if (!eventPathContains(event, els.contextMenu)) closeContextMenu();
+      }
+
+      function eventPathContains(event, element) {
+        if (!element) return false;
+        const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+        return path.length ? path.includes(element) : element.contains(event.target);
+      }
+
+      function eventPathHasSelector(event, selector) {
+        const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+        if (path.length) {
+          return path.some((node) => node instanceof Element && node.matches(selector));
+        }
+        return event.target instanceof Element ? Boolean(event.target.closest(selector)) : false;
+      }
+
+      function closeColumnFilterMenu() {
+        els.columnFilterPopover.classList.remove("open");
+        state.columnFilterMenu = { columnIndex: -1, query: "" };
+      }
+
+      function openColumnFilterMenu(anchor, columnIndex) {
+        state.columnFilterMenu = { columnIndex, query: "" };
+        els.columnFilterTitle.textContent = `${columnIndex + 1}. ${state.headers[columnIndex] || ""}`;
+        els.columnFilterSearchInput.value = "";
+        els.renameColumnInput.value = state.headers[columnIndex] || "";
+        els.restoreColumnNameButton.disabled = state.headers[columnIndex] === state.originalHeaders[columnIndex];
+        els.deleteCustomColumnButton.disabled = !isCustomColumn(columnIndex);
+        els.deleteCustomColumnButton.title = isCustomColumn(columnIndex) ? "删除此自定义列" : "原始导入列不能删除";
+        const rect = anchor.getBoundingClientRect();
+        els.columnFilterPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 350))}px`;
+        els.columnFilterPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 420))}px`;
+        closeAddColumnPopover();
+        closeConcatenateColumnPopover();
+        els.columnsPopover.classList.remove("open");
+        els.columnFilterPopover.classList.add("open");
+        renderColumnFilterValues();
+        els.columnFilterSearchInput.focus();
+      }
+
+      function getMenuFilteredValues(allValues = null) {
+        const columnIndex = state.columnFilterMenu.columnIndex;
+        if (columnIndex < 0) return [];
+        const query = state.columnFilterMenu.query;
+        const values = allValues || getColumnUniqueValues(columnIndex);
+        if (!query) return values;
+        const needle = normalizeForSearch(query, els.caseSensitiveInput.checked);
+        return values.filter((item) => normalizeForSearch(item.value, els.caseSensitiveInput.checked).includes(needle));
+      }
+
+      function renderColumnFilterValues() {
+        const columnIndex = state.columnFilterMenu.columnIndex;
+        els.columnFilterValues.innerHTML = "";
+        if (columnIndex < 0) {
+          els.columnFilterSummary.textContent = "未选择列";
+          return;
+        }
+
+        const allValues = getColumnUniqueValues(columnIndex);
+        const visibleValues = getMenuFilteredValues(allValues);
+        const shownValues = visibleValues.slice(0, 500);
+        const selectedCount = getColumnFilterSelectedCount(columnIndex, allValues);
+        els.columnFilterSummary.textContent = `已选择 ${selectedCount} / ${allValues.length} 个值，当前显示 ${shownValues.length} 个`;
+
+        if (!shownValues.length) {
+          const empty = document.createElement("div");
+          empty.className = "filter-summary";
+          empty.style.padding = "10px";
+          empty.textContent = "没有匹配的值";
+          els.columnFilterValues.appendChild(empty);
+          return;
+        }
+
+        for (const item of shownValues) {
+          const label = document.createElement("label");
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = isColumnFilterValueSelected(columnIndex, item.value);
+          checkbox.addEventListener("change", () => {
+            updateColumnFilterValue(columnIndex, item.value, checkbox.checked, allValues);
+            recomputeView();
+            renderColumnFilterValues();
+          });
+
+          const valueText = document.createElement("span");
+          valueText.className = "filter-value-text";
+          valueText.title = item.value;
+          valueText.textContent = item.value === "" ? "(空白)" : item.value;
+
+          const count = document.createElement("span");
+          count.className = "filter-value-count";
+          count.textContent = String(item.count);
+
+          label.append(checkbox, valueText, count);
+          els.columnFilterValues.appendChild(label);
+        }
+      }
+
+      function updateFilterValuesForVisible(checked) {
+        const columnIndex = state.columnFilterMenu.columnIndex;
+        if (columnIndex < 0) return;
+        const allValues = getColumnUniqueValues(columnIndex);
+        updateColumnFilterValues(columnIndex, getMenuFilteredValues(allValues), checked, allValues);
+        recomputeView();
+        renderColumnFilterValues();
+      }
+
+      function clearCurrentColumnFilter() {
+        const columnIndex = state.columnFilterMenu.columnIndex;
+        if (columnIndex < 0) return;
+        clearColumnFilter(columnIndex);
+        recomputeView();
+        renderColumnFilterValues();
+      }
+
+      function hideRowsByCurrentColumnFilter() {
+        const rowsToHide = [...state.viewIndices];
+        for (const rowIndex of rowsToHide) {
+          state.hiddenRows.add(rowIndex);
+        }
+        closeColumnFilterMenu();
+        recomputeView();
+      }
+
+      function showHiddenRows() {
+        state.hiddenRows = new Set();
+        recomputeView();
+        renderColumnFilterValues();
+      }
+
+      function clearAllFilters() {
+        clearAllColumnFilters();
+        state.hiddenRows = new Set();
+        state.sort = { column: -1, direction: "none" };
+        els.searchInput.value = "";
+        els.searchColumnSelect.value = "-1";
+        els.matchedOnlyInput.checked = false;
+        closeColumnFilterMenu();
+        recomputeView();
+        renderDetail();
+      }
+
+      function updateSearchColumns() {
+        const selectedValue = els.searchColumnSelect.value;
+        els.searchColumnSelect.innerHTML = '<option value="-1">全部列</option>';
+        state.headers.forEach((header, index) => {
+          const option = document.createElement("option");
+          option.value = String(index);
+          option.textContent = `${index + 1}. ${header}`;
+          els.searchColumnSelect.appendChild(option);
+        });
+        const selectedIndex = Number(selectedValue);
+        els.searchColumnSelect.value =
+          selectedValue === "-1" || (Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < state.headers.length)
+            ? selectedValue
+            : "-1";
+      }
+
+      function renderColumnPopover() {
+        els.columnList.innerHTML = "";
+        state.headers.forEach((header, index) => {
+          const label = document.createElement("label");
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = state.visibleColumns[index];
+          checkbox.addEventListener("change", () => {
+            state.visibleColumns[index] = checkbox.checked;
+            renderGrid();
+          });
+          const text = document.createElement("span");
+          text.textContent = `${index + 1}. ${header}`;
+          label.append(checkbox, text);
+          els.columnList.appendChild(label);
+        });
+      }
+
+      function renderColumnOverview() {
+        els.columnOverview.innerHTML = "";
+        if (!state.headers.length) {
+          const empty = document.createElement("span");
+          empty.className = "pill";
+          empty.textContent = "未加载列";
+          els.columnOverview.appendChild(empty);
+          return;
+        }
+
+        state.headers.forEach((header, index) => {
+          const pill = document.createElement("span");
+          pill.className = `pill${hasColumnFilter(index) ? " warning" : ""}`;
+          pill.title = header;
+          pill.textContent = `${index + 1}. ${header}`;
+          els.columnOverview.appendChild(pill);
+        });
+      }
+
+      function getNextColumnName() {
+        const used = new Set(state.headers);
+        let index = state.headers.length + 1;
+        let name = `新列 ${index}`;
+        while (used.has(name)) {
+          index += 1;
+          name = `新列 ${index}`;
+        }
+        return name;
+      }
+
+      function getColumnOptionLabel(index) {
+        const name = state.headers[index] || `Column ${index + 1}`;
+        return `${index + 1}. ${name}`;
+      }
+
+      function normalizeConcatenateScheme(raw) {
+        if (!raw || typeof raw !== "object") return null;
+        const items = Array.isArray(raw.items)
+          ? raw.items
+              .map((item) => ({
+                sourceName: String(item.sourceName || "").trim(),
+                alias: String(item.alias || "").trim(),
+              }))
+              .filter((item) => item.sourceName)
+          : [];
+        if (!items.length) return null;
+        const outputName = String(raw.outputName || raw.name || "").trim() || "用户问题";
+        const scheme = {
+          name: String(raw.name || outputName).trim() || outputName,
+          outputName,
+          items,
+          updatedAt: Number(raw.updatedAt) || Date.now(),
+        };
+        scheme.signature = getConcatenateSchemeSignature(scheme);
+        return scheme;
+      }
+
+      function getConcatenateSchemeSignature(scheme) {
+        return JSON.stringify({
+          outputName: String(scheme.outputName || "").trim(),
+          items: (scheme.items || []).map((item) => ({
+            sourceName: String(item.sourceName || "").trim(),
+            alias: String(item.alias || "").trim(),
+          })),
+        });
+      }
+
+      function getConcatenateSchemeLabel(scheme) {
+        const sources = (scheme.items || []).map((item) => item.sourceName).filter(Boolean).join(" + ");
+        return `${scheme.outputName || scheme.name || "用户问题"} · ${sources || "未命名方案"}`;
+      }
+
+      function loadConcatenateSchemes() {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(CONCATENATE_SCHEMES_STORAGE_KEY) || "[]");
+          if (!Array.isArray(parsed)) return [];
+          return parsed
+            .map(normalizeConcatenateScheme)
+            .filter(Boolean)
+            .slice(0, MAX_CONCATENATE_SCHEMES);
+        } catch (error) {
+          return [];
+        }
+      }
+
+      function persistConcatenateSchemes(schemes) {
+        try {
+          localStorage.setItem(CONCATENATE_SCHEMES_STORAGE_KEY, JSON.stringify(schemes.slice(0, MAX_CONCATENATE_SCHEMES)));
+        } catch (error) {
+          // localStorage can be unavailable in private or restricted contexts.
+        }
+      }
+
+      function buildConcatenateSchemeFromSelection({ name, items }) {
+        const outputName = String(name || "").trim() || "用户问题";
+        const scheme = {
+          name: outputName,
+          outputName,
+          items: items.map((item) => ({
+            sourceName: state.headers[item.columnIndex] || `Column ${item.columnIndex + 1}`,
+            alias: String(item.alias || "").trim() || state.headers[item.columnIndex] || `Column ${item.columnIndex + 1}`,
+          })),
+          updatedAt: Date.now(),
+        };
+        scheme.signature = getConcatenateSchemeSignature(scheme);
+        return scheme;
+      }
+
+      function saveConcatenateScheme({ name, items }) {
+        if (!items?.length) return;
+        const scheme = buildConcatenateSchemeFromSelection({ name, items });
+        const schemes = [scheme, ...loadConcatenateSchemes().filter((item) => item.signature !== scheme.signature)]
+          .slice(0, MAX_CONCATENATE_SCHEMES);
+        state.concatenateSchemes = schemes;
+        persistConcatenateSchemes(schemes);
+        if (els.concatenateColumnPopover.classList.contains("open")) renderConcatenateSchemeOptions();
+      }
+
+      function renderConcatenateSchemeOptions() {
+        els.concatenateSchemeSelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = state.concatenateSchemes.length ? "选择已保存方案" : "暂无可复用方案";
+        els.concatenateSchemeSelect.appendChild(placeholder);
+        state.concatenateSchemes.forEach((scheme) => {
+          const option = document.createElement("option");
+          option.value = scheme.signature;
+          option.textContent = getConcatenateSchemeLabel(scheme);
+          els.concatenateSchemeSelect.appendChild(option);
+        });
+        els.concatenateSchemeSelect.disabled = !state.concatenateSchemes.length;
+        els.applyConcatenateSchemeButton.disabled = !state.concatenateSchemes.length;
+      }
+
+      function applyConcatenateScheme() {
+        const signature = els.concatenateSchemeSelect.value;
+        const scheme = state.concatenateSchemes.find((item) => item.signature === signature);
+        if (!scheme) return;
+        els.concatenateColumnNameInput.value = scheme.outputName || scheme.name || "用户问题";
+        state.concatenateColumnItems = scheme.items.map((item) => {
+          const sourceName = String(item.sourceName || "").trim();
+          const matches = state.headers
+            .map((header, headerIndex) => ({ header, headerIndex }))
+            .filter(({ header }) => header === sourceName);
+          return {
+            columnIndex: matches[0]?.headerIndex ?? 0,
+            manualName: matches.length === 1 ? "" : sourceName,
+            alias: String(item.alias || "").trim() || sourceName,
+          };
+        });
+        if (!state.concatenateColumnItems.length) state.concatenateColumnItems = [createDefaultConcatenateItem(0)];
+        renderConcatenateRows();
+        const resolved = resolveConcatenateItems(state.concatenateColumnItems);
+        setConcatenateValidation(resolved.errors);
+      }
+
+      function createDefaultConcatenateItem(columnIndex = 0) {
+        const index = Math.max(0, Math.min(Number(columnIndex) || 0, Math.max(0, state.headers.length - 1)));
+        return {
+          columnIndex: index,
+          manualName: "",
+          alias: state.headers[index] || `Column ${index + 1}`,
+        };
+      }
+
+      function setConcatenateValidation(errors = []) {
+        els.concatenateValidationStatus.textContent = errors.join("\n");
+      }
+
+      function buildConcatenatedValue(items, row) {
+        const markdownFence = "```markdown";
+        const closingFence = "```";
+        return items
+          .map((item) => {
+            const alias = item.alias || state.headers[item.columnIndex] || `Column ${item.columnIndex + 1}`;
+            const value = row[item.columnIndex] == null ? "" : String(row[item.columnIndex]);
+            return `# ${alias}\n${markdownFence}\n${value}\n${closingFence}`;
+          })
+          .join("\n\n");
+      }
+
+      function resolveConcatenateItems(items) {
+        const errors = [];
+        const resolved = [];
+        items.forEach((item, index) => {
+          const rowNumber = index + 1;
+          const manualName = String(item.manualName || "").trim();
+          let columnIndex = Number(item.columnIndex);
+          if (manualName) {
+            const matches = state.headers
+              .map((header, headerIndex) => ({ header, headerIndex }))
+              .filter(({ header }) => header === manualName);
+            if (!matches.length) {
+              errors.push(`第 ${rowNumber} 行：未找到列名「${manualName}」`);
+              return;
+            }
+            if (matches.length > 1) {
+              errors.push(`第 ${rowNumber} 行：列名「${manualName}」重复，请用下拉框精确选择`);
+              return;
+            }
+            columnIndex = matches[0].headerIndex;
+          }
+          if (!Number.isInteger(columnIndex) || columnIndex < 0 || columnIndex >= state.headers.length) {
+            errors.push(`第 ${rowNumber} 行：请选择有效列`);
+            return;
+          }
+          resolved.push({
+            columnIndex,
+            alias: String(item.alias || "").trim() || state.headers[columnIndex] || `Column ${columnIndex + 1}`,
+          });
+        });
+        if (!resolved.length && !errors.length) errors.push("请至少添加一个拼接项");
+        return { items: resolved, errors };
+      }
+
+      function refreshColumnDependentViews() {
+        updateSearchColumns();
+        renderColumnPopover();
+        renderColumnOverview();
+        updateFileStats();
+        renderGrid();
+        renderDetail();
+        if (els.concatenateColumnPopover.classList.contains("open")) renderConcatenateRows();
+      }
+
+      function updateCopyColumnOptions() {
+        els.copyColumnSelect.innerHTML = "";
+        state.headers.forEach((header, index) => {
+          const option = document.createElement("option");
+          option.value = String(index);
+          option.textContent = getColumnOptionLabel(index);
+          els.copyColumnSelect.appendChild(option);
+        });
+        els.copyColumnSelect.disabled = els.newColumnModeSelect.value !== "copy" || !state.headers.length;
+      }
+
+      function syncNewColumnMode() {
+        updateCopyColumnOptions();
+      }
+
+      function openAddColumnPopover(anchor) {
+        if (!state.headers.length) return;
+        els.newColumnNameInput.value = getNextColumnName();
+        els.newColumnModeSelect.value = "empty";
+        updateCopyColumnOptions();
+        const rect = anchor.getBoundingClientRect();
+        els.addColumnPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 340))}px`;
+        els.addColumnPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 260))}px`;
+        els.columnsPopover.classList.remove("open");
+        closeClipboardImportPopover();
+        closeConcatenateColumnPopover();
+        closeColumnFilterMenu();
+        closeContextMenu();
+        els.addColumnPopover.classList.add("open");
+        els.newColumnNameInput.focus();
+        els.newColumnNameInput.select();
+      }
+
+      function closeAddColumnPopover() {
+        els.addColumnPopover.classList.remove("open");
+      }
+
+      function renderConcatenateRows() {
+        if (!state.concatenateColumnItems.length && state.headers.length) {
+          state.concatenateColumnItems = [createDefaultConcatenateItem(0)];
+        }
+        els.concatenateRows.innerHTML = "";
+        state.concatenateColumnItems.forEach((item, index) => {
+          const row = document.createElement("div");
+          row.className = "concatenate-row";
+          row.draggable = true;
+          row.addEventListener("dragstart", (event) => {
+            state.concatenateDragIndex = index;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", String(index));
+          });
+          row.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+          });
+          row.addEventListener("drop", (event) => {
+            event.preventDefault();
+            const fromIndex = state.concatenateDragIndex >= 0 ? state.concatenateDragIndex : Number(event.dataTransfer.getData("text/plain"));
+            if (!Number.isInteger(fromIndex) || fromIndex === index) return;
+            const [moved] = state.concatenateColumnItems.splice(fromIndex, 1);
+            state.concatenateColumnItems.splice(index, 0, moved);
+            state.concatenateDragIndex = -1;
+            renderConcatenateRows();
+          });
+          row.addEventListener("dragend", () => {
+            state.concatenateDragIndex = -1;
+          });
+
+          const handle = document.createElement("button");
+          handle.type = "button";
+          handle.className = "drag-handle";
+          handle.title = "拖拽调整顺序";
+          handle.textContent = "↕";
+
+          const select = document.createElement("select");
+          select.title = "精确选择列";
+          state.headers.forEach((header, columnIndex) => {
+            const option = document.createElement("option");
+            option.value = String(columnIndex);
+            option.textContent = getColumnOptionLabel(columnIndex);
+            select.appendChild(option);
+          });
+          select.value = String(item.columnIndex);
+          select.addEventListener("change", () => {
+            const previousDefaultAlias = state.headers[item.columnIndex] || "";
+            item.columnIndex = Number(select.value);
+            if (!item.alias || item.alias === previousDefaultAlias) item.alias = state.headers[item.columnIndex] || "";
+            item.manualName = "";
+            setConcatenateValidation();
+            renderConcatenateRows();
+          });
+
+          const manualInput = document.createElement("input");
+          manualInput.type = "text";
+          manualInput.placeholder = "手动输入列名";
+          manualInput.value = item.manualName || "";
+          manualInput.addEventListener("input", () => {
+            item.manualName = manualInput.value;
+            const matches = state.headers
+              .map((header, headerIndex) => ({ header, headerIndex }))
+              .filter(({ header }) => header === manualInput.value.trim());
+            if (matches.length === 1) {
+              item.columnIndex = matches[0].headerIndex;
+              select.value = String(item.columnIndex);
+            }
+            setConcatenateValidation();
+          });
+
+          const aliasInput = document.createElement("input");
+          aliasInput.type = "text";
+          aliasInput.placeholder = "别名";
+          aliasInput.value = item.alias || "";
+          aliasInput.addEventListener("input", () => {
+            item.alias = aliasInput.value;
+          });
+
+          const deleteButton = document.createElement("button");
+          deleteButton.type = "button";
+          deleteButton.className = "icon-button danger";
+          deleteButton.title = "删除拼接项";
+          deleteButton.textContent = "×";
+          deleteButton.disabled = state.concatenateColumnItems.length <= 1;
+          deleteButton.addEventListener("click", () => {
+            if (state.concatenateColumnItems.length <= 1) return;
+            state.concatenateColumnItems.splice(index, 1);
+            setConcatenateValidation();
+            renderConcatenateRows();
+          });
+
+          row.append(handle, select, manualInput, aliasInput, deleteButton);
+          els.concatenateRows.appendChild(row);
+        });
+      }
+
+      function openConcatenateColumnPopover(anchor) {
+        if (!state.headers.length) return;
+        state.concatenateSchemes = loadConcatenateSchemes();
+        els.concatenateColumnNameInput.value = "用户问题";
+        state.concatenateColumnItems = [createDefaultConcatenateItem(0)];
+        setConcatenateValidation();
+        renderConcatenateSchemeOptions();
+        renderConcatenateRows();
+        const rect = anchor.getBoundingClientRect();
+        els.concatenateColumnPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 780))}px`;
+        els.concatenateColumnPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 460))}px`;
+        els.columnsPopover.classList.remove("open");
+        closeClipboardImportPopover();
+        closeAddColumnPopover();
+        closeColumnFilterMenu();
+        closeContextMenu();
+        els.concatenateColumnPopover.classList.add("open");
+        els.concatenateColumnNameInput.focus();
+        els.concatenateColumnNameInput.select();
+      }
+
+      function closeConcatenateColumnPopover() {
+        els.concatenateColumnPopover.classList.remove("open");
+        setConcatenateValidation();
+      }
+
+      function reindexColumnSet(columns, removedColumnIndex) {
+        const next = new Set();
+        for (const columnIndex of columns) {
+          if (columnIndex < removedColumnIndex) next.add(columnIndex);
+          if (columnIndex > removedColumnIndex) next.add(columnIndex - 1);
+        }
+        return next;
+      }
+
+      function reindexColumnFilters(filters, removedColumnIndex) {
+        const next = {};
+        for (const [columnKey, filter] of Object.entries(filters)) {
+          const columnIndex = Number(columnKey);
+          if (columnIndex === removedColumnIndex) continue;
+          const nextIndex = columnIndex > removedColumnIndex ? columnIndex - 1 : columnIndex;
+          next[String(nextIndex)] = cloneColumnFilter(filter);
+        }
+        return next;
+      }
+
+      function reindexCellMeta(cellMeta, removedColumnIndex) {
+        const next = new Map();
+        for (const [key, meta] of cellMeta.entries()) {
+          const [rowPart, columnPart] = key.split(":");
+          const columnIndex = Number(columnPart);
+          if (columnIndex === removedColumnIndex) continue;
+          const nextColumnIndex = columnIndex > removedColumnIndex ? columnIndex - 1 : columnIndex;
+          next.set(`${rowPart}:${nextColumnIndex}`, meta);
+        }
+        return next;
+      }
+
+      function reindexColumnOrder(order, removedColumnIndex) {
+        return order
+          .filter((columnIndex) => columnIndex !== removedColumnIndex)
+          .map((columnIndex) => (columnIndex > removedColumnIndex ? columnIndex - 1 : columnIndex));
+      }
+
+      function normalizeSelectionAfterColumnDelete(removedColumnIndex) {
+        if (!state.selected) return;
+        if (!state.headers.length || !state.rows.length) {
+          state.selected = null;
+          return;
+        }
+        const rowIndex = Math.min(state.selected.rowIndex, state.rows.length - 1);
+        let columnIndex = state.selected.columnIndex;
+        if (columnIndex === removedColumnIndex) columnIndex = Math.min(removedColumnIndex, state.headers.length - 1);
+        else if (columnIndex > removedColumnIndex) columnIndex -= 1;
+        state.selected = { rowIndex, columnIndex };
+        clearSelectionToSelected();
+      }
+
+      function addDerivedColumn({ name, mode, sourceColumnIndex }) {
+        if (!state.headers.length) return;
+        const columnIndex = state.headers.length;
+        const columnName = String(name || "").trim() || getNextColumnName();
+        state.headers.push(columnName);
+        state.originalHeaders.push(columnName);
+
+        const source = Number(sourceColumnIndex);
+        const shouldCopy = mode === "copy" && Number.isInteger(source) && source >= 0 && source < columnIndex;
+        state.rows.forEach((row, rowIndex) => {
+          if (mode === "sequence") {
+            row[columnIndex] = String(rowIndex + 1);
+          } else if (shouldCopy) {
+            row[columnIndex] = row[source] == null ? "" : String(row[source]);
+          } else {
+            row[columnIndex] = "";
+          }
+        });
+
+        if (shouldCopy && state.cellMeta?.size) {
+          const nextMeta = new Map(state.cellMeta);
+          for (let rowIndex = 0; rowIndex < state.rows.length; rowIndex += 1) {
+            const meta = nextMeta.get(`${rowIndex}:${source}`);
+            if (meta) nextMeta.set(`${rowIndex}:${columnIndex}`, { ...meta });
+          }
+          state.cellMeta = nextMeta;
+        }
+
+        state.visibleColumns[columnIndex] = true;
+        state.customColumns.add(columnIndex);
+        state.columnOrder = state.columnOrder.length
+          ? [...state.columnOrder, columnIndex]
+          : state.headers.map((_, index) => index);
+        state.columnWidths[columnIndex] = Math.max(
+          MIN_COL_WIDTH,
+          Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, columnName.length * 10 + 36)),
+        );
+        invalidateColumnValueCache();
+        state.issues = analyzeRows(state.headers, state.rows);
+        state.selected = state.rows.length ? { rowIndex: 0, columnIndex } : null;
+        clearSelectionToSelected();
+        updateSearchColumns();
+        renderColumnPopover();
+        renderColumnOverview();
+        updateFileStats();
+        recomputeView();
+        renderDetail();
+        closeAddColumnPopover();
+        els.leftStatus.textContent = `已添加列：${columnName}`;
+      }
+
+      function addConcatenatedColumn({ name, items }) {
+        if (!state.headers.length || !items.length) return;
+        const columnIndex = state.headers.length;
+        const columnName = String(name || "").trim() || "用户问题";
+        saveConcatenateScheme({ name: columnName, items });
+        state.headers.push(columnName);
+        state.originalHeaders.push(columnName);
+        state.rows.forEach((row) => {
+          row[columnIndex] = buildConcatenatedValue(items, row);
+        });
+        state.visibleColumns[columnIndex] = true;
+        state.customColumns.add(columnIndex);
+        state.columnOrder = state.columnOrder.length
+          ? [...state.columnOrder, columnIndex]
+          : state.headers.map((_, index) => index);
+        state.columnWidths[columnIndex] = Math.max(
+          MIN_COL_WIDTH,
+          Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, columnName.length * 10 + 36)),
+        );
+        invalidateColumnValueCache();
+        state.issues = analyzeRows(state.headers, state.rows);
+        state.selected = state.rows.length ? { rowIndex: 0, columnIndex } : null;
+        clearSelectionToSelected();
+        recomputeView();
+        refreshColumnDependentViews();
+        closeConcatenateColumnPopover();
+        els.leftStatus.textContent = `已生成拼接列：${columnName}`;
+      }
+
+      function renameColumn(columnIndex, name) {
+        if (!Number.isInteger(columnIndex) || columnIndex < 0 || columnIndex >= state.headers.length) return;
+        const nextName = String(name || "").trim() || `Column ${columnIndex + 1}`;
+        state.headers[columnIndex] = nextName;
+        state.issues = {
+          ...state.issues,
+          duplicateColumns: detectDuplicateHeaderIssues(state.headers),
+        };
+        if (state.columnFilterMenu.columnIndex === columnIndex) {
+          els.columnFilterTitle.textContent = `${columnIndex + 1}. ${nextName}`;
+          els.renameColumnInput.value = nextName;
+          els.restoreColumnNameButton.disabled = nextName === state.originalHeaders[columnIndex];
+        }
+        refreshColumnDependentViews();
+        renderColumnFilterValues();
+        els.leftStatus.textContent = `已重命名列：${nextName}`;
+      }
+
+      function restoreColumnName(columnIndex) {
+        if (!Number.isInteger(columnIndex) || columnIndex < 0 || columnIndex >= state.headers.length) return;
+        renameColumn(columnIndex, state.originalHeaders[columnIndex] || `Column ${columnIndex + 1}`);
+      }
+
+      function deleteCustomColumn(columnIndex) {
+        if (!isCustomColumn(columnIndex)) return;
+        const removedName = state.headers[columnIndex] || `Column ${columnIndex + 1}`;
+        state.headers.splice(columnIndex, 1);
+        state.originalHeaders.splice(columnIndex, 1);
+        state.rows.forEach((row) => row.splice(columnIndex, 1));
+        state.visibleColumns.splice(columnIndex, 1);
+        state.columnWidths.splice(columnIndex, 1);
+        state.columnOrder = reindexColumnOrder(state.columnOrder, columnIndex);
+        state.columnFilters = reindexColumnFilters(state.columnFilters, columnIndex);
+        state.customColumns = reindexColumnSet(state.customColumns, columnIndex);
+        state.cellMeta = reindexCellMeta(state.cellMeta, columnIndex);
+        invalidateColumnValueCache();
+        if (state.sort.column === columnIndex) state.sort = { column: -1, direction: "none" };
+        else if (state.sort.column > columnIndex) state.sort.column -= 1;
+        normalizeSelectionAfterColumnDelete(columnIndex);
+        state.issues = analyzeRows(state.headers, state.rows);
+        closeColumnFilterMenu();
+        updateSearchColumns();
+        renderColumnPopover();
+        renderColumnOverview();
+        updateFileStats();
+        recomputeView();
+        renderDetail();
+        els.leftStatus.textContent = `已删除自定义列：${removedName}`;
+      }
+
+      function updateFileStats() {
+        els.fileStats.innerHTML = "";
+        if (!state.file) return;
+        const issueCount =
+          state.issues.inconsistentRows.length +
+          state.issues.sparseRows.length +
+          state.issues.longFields.length +
+          (state.issues.duplicateColumns || []).length;
+        const stats = [
+          state.file.name,
+          formatBytes(state.file.size),
+          `${state.rows.length.toLocaleString()} 行`,
+          `${state.headers.length.toLocaleString()} 列`,
+          state.file.encoding,
+          state.file.kind === "CSV" ? delimiterLabel(state.file.delimiter) : state.file.delimiter,
+          state.file.sheetCount ? `${state.file.sheetCount} sheets` : "",
+          `${state.file.parseMs} ms`,
+        ].filter(Boolean);
+        for (const stat of stats) {
+          const pill = document.createElement("span");
+          pill.className = "pill";
+          pill.textContent = stat;
+          els.fileStats.appendChild(pill);
+        }
+        const issuePill = document.createElement("span");
+        issuePill.className = `pill${issueCount ? " warning" : ""}`;
+        issuePill.textContent = `${issueCount.toLocaleString()} 个异常`;
+        els.fileStats.appendChild(issuePill);
+        if ((state.issues.duplicateColumns || []).length) {
+          const duplicatePill = document.createElement("span");
+          duplicatePill.className = "pill warning";
+          duplicatePill.textContent = `重复列名 ${(state.issues.duplicateColumns || []).length}`;
+          els.fileStats.appendChild(duplicatePill);
+        }
+      }
+
+      function setDataset(result) {
+        state.headers = result.headers || [];
+        state.originalHeaders = [...state.headers];
+        state.rows = result.rows || [];
+        state.issues = result.issues || { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: [] };
+        state.cellMeta = result.cellMeta instanceof Map ? result.cellMeta : new Map();
+        state.file = result.file || null;
+        state.visibleColumns = state.headers.map(() => true);
+        state.columnOrder = state.headers.map((_, index) => index);
+        state.columnWidths = state.headers.map((header) =>
+          Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, String(header).length * 10 + 36))),
+        );
+        clearAllColumnFilters();
+        invalidateColumnValueCache();
+        state.customColumns = new Set();
+        state.concatenateColumnItems = [];
+        state.concatenateDragIndex = -1;
+        state.dragColumn = null;
+        state.hiddenRows = new Set();
+        state.columnFilterMenu = { columnIndex: -1, query: "" };
+        state.sort = { column: -1, direction: "none" };
+        state.selected = state.rows.length && state.headers.length ? { rowIndex: 0, columnIndex: 0 } : null;
+        state.selectionDrag = null;
+        clearSelectionToSelected();
+        updateSearchColumns();
+        renderColumnPopover();
+        renderColumnOverview();
+        updateFileStats();
+        recomputeView();
+        renderDetail();
+        els.columnsButton.disabled = !state.headers.length;
+        els.addColumnButton.disabled = !state.headers.length;
+        els.concatenateColumnButton.disabled = !state.headers.length;
+        els.clearAllFiltersButton.disabled = !state.headers.length;
+        els.exportFormatSelect.disabled = !state.rows.length;
+        els.exportSplitCountInput.disabled = !state.rows.length;
+        els.exportCsvButton.disabled = !state.rows.length;
+        els.exportIssuesButton.disabled = !state.rows.length;
+        updateClipboardImportButton();
+        setProgress(1, "解析完成");
+      }
+
+      function updateSheetSelect(sheetNames = [], activeSheetName = "") {
+        state.excelSheetNames = sheetNames;
+        state.activeSheetName = activeSheetName;
+        els.sheetSelect.innerHTML = "";
+        if (!sheetNames.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "未加载";
+          els.sheetSelect.appendChild(option);
+          els.sheetSelect.disabled = true;
+          els.sheetSelectLabel.hidden = true;
+          return;
+        }
+        for (const sheetName of sheetNames) {
+          const option = document.createElement("option");
+          option.value = sheetName;
+          option.textContent = sheetName;
+          els.sheetSelect.appendChild(option);
+        }
+        els.sheetSelect.value = activeSheetName || sheetNames[0];
+        els.sheetSelect.disabled = sheetNames.length <= 1;
+        els.sheetSelectLabel.hidden = false;
+      }
+
+      function resetExcelWorkbook() {
+        state.excelWorkbook = null;
+        state.excelXLSX = null;
+        state.excelFile = null;
+        updateSheetSelect([], "");
+      }
+
+      function buildExcelDatasetFromSheet(sheetName, startedAt = Date.now()) {
+        if (!state.excelWorkbook || !state.excelXLSX || !state.excelFile) {
+          throw new Error("未加载 Excel 工作簿");
+        }
+        const sheet = state.excelWorkbook.Sheets[sheetName];
+        if (!sheet) throw new Error(`未找到 Sheet：${sheetName}`);
+        const XLSX = state.excelXLSX;
+        const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
+        const maxColumns = getMatrixColumnCount(matrix);
+        const rawHeaders = matrix[0] || [];
+        const headers = Array.from({ length: maxColumns }, (_, index) => {
+          const value = rawHeaders[index] == null || rawHeaders[index] === "" ? `Column ${index + 1}` : String(rawHeaders[index]);
+          return value;
+        });
+        const rows = matrix.slice(1).map((row) =>
+          Array.from({ length: maxColumns }, (_, index) => (row[index] == null ? "" : String(row[index]))),
+        );
+        return {
+          headers,
+          rows,
+          cellMeta: collectExcelCellMeta(sheet, matrix.length, maxColumns, XLSX),
+          issues: analyzeRows(headers, rows),
+          file: {
+            name: state.excelFile.name,
+            size: state.excelFile.size,
+            encoding: "Excel workbook",
+            delimiter: sheetName,
+            parseMs: Date.now() - startedAt,
+            kind: "Excel",
+            sheetCount: state.excelSheetNames.length,
+          },
+        };
+      }
+
+      function loadExcelSheet(sheetName, startedAt = Date.now(), loadToken = state.loadToken) {
+        if (!sheetName) return;
+        if (!isCurrentLoad(loadToken)) return;
+        try {
+          setProgress(0.58, `转换 Sheet：${sheetName}`);
+          updateSheetSelect(state.excelSheetNames, sheetName);
+          const result = buildExcelDatasetFromSheet(sheetName, startedAt);
+          if (!isCurrentLoad(loadToken)) return;
+          setDataset(result);
+        } catch (error) {
+          if (!isCurrentLoad(loadToken)) return;
+          setProgress(0, `Excel Sheet 读取失败：${error.message}`);
+          els.emptyState.style.display = "grid";
+          els.emptyState.querySelector("strong").textContent = "Excel Sheet 读取失败";
+          els.emptyState.querySelector("span").textContent = error.message;
+        }
+      }
+
+      async function parseCsvFile(file) {
+        const loadToken = beginLoad();
+        resetExcelWorkbook();
+        setProgress(0.02, "读取文件");
+        els.emptyState.style.display = "grid";
+        els.emptyState.querySelector("strong").textContent = "正在解析";
+        els.emptyState.querySelector("span").textContent = file.name;
+        const buffer = await file.arrayBuffer();
+        if (!isCurrentLoad(loadToken)) return;
+
+        const worker = createCsvWorker();
+        state.worker = worker;
+        worker.onmessage = (event) => {
+          if (!isCurrentLoad(loadToken)) return;
+          const message = event.data || {};
+          if (message.type === "progress") {
+            setProgress(message.progress, message.stage);
+          } else if (message.type === "complete") {
+            setDataset(message.result);
+            worker.terminate();
+            if (state.worker === worker) state.worker = null;
+          } else if (message.type === "error") {
+            setProgress(0, `解析失败：${message.message}`);
+            worker.terminate();
+            if (state.worker === worker) state.worker = null;
+          }
+        };
+
+        worker.postMessage(
+          {
+            kind: "parse-csv",
+            fileName: file.name,
+            fileSize: file.size,
+            encoding: els.encodingSelect.value,
+            previewLimit: PREVIEW_LIMIT,
+            longFieldThreshold: 50000,
+            buffer,
+          },
+          [buffer],
+        );
+      }
+
+      async function ensureSheetJs() {
+        if (window.XLSX) return window.XLSX;
+        const sources = [
+          "vendor/xlsx.full.min.js",
+          "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
+        ];
+        for (const source of sources) {
+          try {
+            await new Promise((resolve, reject) => {
+              const script = document.createElement("script");
+              script.src = source;
+              script.async = true;
+              script.onload = resolve;
+              script.onerror = () => reject(new Error(`加载失败：${source}`));
+              document.head.appendChild(script);
+            });
+            if (window.XLSX) return window.XLSX;
+          } catch (error) {
+            continue;
+          }
+        }
+        throw new Error("无法加载 SheetJS，Excel 读取或 XLSX 导出需要网络或 vendor/xlsx.full.min.js");
+      }
+
+      function normalizeExcelColor(color) {
+        if (!color) return "";
+        if (typeof color === "string") {
+          const value = color.trim().replace(/^#/, "");
+          if (/^[0-9a-f]{8}$/i.test(value)) return `#${value.slice(2).toLowerCase()}`;
+          if (/^[0-9a-f]{6}$/i.test(value)) return `#${value.toLowerCase()}`;
+          return "";
+        }
+        if (color.rgb) {
+          const value = String(color.rgb).trim().replace(/^#/, "");
+          if (/^[0-9a-f]{8}$/i.test(value)) return `#${value.slice(2).toLowerCase()}`;
+          if (/^[0-9a-f]{6}$/i.test(value)) return `#${value.toLowerCase()}`;
+        }
+        if (color.indexed != null && Object.prototype.hasOwnProperty.call(EXCEL_INDEXED_COLORS, color.indexed)) {
+          return EXCEL_INDEXED_COLORS[color.indexed];
+        }
+        return "";
+      }
+
+      function getExcelCell(sheet, rowIndex, columnIndex, XLSX) {
+        if (Array.isArray(sheet)) return sheet[rowIndex]?.[columnIndex] || null;
+        if (Array.isArray(sheet["!data"])) return sheet["!data"][rowIndex]?.[columnIndex] || null;
+        return sheet[XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })] || null;
+      }
+
+      function extractExcelCellMeta(cell) {
+        if (!cell) return null;
+        const style = typeof cell.s === "object" && cell.s ? cell.s : {};
+        const fill = style.fill || style.patternFill || {};
+        const font = style.font || {};
+        const backgroundColor = normalizeExcelColor(fill.fgColor || fill.bgColor || style.fgColor || style.bgColor);
+        const color = normalizeExcelColor(font.color || style.color);
+        const html = typeof cell.h === "string" && /<[^>]+>/.test(cell.h) ? cell.h : "";
+        const link = normalizeLinkHref(cell.l?.Target || "");
+        const meta = {};
+        if (backgroundColor && backgroundColor !== "#ffffff") meta.backgroundColor = backgroundColor;
+        if (color) meta.color = color;
+        if (html) meta.html = html;
+        if (link) meta.link = link;
+        return Object.keys(meta).length ? meta : null;
+      }
+
+      function collectExcelCellMeta(sheet, rowCount, columnCount, XLSX) {
+        const cellMeta = new Map();
+        for (let row = 1; row < rowCount; row += 1) {
+          for (let col = 0; col < columnCount; col += 1) {
+            const meta = extractExcelCellMeta(getExcelCell(sheet, row, col, XLSX));
+            if (meta) cellMeta.set(`${row - 1}:${col}`, meta);
+          }
+        }
+        return cellMeta;
+      }
+
+      function getMatrixColumnCount(matrix) {
+        let maxColumns = 0;
+        for (const row of matrix) {
+          const columnCount = Array.isArray(row) ? row.length : 0;
+          if (columnCount > maxColumns) maxColumns = columnCount;
+        }
+        return maxColumns;
+      }
+
+      function detectDuplicateHeaderIssues(headers) {
+        const groups = new Map();
+        headers.forEach((header, index) => {
+          const name = header == null || header === "" ? `Column ${index + 1}` : String(header);
+          if (!groups.has(name)) groups.set(name, []);
+          groups.get(name).push(index);
+        });
+        return [...groups.entries()]
+          .filter(([, indexes]) => indexes.length > 1)
+          .map(([columnName, columnIndexes]) => ({
+            type: "重复列名",
+            rowNumber: 1,
+            columnIndex: columnIndexes[0],
+            columnIndexes,
+            columnName,
+            detail: `列名出现 ${columnIndexes.length} 次：${columnIndexes.map((index) => index + 1).join(", ")}`,
+            sample: columnName,
+          }));
+      }
+
+      function appendRowIssues(issues, headers, row, index) {
+        if (!row) return;
+        const expected = headers.length;
+        const rowNumber = index + 2;
+        if (row.length !== expected) {
+          issues.inconsistentRows.push({
+            type: "列数不一致",
+            rowNumber,
+            columnIndex: -1,
+            columnName: "",
+            detail: `期望 ${expected} 列，实际 ${row.length} 列`,
+            sample: row.join(",").slice(0, 300),
+          });
+        }
+        const emptyCount = row.filter((cell) => cell === "").length;
+        if (expected > 1 && emptyCount / expected >= 0.6) {
+          issues.sparseRows.push({
+            type: "空字段比例高",
+            rowNumber,
+            columnIndex: -1,
+            columnName: "",
+            detail: `空字段 ${emptyCount}/${expected}`,
+            sample: row.join(",").slice(0, 300),
+          });
+        }
+        row.forEach((cell, col) => {
+          const text = cell == null ? "" : String(cell);
+          if (text.length >= 50000) {
+            issues.longFields.push({
+              type: "超长字段",
+              rowNumber,
+              columnIndex: col,
+              columnName: headers[col] || `Column ${col + 1}`,
+              detail: `${text.length} 字符`,
+              sample: text.slice(0, 300),
+            });
+          }
+        });
+      }
+
+      function analyzeRows(headers, rows) {
+        const issues = { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: detectDuplicateHeaderIssues(headers) };
+        rows.forEach((row, index) => appendRowIssues(issues, headers, row, index));
+        return issues;
+      }
+
+      function refreshIssuesAfterCellEdits(rowIndexes) {
+        const touchedRows = new Set([...rowIndexes].filter((rowIndex) => Number.isInteger(rowIndex) && rowIndex >= 0));
+        const keepUntouchedRowIssue = (issue) => !touchedRows.has((issue.rowNumber || 0) - 2);
+        state.issues = {
+          duplicateColumns: detectDuplicateHeaderIssues(state.headers),
+          inconsistentRows: (state.issues.inconsistentRows || []).filter(keepUntouchedRowIssue),
+          sparseRows: (state.issues.sparseRows || []).filter(keepUntouchedRowIssue),
+          longFields: (state.issues.longFields || []).filter(keepUntouchedRowIssue),
+        };
+        [...touchedRows]
+          .sort((left, right) => left - right)
+          .forEach((rowIndex) => appendRowIssues(state.issues, state.headers, state.rows[rowIndex], rowIndex));
+      }
+
+      async function parseExcelFile(file) {
+        const loadToken = beginLoad();
+        const startedAt = Date.now();
+        setProgress(0.05, "加载 Excel 解析器");
+        try {
+          resetExcelWorkbook();
+          const XLSX = await ensureSheetJs();
+          if (!isCurrentLoad(loadToken)) return;
+          setProgress(0.2, "读取 Excel");
+          const buffer = await file.arrayBuffer();
+          if (!isCurrentLoad(loadToken)) return;
+          const workbook = XLSX.read(buffer, { type: "array", cellDates: false, dense: true, cellStyles: true, cellHTML: true });
+          if (!isCurrentLoad(loadToken)) return;
+          const sheetName = workbook.SheetNames[0];
+          if (!sheetName) throw new Error("工作簿中没有可读取的 Sheet");
+          state.excelWorkbook = workbook;
+          state.excelXLSX = XLSX;
+          state.excelFile = file;
+          updateSheetSelect(workbook.SheetNames, sheetName);
+          loadExcelSheet(sheetName, startedAt, loadToken);
+        } catch (error) {
+          if (!isCurrentLoad(loadToken)) return;
+          setProgress(0, `Excel 解析失败：${error.message}`);
+          els.emptyState.style.display = "grid";
+          els.emptyState.querySelector("strong").textContent = "Excel 解析失败";
+          els.emptyState.querySelector("span").textContent = error.message;
+        }
+      }
+
+      async function openFileWithPicker() {
+        if (!window.showOpenFilePicker) {
+          els.fileInput.click();
+          return;
+        }
+        try {
+          const [handle] = await window.showOpenFilePicker({
+            multiple: false,
+            types: [
+              {
+                description: "Table files",
+                accept: {
+                  "text/csv": [".csv", ".tsv", ".txt"],
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+                  "application/vnd.ms-excel": [".xls"],
+                },
+              },
+            ],
+          });
+          if (!handle) return;
+          const file = await handle.getFile();
+          handleFiles([file], handle);
+        } catch (error) {
+          if (!error || error.name !== "AbortError") {
+            els.fileInput.click();
+          }
+        }
+      }
+
+      function handleFiles(files, sourceFileHandle = null) {
+        const file = files && files[0];
+        if (!file) return;
+        const lower = file.name.toLocaleLowerCase();
+        els.fileHint.textContent = file.name;
+        els.fileHint.title = file.name;
+        state.sourceFileHandle = sourceFileHandle;
+        els.searchInput.value = "";
+        els.detailSearchInput.value = "";
+        els.modalSearchInput.value = "";
+        closeClipboardImportPopover();
+        if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
+          parseExcelFile(file);
+        } else {
+          parseCsvFile(file);
+        }
+      }
+
+      function getExportSplitCount() {
+        const value = Math.floor(Number(els.exportSplitCountInput.value));
+        const splitCount = Number.isFinite(value) && value > 0 ? value : 1;
+        els.exportSplitCountInput.value = String(splitCount);
+        return splitCount;
+      }
+
+      function getFilteredExportRowGroups() {
+        const rowIndexes = [...state.viewIndices];
+        if (!rowIndexes.length) return [];
+        const splitCount = Math.min(getExportSplitCount(), rowIndexes.length);
+        const rowsPerPart = Math.ceil(rowIndexes.length / splitCount);
+        const groups = [];
+        for (let index = 0; index < rowIndexes.length; index += rowsPerPart) {
+          groups.push(rowIndexes.slice(index, index + rowsPerPart));
+        }
+        return groups;
+      }
+
+      async function exportFilteredCsv(rowIndexes = state.viewIndices, suffix = "") {
+        if (!state.rows.length) return;
+        const visibleColumns = getVisibleColumnIndexes();
+        const parts = [visibleColumns.map((col) => escapeCsv(state.headers[col])).join(",")];
+        let chunk = [];
+        for (const rowIndex of rowIndexes) {
+          const row = state.rows[rowIndex];
+          chunk.push("\r\n", visibleColumns.map((col) => escapeCsv(row[col] || "")).join(","));
+          if (chunk.length >= 2000) {
+            parts.push(chunk.join(""));
+            chunk = [];
+          }
+        }
+        if (chunk.length) parts.push(chunk.join(""));
+        const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
+        await saveTextFile(`${base}-filtered${suffix}.csv`, parts);
+      }
+
+      function getFilteredExportMatrix(rowIndexes = state.viewIndices) {
+        const visibleColumns = getVisibleColumnIndexes();
+        const matrix = [visibleColumns.map((col) => state.headers[col])];
+        for (const rowIndex of rowIndexes) {
+          const row = state.rows[rowIndex];
+          matrix.push(visibleColumns.map((col) => row[col] || ""));
+        }
+        return matrix;
+      }
+
+      async function exportFilteredXlsx(rowIndexes = state.viewIndices, suffix = "") {
+        if (!state.rows.length) return;
+        const XLSX = await ensureSheetJs();
+        const matrix = getFilteredExportMatrix(rowIndexes);
+        const worksheet = XLSX.utils.aoa_to_sheet(matrix);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Filtered");
+        const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
+        XLSX.writeFile(workbook, `${base}-filtered${suffix}.xlsx`);
+        els.leftStatus.textContent = "已导出 XLSX 文件";
+      }
+
+      async function exportFilteredTable() {
+        try {
+          const rowGroups = getFilteredExportRowGroups();
+          for (let partIndex = 0; partIndex < rowGroups.length; partIndex += 1) {
+            const suffix = rowGroups.length > 1 ? `_part${partIndex + 1}` : "";
+            if (els.exportFormatSelect.value === "xlsx") {
+              await exportFilteredXlsx(rowGroups[partIndex], suffix);
+            } else {
+              await exportFilteredCsv(rowGroups[partIndex], suffix);
+            }
+          }
+          if (rowGroups.length > 1) els.leftStatus.textContent = `已导出 ${rowGroups.length} 个拆分文件`;
+        } catch (error) {
+          els.leftStatus.textContent = `导出失败：${error.message}`;
+        }
+      }
+
+      function flattenIssues() {
+        return [
+          ...(state.issues.duplicateColumns || []),
+          ...state.issues.inconsistentRows,
+          ...state.issues.sparseRows,
+          ...state.issues.longFields,
+        ];
+      }
+
+      async function exportIssueReport() {
+        const issues = flattenIssues();
+        const lines = [["type", "rowNumber", "columnIndex", "columnName", "detail", "sample"].map(escapeCsv).join(",")];
+        for (const issue of issues) {
+          lines.push(
+            [issue.type, issue.rowNumber, issue.columnIndex, issue.columnName, issue.detail, issue.sample]
+              .map(escapeCsv)
+              .join(","),
+          );
+        }
+        const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "issues";
+        await saveTextFile(`${base}-issues.csv`, lines.join("\r\n"));
+      }
+
+      function copySelectedRow() {
+        if (!state.selected) return;
+        const visibleColumns = getVisibleColumnIndexes();
+        const row = state.rows[state.selected.rowIndex];
+        copyText(visibleColumns.map((col) => row[col] || "").join("\t"));
+      }
+
+      function copySelectedHeader() {
+        if (!state.selected) return;
+        copyText(state.headers[state.selected.columnIndex] || "");
+      }
+
+      function toggleDetailPanel() {
+        const collapsed = els.detailPanel.classList.toggle("collapsed");
+        els.mainLayout.classList.toggle("detail-collapsed", collapsed);
+        els.restoreDetailButton.hidden = !collapsed;
+        if (!collapsed) renderDetail();
+      }
+
+      function debounce(fn, wait) {
+        let timer = 0;
+        return (...args) => {
+          clearTimeout(timer);
+          timer = setTimeout(() => fn(...args), wait);
+        };
+      }
+
+      const debouncedSearch = debounce(() => {
+        recomputeView();
+        renderDetail();
+      }, 180);
+
+      const debouncedColumnFilterSearch = debounce(() => {
+        state.columnFilterMenu.query = els.columnFilterSearchInput.value;
+        renderColumnFilterValues();
+      }, 120);
+
+      els.chooseFileButton.addEventListener("click", openFileWithPicker);
+      els.clipboardImportButton.addEventListener("click", (event) => openClipboardImportPopover(event.currentTarget));
+      els.cancelClipboardImportButton.addEventListener("click", closeClipboardImportPopover);
+      els.confirmClipboardImportButton.addEventListener("click", importClipboardTable);
+      els.fileInput.addEventListener("change", (event) => handleFiles(event.target.files, null));
+      els.dropZone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        els.dropZone.classList.add("dragover");
+      });
+      els.dropZone.addEventListener("dragleave", () => els.dropZone.classList.remove("dragover"));
+      els.dropZone.addEventListener("drop", (event) => {
+        event.preventDefault();
+        els.dropZone.classList.remove("dragover");
+        handleFiles(event.dataTransfer.files, null);
+      });
+
+      els.gridViewport.addEventListener("scroll", renderGrid, { passive: true });
+      els.gridViewport.addEventListener("keydown", handleGridKeyDown);
+      els.searchInput.addEventListener("input", debouncedSearch);
+      els.searchColumnSelect.addEventListener("change", recomputeView);
+      els.sheetSelect.addEventListener("change", () => loadExcelSheet(els.sheetSelect.value));
+      els.caseSensitiveInput.addEventListener("change", () => {
+        recomputeView();
+        renderDetail();
+        renderModal();
+      });
+      els.matchedOnlyInput.addEventListener("change", recomputeView);
+      els.wrapCellsInput.addEventListener("change", () => {
+        state.wrapCells = els.wrapCellsInput.checked;
+        els.gridViewport.scrollTop = 0;
+        renderGrid();
+      });
+      els.clearSearchButton.addEventListener("click", () => {
+        els.searchInput.value = "";
+        els.matchedOnlyInput.checked = false;
+        recomputeView();
+      });
+      els.clearAllFiltersButton.addEventListener("click", clearAllFilters);
+      els.exportCsvButton.addEventListener("click", exportFilteredTable);
+      els.exportIssuesButton.addEventListener("click", exportIssueReport);
+      els.copyCellButton.addEventListener("click", () => copyText(getSelectionText()));
+      els.openModalButton.addEventListener("click", () => {
+        if (state.selected) openModalForCell(state.selected.rowIndex, state.selected.columnIndex);
+      });
+      els.detailSearchInput.addEventListener("input", () => {
+        state.detailVisibleChars = DETAIL_CHUNK;
+        renderDetail();
+      });
+      els.monoInput.addEventListener("change", renderDetail);
+      els.loadMoreDetailButton.addEventListener("click", () => {
+        state.detailVisibleChars += DETAIL_CHUNK;
+        renderDetail();
+      });
+      els.closeModalButton.addEventListener("click", closeModal);
+      els.modalBackdrop.addEventListener("click", (event) => {
+        if (event.target === els.modalBackdrop) closeModal();
+      });
+      els.modalSearchInput.addEventListener("input", () => {
+        state.modalVisibleChars = MODAL_CHUNK;
+        renderModal();
+      });
+      els.modalMonoInput.addEventListener("change", renderModal);
+      els.copyModalButton.addEventListener("click", () => {
+        if (!state.modalCell) return;
+        copyText(state.rows[state.modalCell.rowIndex]?.[state.modalCell.columnIndex] || "");
+      });
+      els.loadMoreModalButton.addEventListener("click", () => {
+        state.modalVisibleChars += MODAL_CHUNK;
+        renderModal();
+      });
+
+      els.columnsButton.addEventListener("click", (event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        els.columnsPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 310))}px`;
+        els.columnsPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 430))}px`;
+        closeClipboardImportPopover();
+        closeAddColumnPopover();
+        closeConcatenateColumnPopover();
+        els.columnsPopover.classList.toggle("open");
+      });
+      els.addColumnButton.addEventListener("click", (event) => openAddColumnPopover(event.currentTarget));
+      els.concatenateColumnButton.addEventListener("click", (event) => openConcatenateColumnPopover(event.currentTarget));
+      els.newColumnModeSelect.addEventListener("change", syncNewColumnMode);
+      els.cancelAddColumnButton.addEventListener("click", closeAddColumnPopover);
+      els.confirmAddColumnButton.addEventListener("click", () => {
+        addDerivedColumn({
+          name: els.newColumnNameInput.value,
+          mode: els.newColumnModeSelect.value,
+          sourceColumnIndex: Number(els.copyColumnSelect.value),
+        });
+      });
+      els.addConcatenateRowButton.addEventListener("click", () => {
+        state.concatenateColumnItems.push(createDefaultConcatenateItem(0));
+        setConcatenateValidation();
+        renderConcatenateRows();
+      });
+      els.cancelConcatenateColumnButton.addEventListener("click", closeConcatenateColumnPopover);
+      els.applyConcatenateSchemeButton.addEventListener("click", applyConcatenateScheme);
+      els.confirmConcatenateColumnButton.addEventListener("click", () => {
+        const resolved = resolveConcatenateItems(state.concatenateColumnItems);
+        if (resolved.errors.length) {
+          setConcatenateValidation(resolved.errors);
+          return;
+        }
+        addConcatenatedColumn({
+          name: els.concatenateColumnNameInput.value,
+          items: resolved.items,
+        });
+      });
+      els.newColumnNameInput.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        els.confirmAddColumnButton.click();
+      });
+      els.showAllColumnsButton.addEventListener("click", () => {
+        state.visibleColumns = state.headers.map(() => true);
+        renderColumnPopover();
+        renderGrid();
+      });
+      els.hideAllColumnsButton.addEventListener("click", () => {
+        state.visibleColumns = state.headers.map(() => false);
+        renderColumnPopover();
+        renderGrid();
+      });
+      els.filterSortAscButton.addEventListener("click", () => {
+        const columnIndex = state.columnFilterMenu.columnIndex;
+        if (columnIndex < 0) return;
+        state.sort = { column: columnIndex, direction: "asc" };
+        recomputeView();
+        closeColumnFilterMenu();
+      });
+      els.filterSortDescButton.addEventListener("click", () => {
+        const columnIndex = state.columnFilterMenu.columnIndex;
+        if (columnIndex < 0) return;
+        state.sort = { column: columnIndex, direction: "desc" };
+        recomputeView();
+        closeColumnFilterMenu();
+      });
+      els.columnFilterSearchInput.addEventListener("input", debouncedColumnFilterSearch);
+      els.clearColumnFilterButton.addEventListener("click", clearCurrentColumnFilter);
+      els.selectAllFilterValuesButton.addEventListener("click", () => updateFilterValuesForVisible(true));
+      els.selectNoFilterValuesButton.addEventListener("click", () => updateFilterValuesForVisible(false));
+      els.hideFilteredRowsButton.addEventListener("click", hideRowsByCurrentColumnFilter);
+      els.showHiddenRowsButton.addEventListener("click", showHiddenRows);
+      els.renameColumnButton.addEventListener("click", () => renameColumn(state.columnFilterMenu.columnIndex, els.renameColumnInput.value));
+      els.renameColumnInput.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        els.renameColumnButton.click();
+      });
+      els.restoreColumnNameButton.addEventListener("click", () => restoreColumnName(state.columnFilterMenu.columnIndex));
+      els.deleteCustomColumnButton.addEventListener("click", () => deleteCustomColumn(state.columnFilterMenu.columnIndex));
+      els.contextMenu.addEventListener("click", (event) => {
+        const action = event.target.dataset.action;
+        if (!action) return;
+        if (action === "copy-cell") copyText(getSelectedValue());
+        if (action === "copy-row") copySelectedRow();
+        if (action === "copy-header") copySelectedHeader();
+        if (action === "view-full" && state.selected) openModalForCell(state.selected.rowIndex, state.selected.columnIndex);
+        closeContextMenu();
+      });
+      document.addEventListener("pointerdown", handleDocumentPointerDown);
+      document.addEventListener("click", (event) => {
+        if (!eventPathContains(event, els.columnsPopover) && !eventPathContains(event, els.columnsButton)) {
+          els.columnsPopover.classList.remove("open");
+        }
+        if (!eventPathContains(event, els.clipboardImportPopover) && !eventPathContains(event, els.clipboardImportButton)) {
+          closeClipboardImportPopover();
+        }
+        if (!eventPathContains(event, els.addColumnPopover) && !eventPathContains(event, els.addColumnButton)) {
+          closeAddColumnPopover();
+        }
+        if (!eventPathContains(event, els.concatenateColumnPopover) && !eventPathContains(event, els.concatenateColumnButton)) {
+          closeConcatenateColumnPopover();
+        }
+        if (!eventPathContains(event, els.columnFilterPopover) && !eventPathHasSelector(event, ".header-filter-button")) {
+          closeColumnFilterMenu();
+        }
+        if (!eventPathContains(event, els.contextMenu)) closeContextMenu();
+      });
+      document.addEventListener("mousemove", onResizeMove);
+      document.addEventListener("mouseup", stopResize);
+      document.addEventListener("mouseup", stopSelectionDrag);
+      document.addEventListener("keydown", handleCopyShortcut);
+      document.addEventListener("paste", handlePasteIntoCustomColumns);
+      window.addEventListener("blur", closeContextMenu);
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          closeContextMenu();
+          closeModal();
+          els.columnsPopover.classList.remove("open");
+          closeClipboardImportPopover();
+          closeAddColumnPopover();
+          closeConcatenateColumnPopover();
+          closeColumnFilterMenu();
+        }
+      });
+      els.toggleDetailButton.addEventListener("click", toggleDetailPanel);
+      els.restoreDetailButton.addEventListener("click", toggleDetailPanel);
+
+      renderColumnOverview();
+      renderFilteredRowStats();
+      renderGrid();
+    </script>
+  </body>
+</html>
