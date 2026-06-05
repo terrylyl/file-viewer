@@ -315,8 +315,24 @@ test("selection copy is discoverable and supports keyboard shortcuts", () => {
   assert.match(html, /id="copyCellButton" disabled>复制选区<\/button>/, "detail copy button should be labeled for selection copy");
   assert.match(html, /function handleCopyShortcut\(/, "missing Ctrl/Cmd+C copy shortcut handler");
   assert.match(html, /function isEditableShortcutTarget\(/, "copy shortcut should ignore editable fields");
-  assert.match(html, /copyText\(getSelectionText\(\)\)/, "copy shortcut should copy the active selection");
+  assert.match(html, /copySelection\(\)/, "copy shortcut should copy the active selection payload");
   assert.match(html, /document\.addEventListener\("keydown",\s*handleCopyShortcut\)/, "document should listen for copy shortcuts");
+});
+
+test("selection copy preserves spreadsheet cell boundaries and optional headers", () => {
+  assert.match(html, /function escapeHtml\(/, "copy HTML should escape special characters");
+  assert.match(html, /function formatPlainClipboardCell\(/, "plain fallback should quote cells with tabs, quotes, or newlines");
+  assert.match(html, /text\.replaceAll\('"',\s*'""'\)/, "quoted TSV fallback should escape double quotes");
+  assert.match(html, /function selectionIncludesHeaders\(/, "copy should know whether the selected area includes headers");
+  assert.match(html, /return range\.type === "columns" \|\| range\.type === "all";/, "only column/all selections should include headers");
+  assert.match(html, /function getSelectionCopyPayload\(/, "missing selection copy payload builder");
+  assert.match(html, /const htmlRows = \[\];/, "selection copy should build HTML table rows");
+  assert.match(html, /data-sheets-value="\$\{sheetsValue\}"/, "HTML copy should mark cells as string values for online sheets");
+  assert.match(html, /mso-data-placement:same-cell/, "HTML copy should keep line breaks inside the same spreadsheet cell");
+  assert.match(html, /<table><tbody>\$\{htmlRows\.join\(""\)\}<\/tbody><\/table>/, "selection copy should provide an HTML table");
+  assert.match(html, /new ClipboardItem\(\{[\s\S]*?"text\/html":\s*new Blob/, "clipboard write should include text/html");
+  assert.match(html, /"text\/plain":\s*new Blob/, "clipboard write should include text/plain fallback");
+  assert.match(html, /copyClipboardPayload\(getSelectionCopyPayload\(\)\)/, "selection copy should use the structured clipboard payload");
 });
 
 test("context menu closes when focus moves away", () => {

@@ -2014,6 +2014,39 @@ self.onmessage = (event) => {
         downloadText(filename, parts, mime);
       }
 
+      function escapeHtml(value) {
+        return String(value == null ? "" : value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function formatPlainClipboardCell(value) {
+        const text = String(value == null ? "" : value);
+        if (!/[\t\r\n"]/.test(text)) return text;
+        return `"${text.replaceAll('"', '""')}"`;
+      }
+
+      async function copyClipboardPayload(payload) {
+        if (navigator.clipboard?.write && window.ClipboardItem) {
+          try {
+            await navigator.clipboard.write([
+              new ClipboardItem({
+                "text/html": new Blob([payload.html], { type: "text/html" }),
+                "text/plain": new Blob([payload.plainText], { type: "text/plain" }),
+              }),
+            ]);
+            els.leftStatus.textContent = "已复制到剪贴板";
+            return;
+          } catch (error) {
+            // Fall back to text-only copy below.
+          }
+        }
+        await copyText(payload.plainText);
+      }
+
       async function copyText(text) {
         try {
           await navigator.clipboard.writeText(text);
@@ -2719,7 +2752,7 @@ self.onmessage = (event) => {
         if (isEditableShortcutTarget(event.target)) return;
         if (!state.selected) return;
         event.preventDefault();
-        copyText(getSelectionText());
+        copySelection();
       }
 
       function handlePasteIntoCustomColumns(event) {
@@ -3011,6 +3044,57 @@ self.onmessage = (event) => {
           lines.push(columns.map((columnIndex) => row?.[columnIndex] || "").join("\t"));
         }
         return lines.join("\n");
+      }
+
+      function selectionIncludesHeaders(range = state.selectionRange) {
+        if (!range) return false;
+        return range.type === "columns" || range.type === "all";
+      }
+
+      function buildClipboardHtmlRow(cells, tagName = "td") {
+        const cellsHtml = cells
+          .map((cell) => {
+            const rawText = String(cell == null ? "" : cell);
+            const html = escapeHtml(rawText).replace(/\r\n|\r|\n/g, '<br style="mso-data-placement:same-cell;">');
+            const sheetsValue = escapeHtml(JSON.stringify({ 1: 2, 2: rawText }));
+            return `<${tagName} data-sheets-value="${sheetsValue}" style="mso-number-format:'\\@';white-space:pre-wrap;">${html}</${tagName}>`;
+          })
+          .join("");
+        return `<tr>${cellsHtml}</tr>`;
+      }
+
+      function getSelectionCopyPayload() {
+        const endpoints = getSelectionEndpoints();
+        if (!endpoints) {
+          const value = getSelectedValue();
+          return {
+            plainText: formatPlainClipboardCell(value),
+            html: `<table><tbody>${buildClipboardHtmlRow([value])}</tbody></table>`,
+          };
+        }
+
+        const columns = getVisibleColumnIndexes().slice(endpoints.startColumnPosition, endpoints.endColumnPosition + 1);
+        const plainRows = [];
+        const htmlRows = [];
+        if (selectionIncludesHeaders()) {
+          const headers = columns.map((columnIndex) => state.headers[columnIndex] || "");
+          plainRows.push(headers.map(formatPlainClipboardCell).join("\t"));
+          htmlRows.push(buildClipboardHtmlRow(headers, "th"));
+        }
+        for (let rowPosition = endpoints.startRowPosition; rowPosition <= endpoints.endRowPosition; rowPosition += 1) {
+          const row = state.rows[state.viewIndices[rowPosition]];
+          const cells = columns.map((columnIndex) => row?.[columnIndex] || "");
+          plainRows.push(cells.map(formatPlainClipboardCell).join("\t"));
+          htmlRows.push(buildClipboardHtmlRow(cells));
+        }
+        return {
+          plainText: plainRows.join("\r\n"),
+          html: `<table><tbody>${htmlRows.join("")}</tbody></table>`,
+        };
+      }
+
+      function copySelection() {
+        return copyClipboardPayload(getSelectionCopyPayload());
       }
 
       function parseClipboardTable(text) {
@@ -4753,7 +4837,7 @@ self.onmessage = (event) => {
       els.clearAllFiltersButton.addEventListener("click", clearAllFilters);
       els.exportCsvButton.addEventListener("click", exportFilteredTable);
       els.exportIssuesButton.addEventListener("click", exportIssueReport);
-      els.copyCellButton.addEventListener("click", () => copyText(getSelectionText()));
+      els.copyCellButton.addEventListener("click", copySelection);
       els.openModalButton.addEventListener("click", () => {
         if (state.selected) openModalForCell(state.selected.rowIndex, state.selected.columnIndex);
       });
