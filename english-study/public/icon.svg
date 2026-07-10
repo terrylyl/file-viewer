@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Little English Quest icon">
+  <rect width="512" height="512" rx="96" fill="#f8fbf5"/>
+  <circle cx="256" cy="214" r="132" fill="#ffd166" stroke="#17324d" stroke-width="24"/>
+  <path d="M171 310c42 52 128 52 170 0" fill="none" stroke="#17324d" stroke-width="24" stroke-linecap="round"/>
+  <circle cx="209" cy="201" r="22" fill="#17324d"/>
+  <circle cx="303" cy="201" r="22" fill="#17324d"/>
+  <path d="M139 388h234" stroke="#1f7a8c" stroke-width="32" stroke-linecap="round"/>
+  <path d="M178 121l-37-49M334 121l37-49" stroke="#d95d39" stroke-width="28" stroke-linecap="round"/>
+</svg>
