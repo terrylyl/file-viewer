@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>本地表格文件查看器</title>
+    <style>
+/*__INLINE_CSS__*/
+    </style>
+  </head>
+  <body>
+    <div class="app" id="appRoot">
+      <header class="topbar">
+        <div class="drop-zone" id="dropZone">
+          <div class="brand">
+            <svg class="brand-mark" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
+              <rect x="7" y="3" width="26" height="30" rx="5" fill="#0f766e" />
+              <rect x="12" y="7" width="17" height="22" rx="2" fill="#ecfdf5" />
+              <path d="M20.5 7v22M12 14.3h17M12 21.7h17" fill="none" stroke="#6ee7b7" stroke-width="1.4" />
+              <rect x="3" y="9" width="15" height="18" rx="3.5" fill="#065f46" />
+              <path d="M8 13.5v9M13 13.5v9M5.8 17.9h9.4" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" />
+            </svg>
+            <div class="file-title-block">
+              <h1>本地表格文件查看器</h1>
+              <p class="file-name-text" id="fileHint" title="文件只在当前浏览器中处理，不会上传">本地处理，文件不会上传</p>
+            </div>
+          </div>
+          <div class="file-actions">
+            <input id="fileInput" type="file" accept=".csv,.tsv,.txt,.jsonl,.xlsx,.xls" hidden />
+            <button id="clipboardImportButton" aria-haspopup="dialog" aria-expanded="false">导入剪贴板表格</button>
+            <button class="primary" id="chooseFileButton">选择文件</button>
+          </div>
+        </div>
+
+        <div class="toolbar" id="toolbar">
+          <div class="toolbar-row search-row">
+            <input class="search-input" id="searchInput" type="search" placeholder="全表关键词搜索" />
+            <select id="searchColumnSelect" title="搜索范围">
+              <option value="-1">全部列</option>
+            </select>
+            <span class="pill" id="filteredRowStats">0 / 0 行</span>
+            <button class="mobile-tools-button" id="mobileToolsButton" type="button" aria-controls="mobileToolsPanel" aria-expanded="false">工具</button>
+            <div class="search-options" id="mobileToolsPanel">
+              <label><input id="caseSensitiveInput" type="checkbox" /> 大小写敏感</label>
+              <label><input id="matchedOnlyInput" type="checkbox" /> 只看命中行</label>
+              <label><input id="wrapCellsInput" type="checkbox" /> 单元格换行全文</label>
+              <button id="clearSearchButton">清除搜索</button>
+              <span class="pill" id="editedCellCount">已编辑 0 个 cell</span>
+            </div>
+          </div>
+          <div class="toolbar-row command-row metrics-row">
+            <div class="command-group import-settings" aria-label="导入设置">
+              <label>
+                编码
+                <select id="encodingSelect">
+                  <option value="auto">自动</option>
+                  <option value="utf-8">UTF-8</option>
+                  <option value="gb18030">GB18030 / GBK</option>
+                </select>
+              </label>
+              <label class="sheet-control" id="sheetSelectLabel" hidden>
+                Sheet
+                <select id="sheetSelect" disabled>
+                  <option value="">未加载</option>
+                </select>
+              </label>
+            </div>
+            <div class="command-group data-commands" aria-label="列与筛选工具">
+              <span class="command-label">数据</span>
+              <button id="columnsButton" aria-haspopup="dialog" aria-expanded="false" disabled>列显示</button>
+              <button id="addColumnButton" aria-haspopup="dialog" aria-expanded="false" disabled>新增列</button>
+              <button id="concatenateColumnButton" aria-haspopup="dialog" aria-expanded="false" disabled>拼接列</button>
+              <button id="rowFilterButton" aria-haspopup="dialog" aria-expanded="false" disabled>行范围</button>
+              <button id="clearAllFiltersButton" disabled>清除筛选</button>
+            </div>
+            <div class="command-group export-commands" aria-label="导出设置">
+              <button class="primary" id="exportMenuButton" aria-haspopup="dialog" aria-expanded="false" disabled>导出</button>
+            </div>
+            <div class="file-stats" id="fileStats"></div>
+          </div>
+          <div class="column-overview-row">
+            <div class="column-overview" id="columnOverview" aria-label="全部列名"></div>
+          </div>
+          <div class="active-filter-bar" id="activeFilterBar" aria-label="当前筛选条件" aria-hidden="true">
+            <span class="active-filter-label">当前视图</span>
+            <div class="active-filter-chips" id="activeFilterChips"></div>
+            <button class="ghost" id="clearActiveFiltersButton">清除全部</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="main" id="mainLayout">
+        <section class="table-region">
+          <div class="grid-viewport" id="gridViewport" tabindex="0" role="grid" aria-label="表格视图" aria-rowcount="0" aria-colcount="0">
+            <div class="grid-canvas" id="gridCanvas">
+              <div class="header-row" id="headerRow" role="row"></div>
+              <div id="rowLayer"></div>
+            </div>
+          </div>
+          <div class="empty-state actionable" id="emptyState">
+            <div class="empty-card">
+              <span class="empty-eyebrow">LOCAL DATA WORKBENCH</span>
+              <strong>打开一份表格开始查看</strong>
+              <span class="empty-description">拖入 CSV、TSV、TXT、JSONL、XLSX 或 XLS 文件，数据只在当前浏览器中处理。</span>
+              <div class="empty-primary-actions">
+                <button class="primary" id="emptyChooseFileButton">选择文件</button>
+                <button id="emptyClipboardImportButton">粘贴表格</button>
+              </div>
+              <span class="privacy-note">无需上传 · 支持大文件流式解析</span>
+              <div class="empty-actions" id="xlsxConvertActions" hidden>
+                <label>
+                  Sheet
+                  <select id="xlsxConvertSheetSelect"></select>
+                </label>
+                <button class="primary" id="xlsxConvertCsvButton">转换为 CSV</button>
+                <span class="empty-action-status" id="xlsxConvertStatus"></span>
+              </div>
+            </div>
+          </div>
+          <div class="selection-toolbar" id="selectionToolbar" role="toolbar" aria-label="选区操作" aria-hidden="true">
+            <span class="selection-toolbar-status" id="selectionToolbarStatus">未选择</span>
+            <span class="selection-toolbar-divider" aria-hidden="true"></span>
+            <button id="selectionCopyButton">复制</button>
+            <button id="selectionEditButton">编辑</button>
+            <button id="selectionHighlightButton" title="使用黄色高亮当前选区">高亮</button>
+            <button id="selectionOpenButton">查看全文</button>
+            <button id="selectionExcludeButton">排除行</button>
+          </div>
+        </section>
+
+        <div
+          class="detail-resize-handle"
+          id="detailResizeHandle"
+          role="separator"
+          aria-label="调整单元格详情宽度"
+          aria-orientation="vertical"
+          aria-valuemin="300"
+          aria-valuemax="720"
+          aria-valuenow="380"
+          tabindex="0"
+          title="拖拽或使用左右方向键调整详情宽度"
+          hidden
+        ></div>
+
+        <aside class="detail-panel" id="detailPanel" aria-label="单元格详情">
+          <button class="detail-collapsed-button" id="restoreDetailButton" aria-controls="detailPanel" aria-expanded="false" hidden>单元格详情</button>
+          <div class="detail-head">
+            <div class="detail-head-copy">
+              <strong id="detailPanelTitle">单元格详情</strong>
+              <div class="detail-mode-switch" role="tablist" aria-label="详情类型">
+                <button class="active" id="cellDetailModeButton" role="tab" aria-selected="true">单元格</button>
+                <button id="columnProfileModeButton" role="tab" aria-selected="false" disabled>列画像</button>
+              </div>
+            </div>
+            <button class="ghost" id="toggleDetailButton" aria-controls="detailPanel" aria-expanded="true">收起</button>
+          </div>
+          <div class="detail-view" id="cellDetailView">
+            <div class="detail-meta" id="detailMeta"></div>
+            <div>
+              <div class="detail-tools">
+                <input class="detail-search" id="detailSearchInput" type="search" placeholder="在全文中搜索" />
+                <button id="copyCellButton" disabled>复制选区</button>
+                <button id="editCellButton" disabled>编辑</button>
+                <button class="primary" id="saveCellEditButton" hidden disabled>保存</button>
+                <button id="cancelCellEditButton" hidden>取消</button>
+                <button id="undoLastActionButton" disabled>撤回上一步</button>
+                <button id="redoLastActionButton" disabled>恢复撤回</button>
+                <div class="highlight-menu" id="highlightMenu">
+                  <button id="highlightMenuButton" disabled>高亮</button>
+                  <div class="highlight-popover" id="highlightPopover">
+                    <button class="highlight-button yellow" id="highlightYellowOption" aria-label="黄色高亮" title="黄色高亮" disabled></button>
+                    <button class="highlight-button blue" id="highlightBlueOption" aria-label="蓝色高亮" title="蓝色高亮" disabled></button>
+                    <button class="highlight-button pink" id="highlightPinkOption" aria-label="粉色高亮" title="粉色高亮" disabled></button>
+                    <button id="clearHighlightOption" disabled>清除高亮</button>
+                  </div>
+                </div>
+                <button id="openModalButton" disabled>放大</button>
+                <label><input id="monoInput" type="checkbox" /> 等宽</label>
+              </div>
+            </div>
+            <div class="detail-content" id="detailContent"></div>
+            <div class="detail-foot">
+              <span id="detailStatus">未选择单元格</span>
+              <button id="loadMoreDetailButton" disabled>加载更多</button>
+            </div>
+          </div>
+          <section class="detail-view column-profile-view" id="columnProfileView" aria-live="polite" hidden>
+            <div class="column-profile-head">
+              <div>
+                <span class="filter-eyebrow">COLUMN PROFILE</span>
+                <strong id="columnProfileTitle">列画像</strong>
+              </div>
+              <span class="profile-type-badge" id="columnProfileType"></span>
+            </div>
+            <div class="column-profile-content" id="columnProfileContent"></div>
+            <div class="detail-foot">
+              <span id="columnProfileStatus">请选择一列</span>
+              <button id="refreshColumnProfileButton" disabled>重新统计</button>
+            </div>
+          </section>
+        </aside>
+      </main>
+
+      <footer class="statusbar">
+        <span id="leftStatus">就绪</span>
+        <div class="progress-shell" aria-label="解析进度">
+          <div class="progress" id="progressBar"></div>
+        </div>
+        <span id="rightStatus">0 行 · 0 列</span>
+      </footer>
+    </div>
+
+    <div class="popover" id="columnsPopover">
+      <div class="toolbar-row">
+        <button id="showAllColumnsButton">全选</button>
+        <button id="hideAllColumnsButton">全不选</button>
+      </div>
+      <div class="column-list" id="columnList"></div>
+    </div>
+
+    <div class="popover clipboard-import-popover" id="clipboardImportPopover">
+      <div class="filter-title">导入剪贴板表格</div>
+      <div class="form-stack">
+        <label><input id="clipboardFirstRowHeaderInput" type="checkbox" checked /> 第一行作为表头</label>
+        <div class="filter-summary">仅在未载入文件时导入；已载入数据请刷新页面后再导入。</div>
+      </div>
+      <div class="popover-actions">
+        <button id="cancelClipboardImportButton">取消</button>
+        <button class="primary" id="confirmClipboardImportButton">导入</button>
+      </div>
+    </div>
+
+    <div class="popover add-column-popover" id="addColumnPopover">
+      <div class="filter-title">新增列</div>
+      <div class="form-stack">
+        <label>
+          列名
+          <input id="newColumnNameInput" type="text" placeholder="输入新列名" />
+        </label>
+        <label>
+          内容来源
+          <select id="newColumnModeSelect">
+            <option value="empty">空列</option>
+            <option value="sequence">序列号（从 1 开始）</option>
+            <option value="copy">复制已有列</option>
+            <option value="constant">用户配置内容</option>
+          </select>
+        </label>
+        <label>
+          复制来源列
+          <select id="copyColumnSelect" disabled></select>
+        </label>
+        <label id="constantColumnValueLabel" hidden>
+          用户配置内容
+          <textarea id="constantColumnValueInput" placeholder="输入整列复用的内容"></textarea>
+        </label>
+      </div>
+      <div class="popover-actions">
+        <button id="cancelAddColumnButton">取消</button>
+        <button class="primary" id="confirmAddColumnButton">添加</button>
+      </div>
+    </div>
+
+    <div class="popover concatenate-popover" id="concatenateColumnPopover">
+      <div class="filter-title">拼接列</div>
+      <div class="concatenate-head">
+        <label>
+          输出列名
+          <input id="concatenateColumnNameInput" type="text" value="用户问题" />
+        </label>
+        <div class="filter-summary">按行顺序生成 Markdown 代码块；手动列名重复时必须用下拉选择。</div>
+      </div>
+      <div class="concatenate-scheme-row">
+        <label>
+          复用方案
+          <select id="concatenateSchemeSelect"></select>
+        </label>
+        <button id="applyConcatenateSchemeButton">应用方案</button>
+      </div>
+      <div class="concatenate-rows" id="concatenateRows"></div>
+      <div class="validation-status" id="concatenateValidationStatus"></div>
+      <div class="popover-actions">
+        <button id="addConcatenateRowButton">添加拼接项</button>
+        <button id="cancelConcatenateColumnButton">取消</button>
+        <button class="primary" id="confirmConcatenateColumnButton">生成拼接列</button>
+      </div>
+    </div>
+
+    <div class="popover row-filter-popover" id="rowFilterPopover" role="dialog" aria-label="设置行范围">
+      <div class="row-filter-popover-head">
+        <div>
+          <span class="filter-eyebrow">ROW WINDOW</span>
+          <div class="filter-title">行范围</div>
+        </div>
+        <button class="ghost" id="closeRowFilterPopoverButton">关闭</button>
+      </div>
+      <div class="row-filter-summary">在筛选、排除和排序之后截取行；这里的行号从当前结果第 1 行开始。</div>
+      <div class="row-filter-form">
+        <label>
+          保留方式
+          <select id="rowFilterModeSelect">
+            <option value="all">全部结果</option>
+            <option value="first">前 N 行</option>
+            <option value="range">第 A～B 行</option>
+          </select>
+        </label>
+        <label id="rowFilterCountLabel" hidden>
+          行数 N
+          <input id="rowFilterCountInput" type="number" min="1" step="1" value="2000" />
+        </label>
+        <div class="row-filter-range" id="rowFilterRangeFields" hidden>
+          <label>
+            起始行 A
+            <input id="rowFilterStartInput" type="number" min="1" step="1" value="1" />
+          </label>
+          <label>
+            结束行 B
+            <input id="rowFilterEndInput" type="number" min="1" step="1" value="2000" />
+          </label>
+        </div>
+      </div>
+      <div class="row-filter-status" id="rowFilterStatus">当前保留全部结果</div>
+      <div class="popover-actions row-filter-actions">
+        <button id="clearRowFilterButton">清除</button>
+        <button class="primary" id="applyRowFilterButton">应用</button>
+      </div>
+    </div>
+
+    <div class="popover export-popover" id="exportPopover" role="dialog" aria-label="导出当前视图">
+      <div class="export-popover-head">
+        <div>
+          <span class="filter-eyebrow">EXPORT VIEW</span>
+          <div class="filter-title">导出当前视图</div>
+        </div>
+        <button class="ghost" id="closeExportPopoverButton">关闭</button>
+      </div>
+      <div class="export-summary" id="exportSummary">尚未加载数据</div>
+      <div class="export-form">
+        <label>
+          文件格式
+          <select id="exportFormatSelect" disabled>
+            <option value="csv" selected>CSV</option>
+            <option value="xlsx">XLSX</option>
+          </select>
+        </label>
+        <label>
+          拆分文件数
+          <input class="export-split-input" id="exportSplitCountInput" type="number" min="1" step="1" value="1" disabled />
+        </label>
+      </div>
+      <div class="export-preview" id="exportFilenamePreview"></div>
+      <div class="popover-actions">
+        <button class="primary" id="exportCsvButton" disabled>导出筛选结果</button>
+      </div>
+    </div>
+
+    <div class="column-filter-backdrop" id="columnFilterBackdrop" aria-hidden="true"></div>
+
+    <div class="popover filter-popover" id="columnFilterPopover" role="dialog" aria-label="列筛选与设置">
+      <div class="filter-popover-head">
+        <div>
+          <span class="filter-eyebrow">列筛选与设置</span>
+          <div class="filter-title" id="columnFilterTitle">列筛选</div>
+        </div>
+        <div class="filter-popover-head-actions">
+          <button class="ghost" id="viewColumnProfileButton">列画像</button>
+          <button class="ghost" id="clearColumnFilterButton">清除筛选</button>
+          <button class="ghost" id="closeColumnFilterButton">关闭</button>
+        </div>
+      </div>
+
+      <div class="filter-section filter-sort-section">
+        <div class="filter-section-title">排序</div>
+        <div class="filter-actions">
+          <button id="filterSortAscButton">升序</button>
+          <button id="filterSortDescButton">降序</button>
+        </div>
+      </div>
+
+      <div class="filter-section">
+        <div class="filter-section-title">条件筛选</div>
+        <div class="filter-condition">
+          <div class="filter-condition-controls">
+            <label class="filter-condition-field">
+              <span>规则</span>
+              <select id="columnConditionOperatorSelect">
+                <option value="">不使用条件</option>
+                <option value="duplicate">重复值</option>
+                <option value="empty">空值</option>
+                <option value="non-empty">非空</option>
+                <option value="profile-invalid">画像异常值</option>
+                <option value="contains">包含文本</option>
+                <option value="not-contains">不包含文本</option>
+                <option value="regex">正则匹配</option>
+                <option value="list-token-count-gte">列表元素数 ≥</option>
+                <option value="distinct-list-token-count-gte">不同列表元素数 ≥</option>
+                <option value="number-gt">数值 &gt;</option>
+                <option value="number-gte">数值 ≥</option>
+                <option value="number-lt">数值 &lt;</option>
+                <option value="number-lte">数值 ≤</option>
+                <option value="number-eq">数值 =</option>
+              </select>
+            </label>
+            <label class="filter-condition-field" for="columnConditionValueInput">
+              <span id="columnConditionValueLabelText">参数</span>
+              <input id="columnConditionValueInput" type="text" placeholder="参数" />
+            </label>
+          </div>
+          <div class="filter-condition-hint" id="columnConditionHint">可与下方值勾选同时生效。</div>
+        </div>
+      </div>
+
+      <div class="filter-section filter-values-section">
+        <div class="filter-section-title-row">
+          <div class="filter-section-title">值筛选</div>
+          <div class="filter-summary" id="columnFilterSummary">未选择列</div>
+        </div>
+        <div class="filter-search-row">
+          <input id="columnFilterSearchInput" type="search" placeholder="搜索本列值" />
+        </div>
+        <div class="filter-actions compact-actions">
+          <button id="selectAllFilterValuesButton">选择当前值</button>
+          <button id="selectNoFilterValuesButton">取消当前值</button>
+        </div>
+        <div class="filter-values" id="columnFilterValues"></div>
+      </div>
+
+      <div class="filter-section filter-row-actions">
+        <div class="filter-section-title">行操作</div>
+        <div class="filter-actions">
+          <button id="hideFilteredRowsButton">排除当前结果行</button>
+          <button id="showHiddenRowsButton">恢复已排除行</button>
+        </div>
+      </div>
+
+      <details class="filter-column-settings">
+        <summary>列设置</summary>
+        <div class="filter-column-settings-content">
+          <div class="filter-rename">
+            <input id="renameColumnInput" type="text" placeholder="列名" />
+            <button id="renameColumnButton">重命名</button>
+            <button id="restoreColumnNameButton">恢复</button>
+          </div>
+          <button id="deleteCustomColumnButton" class="danger filter-delete-column" disabled>删除此自定义列</button>
+        </div>
+      </details>
+    </div>
+
+    <div class="context-menu" id="contextMenu">
+      <button data-action="copy-cell">复制单元格</button>
+      <button data-action="copy-row">复制整行</button>
+      <button data-action="exclude-row">排除此行</button>
+      <button data-action="copy-header">复制列名</button>
+      <button data-action="view-full">查看完整内容</button>
+    </div>
+
+    <div class="command-palette-backdrop" id="commandPaletteBackdrop" role="dialog" aria-modal="true" aria-label="命令面板">
+      <div class="command-palette">
+        <div class="command-palette-search-row">
+          <span aria-hidden="true">⌘</span>
+          <input id="commandPaletteInput" type="search" placeholder="搜索命令或列名" autocomplete="off" />
+          <kbd>Esc</kbd>
+        </div>
+        <div class="command-palette-list" id="commandPaletteList" role="listbox"></div>
+        <div class="command-palette-foot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+          <span><kbd>Enter</kbd> 执行</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="shortcut-help-backdrop" id="shortcutHelpBackdrop" role="dialog" aria-modal="true" aria-label="快捷键帮助">
+      <div class="shortcut-help">
+        <div class="shortcut-help-head">
+          <div>
+            <span class="filter-eyebrow">KEYBOARD</span>
+            <strong>快捷键</strong>
+          </div>
+          <button class="ghost" id="closeShortcutHelpButton">关闭</button>
+        </div>
+        <div class="shortcut-help-grid">
+          <span>命令面板</span><kbd>Ctrl / ⌘ + K</kbd>
+          <span>全表搜索</span><kbd>Ctrl / ⌘ + F</kbd>
+          <span>复制选区</span><kbd>Ctrl / ⌘ + C</kbd>
+          <span>撤回 / 恢复</span><kbd>Ctrl / ⌘ + Z</kbd>
+          <span>移动与扩展选区</span><kbd>方向键 / Shift + 方向键</kbd>
+          <span>查看快捷键</span><kbd>?</kbd>
+          <span>关闭当前浮层</span><kbd>Esc</kbd>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="false"></div>
+
+    <div class="modal-backdrop" id="modalBackdrop" role="dialog" aria-modal="true" aria-label="完整内容">
+      <div class="modal">
+        <div class="modal-head">
+          <strong id="modalTitle">完整内容</strong>
+          <button id="closeModalButton">关闭</button>
+        </div>
+        <div class="modal-tools">
+          <input class="detail-search" id="modalSearchInput" type="search" placeholder="在全文中搜索" />
+          <label class="modal-format-group">
+            格式
+            <select id="modalFormatSelect">
+              <option value="auto" selected>自动</option>
+              <option value="markdown">Markdown</option>
+              <option value="json">JSON</option>
+              <option value="html">HTML</option>
+              <option value="code">代码</option>
+              <option value="plain">纯文本</option>
+            </select>
+          </label>
+          <button id="copyModalButton">复制全文</button>
+          <label><input id="modalMonoInput" type="checkbox" /> 等宽</label>
+        </div>
+        <div class="modal-viewer" id="modalViewer">
+          <section class="modal-pane">
+            <div class="modal-pane-title">原文</div>
+            <div class="modal-content" id="modalContent"></div>
+          </section>
+          <div class="modal-splitter" id="modalSplitHandle" role="separator" aria-orientation="vertical" tabindex="0" title="拖拽调整宽度"></div>
+          <section class="modal-pane">
+            <div class="modal-pane-title">
+              <span>解析结果</span>
+              <span class="modal-detected-format" id="modalDetectedFormat"></span>
+            </div>
+            <div class="modal-content modal-parsed-content" id="modalParsedContent"></div>
+          </section>
+        </div>
+        <div class="modal-foot">
+          <span id="modalStatus"></span>
+          <button id="loadMoreModalButton">加载更多</button>
+        </div>
+        <div class="modal-resize-handle" id="modalResizeHandle" role="separator" aria-orientation="vertical" tabindex="0" title="拖拽调整弹窗大小"></div>
+      </div>
+    </div>
+
+    <script id="csv-worker-source" type="text/plain">
+/*__CSV_WORKER__*/
+    </script>
+
+    <script id="query-worker-source" type="text/plain">
+/*__QUERY_WORKER__*/
+    </script>
+
+    <script id="excel-worker-source" type="text/plain">
+/*__EXCEL_WORKER__*/
+    </script>
+
+    <script>
+/*__APP_JS__*/
+    </script>
+  </body>
+</html>

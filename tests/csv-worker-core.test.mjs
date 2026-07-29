@@ -102,3 +102,37 @@ test("parseCsvText reports duplicate source column names", () => {
   assert.equal(parsed.issues.duplicateColumns[0].columnName, "name");
   assert.equal(JSON.stringify(parsed.issues.duplicateColumns[0].columnIndexes), JSON.stringify([1, 2]));
 });
+
+test("parseJsonlText expands object keys into table columns", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseJsonlText(
+    [
+      '{"id":1,"name":"Alice","meta":{"score":3}}',
+      '{"id":2,"active":true,"tags":["x","y"],"name":null}',
+      "",
+      '{"id":3,"name":"Cara"}',
+    ].join("\n"),
+    { longFieldThreshold: 1000 },
+  );
+
+  assert.equal(JSON.stringify(parsed.headers), JSON.stringify(["id", "name", "meta", "active", "tags"]));
+  assert.equal(JSON.stringify(parsed.rows[0]), JSON.stringify(["1", "Alice", '{"score":3}', "", ""]));
+  assert.equal(JSON.stringify(parsed.rows[1]), JSON.stringify(["2", "", "", "true", '["x","y"]']));
+  assert.equal(JSON.stringify(parsed.rows[2]), JSON.stringify(["3", "Cara", "", "", ""]));
+  assert.equal(parsed.meta.rowCount, 3);
+  assert.equal(parsed.meta.columnCount, 5);
+  assert.equal(parsed.meta.delimiter, "JSON Lines");
+});
+
+test("parseJsonlText reports malformed and non-object lines", () => {
+  const core = loadWorkerCore();
+
+  assert.throws(
+    () => core.parseJsonlText('{"id":1}\nnot-json'),
+    /第 2 行 JSON 解析失败/,
+  );
+  assert.throws(
+    () => core.parseJsonlText('{"id":1}\n[1,2,3]'),
+    /第 2 行不是 JSON object/,
+  );
+});
