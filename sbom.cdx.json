@@ -1,0 +1,53 @@
+{
+  "$schema": "https://cyclonedx.org/schema/bom-1.5.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:8ed40d60-2627-4e95-8207-b6c92d2b3f34",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-03T00:00:00Z",
+    "component": {
+      "type": "application",
+      "name": "local-table-file-viewer",
+      "version": "2.3.5",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "SheetJS Community Edition",
+      "version": "0.18.5",
+      "purl": "pkg:npm/xlsx@0.18.5",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/xlsx/-/xlsx-0.18.5.tgz"
+        }
+      ],
+      "properties": [
+        {
+          "name": "cdx:comment",
+          "value": "Vendored build-time dependency, embedded only in the isolated Excel Worker; no runtime network fallback."
+        },
+        {
+          "name": "file-viewer:sha256",
+          "value": "c9506197caf809a075b6dee1da0d36fb19da7158ffe8a88e7b0c96c5d8623c99"
+        }
+      ]
+    }
+  ]
+}

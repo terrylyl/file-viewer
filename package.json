@@ -1,12 +1,13 @@
 {
   "name": "local-table-file-viewer",
-  "version": "0.2.0",
+  "version": "2.3.5",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node scripts/build-single-html.mjs",
     "dev": "npm run build && node scripts/serve.mjs",
-    "test": "npm run build && node --test"
+    "test": "npm run build && node --test",
+    "package": "npm run build && node scripts/create-release.mjs"
   },
   "dependencies": {},
   "devDependencies": {}

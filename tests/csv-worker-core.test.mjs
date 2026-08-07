@@ -48,6 +48,90 @@ test("parseCsvText handles quoted commas and quoted newlines", () => {
   assert.equal(parsed.meta.columnCount, 2);
 });
 
+test("parseCsvText preserves relaxed JSON fields without splitting their commas", () => {
+  const core = loadWorkerCore();
+  const input = [
+    "id,name,payload,notes",
+    '1,Alice,{"tags":["a","b"],"nested":{"ok":true}},plain',
+    '2,Bob,"{"tags":["c","d"],"nested":{"ok":false}}",next',
+  ].join("\n");
+  const parsed = core.parseCsvText(input);
+
+  assert.equal(core.detectDelimiter(input), ",");
+  assert.equal(parsed.headers.length, 4);
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(parsed.rows[0][2], '{"tags":["a","b"],"nested":{"ok":true}}');
+  assert.equal(parsed.rows[1][2], '{"tags":["c","d"],"nested":{"ok":false}}');
+  assert.equal(parsed.issues.inconsistentRows.length, 0);
+});
+
+test("parseCsvText keeps backslash-escaped separators and fenced Markdown in one field", () => {
+  const core = loadWorkerCore();
+  const input = [
+    "id,name,payload,notes",
+    "1,Alice,alpha\\, beta,```json",
+    '{"text":"one, two","items":[1,2]}',
+    "```",
+    "2,Bob,plain,after",
+  ].join("\n");
+  const parsed = core.parseCsvText(input, { delimiter: "," });
+
+  assert.equal(parsed.headers.length, 4);
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(parsed.rows[0][2], "alpha\\, beta");
+  assert.equal(parsed.rows[0][3], '```json\n{"text":"one, two","items":[1,2]}\n```');
+  assert.equal(parsed.rows[1][3], "after");
+  assert.equal(parsed.issues.inconsistentRows.length, 0);
+});
+
+test("complex 10-by-5 CSV fixture preserves every logical record and column", () => {
+  const core = loadWorkerCore();
+  const input = readFileSync(
+    new URL("./fixtures/complex-csv-boundaries-10x5.csv", import.meta.url),
+    "utf8",
+  );
+  const parsed = core.parseCsvText(input, { delimiter: ",", previewLimit: 300 });
+
+  assert.equal(parsed.rows.length, 10);
+  assert.equal(parsed.headers.length, 5);
+  assert.equal(parsed.meta.rowCount, 10);
+  assert.equal(parsed.meta.columnCount, 5);
+  assert.equal(parsed.rows[2][2], '{"message":"first line\nsecond line","count":2}');
+  assert.equal(parsed.rows[3][2], '{"tags":["a","b"],"nested":{"enabled":true,"count":2}}');
+  assert.equal(parsed.rows[4][2], '{"tags":["c","d"],"nested":{"enabled":false}}');
+  assert.equal(parsed.rows[5][2], "alpha\\, beta");
+  assert.equal(parsed.rows[5][3], "C:\\\\temp\\\\demo");
+  assert.equal(parsed.rows[6][3], '```json\n{"text":"one, two","nested":{"ok":true}}\n```');
+  assert.equal(parsed.rows[8][2], "");
+  assert.equal(parsed.rows[8][3], "");
+  assert.equal(parsed.issues.inconsistentRows.length, 0);
+});
+
+test("streaming parser keeps escaped CSV quotes intact across chunk boundaries", () => {
+  const core = loadWorkerCore();
+  const parser = core.createCsvRecordParser(",");
+  const records = [];
+  for (const chunk of ['id,payload\n1,"{"', '"key""', ':""one,two""}"\n']) {
+    records.push(...parser.push(chunk));
+  }
+  records.push(...parser.finish());
+
+  assert.equal(JSON.stringify(records), JSON.stringify([
+    ["id", "payload"],
+    ["1", '{"key":"one,two"}'],
+  ]));
+});
+
+test("parseCsvText warns instead of silently splitting an unclosed complex field", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText('id,payload,notes\n1,{"tags":["a","b"],unfinished');
+
+  assert.equal(parsed.rows.length, 1);
+  const warning = parsed.issues.inconsistentRows.find((issue) => issue.type === "复杂字段未闭合");
+  assert.ok(warning, "unclosed structured content should remain visible as an import warning");
+  assert.match(warning.detail, /JSON\/数组括号/);
+});
+
 test("parseCsvText repairs unescaped formula delimiters without adding columns", () => {
   const core = loadWorkerCore();
   const parsed = core.parseCsvText(

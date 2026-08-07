@@ -2,7 +2,7 @@
 
 本文档记录 `file-viewer` 当前单页应用架构，重点说明主要模块、数据流、状态边界、Worker 同步、缓存失效规则，以及后续新增功能时需要注意的维护约束。
 
-当前应用仍以构建后的 `index.html` 为唯一运行入口。开发态源码位于 `src/`，`scripts/build-single-html.mjs` 会将模板、样式、主线程逻辑、共享纯函数，以及 CSV/JSONL、查询、Excel 三类 Worker 源码内联到单页产物中。
+当前应用仍以构建后的 `index.html` 为唯一运行入口。开发态源码位于 `src/`，`scripts/build-single-html.mjs` 会将模板、样式、主线程逻辑、共享纯函数，以及 CSV/JSONL、查询、大文件、Excel Worker 源码内联到单页产物中。
 
 ## Runtime Shape
 
@@ -15,11 +15,13 @@ Browser
 │  ├─ <script id="query-worker-source" type="text/plain">
 │  ├─ <script id="excel-worker-source" type="text/plain">
 │  └─ main application script
-├─ optional vendor/xlsx.full.min.js
-└─ optional SheetJS CDN fallback
+└─ Blob Workers
+
+Build input
+└─ vendor/xlsx.full.min.js (SheetJS 0.18.5, SHA-256 verified, embedded only in the Excel Worker)
 ```
 
-Local serving is done by `scripts/serve.mjs`; static file access is enough for normal use.
+Local serving is done by `scripts/serve.mjs`; static file access is enough for normal use. The generated document includes a restrictive CSP: no runtime network connection, an exact hash for the main application script, and Blob Workers only.
 
 ## Source Map
 
@@ -35,7 +37,8 @@ Local serving is done by `scripts/serve.mjs`; static file access is enough for n
 - `src/app/export.js`: row-window controls and filtered CSV/XLSX export orchestration.
 - `src/app/main.js`: remaining workspace commands, event wiring, and application startup.
 - `src/shared/*.js`: pure helpers reused by the main thread and Worker sources.
-- `src/workers/*.js`: CSV/JSONL parsing, query/filtering/sorting, and Excel parsing Worker logic.
+- `src/workers/*.js`: CSV/JSONL parsing, query/filtering/sorting, OPFS-backed large-text data, and Excel parsing Worker logic.
+- `vendor/xlsx.full.min.js`: reviewed, pinned SheetJS build input; it is integrity-checked before being inlined into the generated Excel Worker.
 - `src/styles.css`: application styling.
 - `index.html`: generated single-file distribution artifact.
 - `scripts/build-single-html.mjs`: inlines source files into `index.html`.
@@ -54,7 +57,7 @@ The generated single HTML file is organized into these conceptual layers:
    Top toolbar, table viewport, detail panel, popovers, context menu, modal viewer, and status bar.
 
 2. **Shared Pure Helpers**
-   Filtering, issue detection, and CSV export escaping helpers are inlined before the scripts that use them.
+   Filtering, issue detection, and CSV helpers (including the streaming-compatible complex-field parser and export escaping) are inlined before the scripts that use them.
 
 3. **Worker Sources**
    Worker scripts are embedded as `text/plain` and turned into Blob Workers at runtime with `createInlineWorker(scriptId)`.
@@ -87,6 +90,7 @@ File selected or dropped
 → setDataset(result)
 → rows become chunked rows facade
 → query worker is seeded with row chunks
+→ matching local edit-recovery draft is checked
 → recomputeView()
 → renderGrid()
 ```
@@ -102,7 +106,17 @@ File selected or dropped
 → setDataset(result)
 ```
 
-If the Excel Worker cannot load SheetJS, the app falls back to `parseExcelFileOnMainThread(...)`. Oversized or unsafe XLSX failures may offer the XLSX-to-CSV conversion path.
+For CSV/TSV/TXT/JSONL files at or above 24 MiB, `parseLargeTextFile(...)` takes a separate path:
+
+```text
+File.stream() → large-data Worker → OPFS chunk files → query / row-page messages
+                                               ↓
+                                  main-thread viewport row cache
+```
+
+The large-data Worker is the canonical row owner. `state.rows` remains a length-compatible facade for UI compatibility, while `getDataRow(...)`, `requestLargeRows(...)`, and `prefetchLargeRows(...)` keep the visible DOM bounded. The current product cap is 256 MiB and the supported target is current desktop Chrome/Edge.
+
+The Excel Worker contains the verified SheetJS source before its own handler code. It never imports runtime code or falls back to the main thread. Oversized or unsafe XLSX failures may offer the XLSX-to-CSV conversion path.
 
 ## Dataset Shape
 
@@ -157,13 +171,15 @@ Important `state` groups:
 | Area | Fields | Notes |
 | --- | --- | --- |
 | Dataset | `headers`, `originalHeaders`, `rows`, `rowChunks`, `issues`, `cellMeta`, `file` | Canonical table data and metadata. |
-| Excel | `excelWorker`, `excelWorkbook`, `excelXLSX`, `excelFile`, `excelSheetNames`, `activeSheetName`, `xlsxConversion` | Worker path is preferred; workbook fields are for fallback/main-thread path. |
+| Excel | `excelWorker`, `excelSheetNames`, `activeSheetName`, `xlsxConversion` | The Worker owns SheetJS and workbook state; the main thread never retains a SheetJS workbook. |
 | View | `viewIndices`, `rowPositionMap`, `matchedRows`, `visibleColumns`, `columnOrder`, `columnWidths`, `hiddenRows`, `sort`, `rowWindow` | Defines which rows/columns are visible, ordered, excluded, and finally sliced. |
 | Filtering | `columnFilters`, `duplicateFilters`, `columnValueCache`, `columnValuePending`, `columnValueTokens`, `columnValueTokenCounter`, `columnFilterMenu` | Column value lists may be computed asynchronously per column; duplicate filters are group-level conditions. |
 | Editing | `selected`, `cellEdit`, `editedCells`, `manualHighlights`, `undoStack`, `redoStack` | Cell editing, highlight state, and undo/redo history. |
+| Recovery | `datasetRecoveryKey`, `pendingRecoveryDraft`, `recoveryDraftSaveTimer`, `hasBeforeUnloadGuard` | Local edit draft, matching state, delayed persistence, and leave-page protection. |
 | Selection | `selectionAnchor`, `selectionRange`, `selectionDrag` | Spreadsheet-style cell, row, column, and all-table selection. |
 | Rendering | `renderQueued`, `headerDirty`, `cellVersions`, `cellRenderCache` | Render scheduling and visible cell node caching. |
 | Workers | `worker`, `queryWorker`, `queryToken`, `queryRowsVersion`, `queryWorkerReadyVersion`, `queryWorkerDirty` | CSV/JSONL parse worker and query worker lifecycle. |
+| Large text | `largeDataWorker`, `largeData` | OPFS-backed rows, bounded row cache, remote row requests, and large-data mutations. |
 | Modal/detail | `detailVisibleChars`, `modalVisibleChars`, `modalCell`, `modalSplitResize`, `modalResize` | Large-cell viewing and split/resize state. |
 
 ## Workers
@@ -173,10 +189,10 @@ Important `state` groups:
 `csv-worker-source` owns:
 
 - CSV delimiter detection.
-- CSV state-machine parsing.
+- CSV state-machine parsing. Standard CSV quoting remains the primary rule; the parser also conservatively retains unquoted JSON object/array fields, backslash-escaped delimiters, and fenced Markdown blocks so their commas/newlines do not become table boundaries.
 - JSONL object expansion.
 - Text decoding with UTF-8 and GB18030/GBK fallback.
-- Parser issue detection during CSV/JSONL import.
+- Parser issue detection during CSV/JSONL import, including unclosed quotes, structured fields, or Markdown fences.
 
 Main-thread entry points:
 
@@ -210,21 +226,28 @@ Staleness guards:
 - `queryRowsVersion` matches replies to the current dataset.
 - `queryWorkerDirty` forces reseeding when edits happen before Worker readiness.
 
+### Large Data Worker
+
+`large-data-worker-source` is selected only for CSV/TSV/TXT/JSONL files of at least 24 MiB. It streams the `File`, stores JSON row chunks in OPFS, and services `query`, `get-rows`, `patch-cells`, `transform-columns`, unique-value and profile requests. It intentionally does not post a complete row array to the main thread. It uses the same stateful CSV parser as the normal Worker, including across decoded stream chunk boundaries.
+
+CSV export obtains small row pages through this Worker and writes Blob parts incrementally. XLSX export remains available, but SheetJS necessarily materializes the export workbook; callers should prefer CSV for the lowest memory use.
+
 ### Excel Worker
 
-`excel-worker-source` owns the preferred Excel parse path:
+`excel-worker-source` owns the Excel parse and XLSX export paths:
 
-- Loads SheetJS inside the Worker.
+- Receives the SHA-256-verified SheetJS source at build time; it performs no `importScripts()` or network request at runtime.
 - Reads workbook with guarded low-memory options.
 - Converts the selected sheet to headers/rows/issues.
 - Returns transferable `cellMetaEntries` instead of a `Map`.
+- Builds XLSX export buffers from a matrix supplied by the main thread.
 
 Main-thread coordination:
 
 - `startExcelWorkerParse(file, loadToken, startedAt)` starts workbook parsing.
 - `requestExcelWorkerSheet(sheetName, startedAt, loadToken)` switches sheets through the Worker.
 - `applyExcelWorkerSheetResult(message, loadToken)` normalizes and applies Worker results.
-- `parseExcelFileOnMainThread(...)` is the fallback path.
+- `exportXlsxInWorker(matrix)` delegates XLSX writing to a temporary Worker.
 
 Staleness guard:
 
@@ -336,6 +359,12 @@ Concatenated columns are custom columns. They reuse the custom-column deletion p
 
 Export uses current `viewIndices` and visible columns. CSV export is chunked through Blob parts; do not reintroduce one giant joined string for large exports.
 
+### Edit Recovery And Leave Protection
+
+`v2.3.5` treats changed or currently edited cells as recoverable local changes. The app uses `overscroll-behavior-x: contain` on the page and horizontal table regions to reduce touchpad overscroll navigation. When an edit exists, a `beforeunload` listener is attached; it is removed again once no cell changes remain.
+
+Recovery drafts contain only the changed cell coordinates and values, not the complete source file. They are written immediately to `sessionStorage` and best-effort to IndexedDB. The draft key combines file kind, name, size, modification time, and sheet/delimiter so a matching draft can be offered after the same file is loaded again. Do not broaden this into complete-file persistence without revisiting the local-data privacy statement and capacity limits.
+
 ## Async And Stale Result Guards
 
 Use these guards consistently:
@@ -351,7 +380,7 @@ Rule of thumb: any async operation that can finish after a newer file load or ne
 
 Current tests are lightweight and fast:
 
-- Parser behavior tests for CSV/JSONL Worker core.
+- Parser behavior tests for CSV/JSONL Worker core, including relaxed JSON/Markdown fields and escaped-quote chunk boundaries.
 - Query Worker tests for shared filtering semantics.
 - Shared-core tests for filter, issue-analysis, and CSV escaping helpers.
 - HTML contract tests for DOM ids, major functions, important implementation constraints, and embedded Worker syntax.
@@ -369,7 +398,7 @@ When adding features:
 - Many tests assert presence of hooks rather than full runtime behavior. They prevent accidental removal but do not replace browser interaction tests.
 - Shared helpers are text-inlined by the build script. Keep them free of DOM APIs, module syntax, and side effects so they can run in both the main thread and Workers.
 - Cache invalidation is now a significant part of correctness. New mutations should explicitly consider all caches listed above.
-- Excel support depends on SheetJS availability. Worker parsing is preferred, but fallback behavior must remain tested.
+- SheetJS is a fixed local build input. Any upgrade must update its SHA-256, SBOM, third-party notice, and Worker runtime test together.
 
 ## Application Source Boundaries
 

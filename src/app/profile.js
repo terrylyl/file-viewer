@@ -69,10 +69,11 @@ function requestColumnProfile(columnIndex) {
   state.columnProfilePending.add(columnKey);
   state.columnProfileTokens.set(columnKey, token);
   if (canUseQueryWorker()) {
-    state.queryWorker.postMessage({
+    const worker = isLargeDataMode() ? state.largeDataWorker : state.queryWorker;
+    worker.postMessage({
       kind: "column-profile",
       token,
-      version: state.queryRowsVersion,
+      ...(isLargeDataMode() ? {} : { version: state.queryRowsVersion }),
       columnIndex,
     });
     return;

@@ -2,82 +2,8 @@ const DEFAULT_PREVIEW_LIMIT = 500;
 const DEFAULT_LONG_FIELD_THRESHOLD = 50000;
 const EMPTY_RATIO_THRESHOLD = 0.6;
 
-function normalizeNewline(ch, text, index) {
-  if (ch === "\r") {
-    return { isNewline: true, nextIndex: text[index + 1] === "\n" ? index + 1 : index };
-  }
-  return { isNewline: ch === "\n", nextIndex: index };
-}
-
-function countDelimiterOutsideQuotes(recordText, delimiter) {
-  let count = 0;
-  let inQuotes = false;
-  for (let i = 0; i < recordText.length; i += 1) {
-    const ch = recordText[i];
-    if (ch === '"') {
-      if (inQuotes && recordText[i + 1] === '"') {
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-    if (!inQuotes && ch === delimiter) count += 1;
-  }
-  return count;
-}
-
-function samplePhysicalRecords(text, limit = 20) {
-  const records = [];
-  let current = "";
-  let inQuotes = false;
-  for (let i = 0; i < text.length && records.length < limit; i += 1) {
-    const ch = text[i];
-    if (ch === '"') {
-      if (inQuotes && text[i + 1] === '"') {
-        current += ch + text[i + 1];
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-        current += ch;
-      }
-      continue;
-    }
-    const newline = normalizeNewline(ch, text, i);
-    if (!inQuotes && newline.isNewline) {
-      records.push(current);
-      current = "";
-      i = newline.nextIndex;
-      continue;
-    }
-    current += ch;
-  }
-  if (current.length > 0) records.push(current);
-  return records.filter((line) => line.trim().length > 0);
-}
-
 function detectDelimiter(text) {
-  const candidates = [",", "\t", ";", "|"];
-  const sample = samplePhysicalRecords(text.slice(0, Math.min(text.length, 256 * 1024)));
-  let best = ",";
-  let bestScore = -Infinity;
-
-  for (const delimiter of candidates) {
-    const counts = sample.map((line) => countDelimiterOutsideQuotes(line, delimiter));
-    const nonZero = counts.filter((count) => count > 0);
-    if (nonZero.length === 0) continue;
-    const avg = nonZero.reduce((sum, count) => sum + count, 0) / nonZero.length;
-    const variance =
-      nonZero.reduce((sum, count) => sum + Math.abs(count - avg), 0) / Math.max(1, nonZero.length);
-    const consistency = nonZero.length / Math.max(1, sample.length);
-    const score = avg * 4 + consistency * 8 - variance * 3;
-    if (score > bestScore) {
-      best = delimiter;
-      bestScore = score;
-    }
-  }
-
-  return best;
+  return detectCsvDelimiter(text);
 }
 
 function normalizeHeaders(rawHeaders, columnCount) {
@@ -187,57 +113,15 @@ function parseCsvText(text, options = {}) {
   const previewLimit = options.previewLimit || DEFAULT_PREVIEW_LIMIT;
   const longFieldThreshold = options.longFieldThreshold || DEFAULT_LONG_FIELD_THRESHOLD;
   const records = [];
-  let field = "";
-  let record = [];
-  let inQuotes = false;
-  let started = false;
-  let lastProgressAt = 0;
-  const progressEvery = Math.max(1024 * 256, Math.floor(text.length / 100));
-
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    if (ch === '"') {
-      if (inQuotes && text[i + 1] === '"') {
-        field += '"';
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      started = true;
-      continue;
-    }
-
-    if (!inQuotes && ch === delimiter) {
-      record.push(field);
-      field = "";
-      started = true;
-      continue;
-    }
-
-    const newline = normalizeNewline(ch, text, i);
-    if (!inQuotes && newline.isNewline) {
-      record.push(field);
-      records.push(record);
-      field = "";
-      record = [];
-      started = false;
-      i = newline.nextIndex;
-      continue;
-    }
-
-    field += ch;
-    started = true;
-
-    if (options.onProgress && i - lastProgressAt >= progressEvery) {
-      lastProgressAt = i;
-      options.onProgress(Math.min(0.98, i / Math.max(1, text.length)));
-    }
+  const parser = createCsvRecordParser(delimiter);
+  const chunkSize = 64 * 1024;
+  for (let start = 0; start < text.length; start += chunkSize) {
+    const parsedRecords = parser.push(text.slice(start, start + chunkSize));
+    for (const parsedRecord of parsedRecords) records.push(parsedRecord);
+    if (options.onProgress) options.onProgress(Math.min(0.98, (start + chunkSize) / Math.max(1, text.length)));
   }
-
-  if (started || field.length > 0 || record.length > 0) {
-    record.push(field);
-    records.push(record);
-  }
+  for (const parsedRecord of parser.finish()) records.push(parsedRecord);
+  const parserWarning = describeCsvParserDiagnostics(parser.getDiagnostics());
 
   const nonEmptyRecords = records.filter((row, index) => {
     if (index === 0) return true;
@@ -257,6 +141,18 @@ function parseCsvText(text, options = {}) {
     longFields: [],
     duplicateColumns: detectDuplicateColumns(rawHeaders),
   };
+  if (parserWarning) {
+    issues.inconsistentRows.push(
+      buildIssueSummary(
+        "复杂字段未闭合",
+        Math.max(2, recordsForAnalysis.length),
+        -1,
+        "",
+        parserWarning,
+        recordsForAnalysis.at(-1)?.join(delimiter) || "",
+      ),
+    );
+  }
 
   for (let i = 1; i < recordsForAnalysis.length; i += 1) {
     const rawRow = recordsForAnalysis[i];
@@ -454,6 +350,7 @@ function decodeBuffer(buffer, encodingPreference = "auto") {
 
 self.__CSV_CORE__ = {
   detectDelimiter,
+  createCsvRecordParser,
   parseCsvText,
   parseJsonlText,
   decodeBuffer,
@@ -482,6 +379,7 @@ self.onmessage = (event) => {
       result.file = {
         name: message.fileName,
         size: message.fileSize,
+        lastModified: message.fileLastModified,
         encoding: decoded.encoding,
         delimiter: "JSON Lines",
         parseMs: Date.now() - startedAt,
@@ -508,6 +406,7 @@ self.onmessage = (event) => {
     result.file = {
       name: message.fileName,
       size: message.fileSize,
+      lastModified: message.fileLastModified,
       encoding: decoded.encoding,
       delimiter,
       parseMs: Date.now() - startedAt,

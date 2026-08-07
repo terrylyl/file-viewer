@@ -4,6 +4,8 @@ const MODAL_CHUNK = 100000;
 const EXCEL_SAFE_READ_MAX_BYTES = 80 * 1024 * 1024;
 const EXCEL_SHARED_STRINGS_MAX_BYTES = 120 * 1024 * 1024;
 const EXCEL_CELL_META_SCAN_MAX_CELLS = 200000;
+const LARGE_TEXT_FILE_THRESHOLD = 24 * 1024 * 1024;
+const LARGE_TEXT_FILE_MAX_BYTES = 256 * 1024 * 1024;
 const ROW_HEIGHT = 34;
 const WRAP_ROW_HEIGHT = 180;
 const HEADER_HEIGHT = 38;
@@ -25,6 +27,10 @@ const MAX_EDIT_HISTORY = 1000;
 const MAX_CELL_RENDER_CACHE = 3000;
 const ROW_CHUNK_SIZE = 5000;
 const COLUMN_UNIQUE_WORKER_THRESHOLD = 10000;
+const RECOVERY_DRAFT_SESSION_PREFIX = "file-viewer.recoveryDraft.v1:";
+const RECOVERY_DRAFT_DATABASE = "file-viewer-recovery";
+const RECOVERY_DRAFT_STORE = "drafts";
+const RECOVERY_DRAFT_SAVE_DELAY = 300;
 const MANUAL_HIGHLIGHT_COLORS = new Set(["yellow", "blue", "pink"]);
 const MODAL_FORMAT_LABELS = {
   plain: "纯文本",
@@ -33,23 +39,6 @@ const MODAL_FORMAT_LABELS = {
   html: "HTML",
   code: "代码",
 };
-const EXCEL_INDEXED_COLORS = {
-  0: "#000000",
-  1: "#ffffff",
-  2: "#ff0000",
-  3: "#00ff00",
-  4: "#0000ff",
-  5: "#ffff00",
-  6: "#ff00ff",
-  7: "#00ffff",
-  8: "#000000",
-  9: "#ffffff",
-  10: "#ff0000",
-  13: "#ffff00",
-  64: "",
-  65: "",
-};
-
 const els = {
   appRoot: document.getElementById("appRoot"),
   dropZone: document.getElementById("dropZone"),
@@ -153,6 +142,7 @@ const els = {
   leftStatus: document.getElementById("leftStatus"),
   rightStatus: document.getElementById("rightStatus"),
   progressBar: document.getElementById("progressBar"),
+  cancelLoadButton: document.getElementById("cancelLoadButton"),
   xlsxConvertActions: document.getElementById("xlsxConvertActions"),
   xlsxConvertSheetSelect: document.getElementById("xlsxConvertSheetSelect"),
   xlsxConvertCsvButton: document.getElementById("xlsxConvertCsvButton"),
@@ -208,6 +198,10 @@ const els = {
   commandPaletteList: document.getElementById("commandPaletteList"),
   shortcutHelpBackdrop: document.getElementById("shortcutHelpBackdrop"),
   closeShortcutHelpButton: document.getElementById("closeShortcutHelpButton"),
+  recoveryDraftBackdrop: document.getElementById("recoveryDraftBackdrop"),
+  recoveryDraftSummary: document.getElementById("recoveryDraftSummary"),
+  discardRecoveryDraftButton: document.getElementById("discardRecoveryDraftButton"),
+  restoreRecoveryDraftButton: document.getElementById("restoreRecoveryDraftButton"),
   toastRegion: document.getElementById("toastRegion"),
   modalBackdrop: document.getElementById("modalBackdrop"),
   modalTitle: document.getElementById("modalTitle"),
@@ -233,9 +227,6 @@ const state = {
   rowChunks: [],
   issues: { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: [] },
   cellMeta: new Map(),
-  excelWorkbook: null,
-  excelXLSX: null,
-  excelFile: null,
   excelSheetNames: [],
   xlsxConversion: null,
   activeSheetName: "",
@@ -273,6 +264,11 @@ const state = {
   selected: null,
   cellEdit: null,
   editedCells: new Map(),
+  datasetRecoveryKey: "",
+  pendingRecoveryDraft: null,
+  recoveryDraftSaveTimer: 0,
+  recoveryDraftCheckToken: 0,
+  hasBeforeUnloadGuard: false,
   manualHighlights: new Map(),
   undoStack: [],
   redoStack: [],
@@ -286,6 +282,8 @@ const state = {
   modalResize: null,
   modalSuppressBackdropClickUntil: 0,
   worker: null,
+  largeDataWorker: null,
+  largeData: null,
   excelWorker: null,
   queryWorker: null,
   queryToken: 0,
@@ -326,15 +324,12 @@ function createQueryWorker() {
   return createInlineWorker("query-worker-source");
 }
 
-function createExcelWorker() {
-  return createInlineWorker("excel-worker-source");
+function createLargeDataWorker() {
+  return createInlineWorker("large-data-worker-source");
 }
 
-function getSheetJsWorkerSources() {
-  return [
-    new URL("vendor/xlsx.full.min.js", window.location.href).href,
-    "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
-  ];
+function createExcelWorker() {
+  return createInlineWorker("excel-worker-source");
 }
 
 function isRowIndexProperty(property) {
@@ -426,10 +421,65 @@ function createChunkedRows(rows, chunkSize = ROW_CHUNK_SIZE) {
   return proxy;
 }
 
+function createLargeRows(rowCount) {
+  const target = { __rowCount: rowCount };
+  return new Proxy(target, {
+    get(store, property) {
+      if (property === "length") return store.__rowCount;
+      if (isRowIndexProperty(property)) return state.largeData?.rowCache.get(Number(property));
+      return store[property];
+    },
+  });
+}
+
+function isLargeDataMode() {
+  return Boolean(state.largeData && state.largeDataWorker);
+}
+
+function getDataRow(rowIndex) {
+  return isLargeDataMode() ? state.largeData.rowCache.get(rowIndex) : state.rows[rowIndex];
+}
+
+function requestLargeRows(rowIndices) {
+  if (!isLargeDataMode()) return Promise.resolve([]);
+  const indices = [...new Set(rowIndices || [])].filter((rowIndex) =>
+    Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < state.rows.length && !state.largeData.rowCache.has(rowIndex),
+  );
+  if (!indices.length) return Promise.resolve([]);
+  const token = state.largeData.nextRowToken + 1;
+  state.largeData.nextRowToken = token;
+  return new Promise((resolve, reject) => {
+    state.largeData.pendingRows.set(token, { resolve, reject });
+    state.largeDataWorker.postMessage({ kind: "get-rows", token, indices });
+  });
+}
+
+function prefetchLargeRows(rowIndices, options = {}) {
+  if (!isLargeDataMode()) return;
+  requestLargeRows(rowIndices).then((rows) => {
+    if (!rows.length) return;
+    renderGrid();
+    if (options.detail !== false) renderDetail();
+    if (state.modalCell && options.modal !== false) renderModal();
+  }).catch((error) => {
+    els.leftStatus.textContent = `读取大文件数据失败：${error.message}`;
+  });
+}
+
+async function getLargeDataRows(rowIndices) {
+  if (!isLargeDataMode()) return (rowIndices || []).map((rowIndex) => getDataRow(rowIndex));
+  await requestLargeRows(rowIndices);
+  return (rowIndices || []).map((rowIndex) => getDataRow(rowIndex));
+}
+
 function beginLoad() {
   state.loadToken += 1;
   if (state.worker) state.worker.terminate();
   state.worker = null;
+  if (state.largeDataWorker) state.largeDataWorker.terminate();
+  state.largeDataWorker = null;
+  state.largeData = null;
+  els.cancelLoadButton.hidden = true;
   terminateQueryWorker();
   resetXlsxConversionOffer();
   return state.loadToken;
@@ -448,11 +498,90 @@ function terminateQueryWorker() {
 }
 
 function canUseQueryWorker() {
+  if (isLargeDataMode()) return true;
   return Boolean(
     state.queryWorker &&
     state.queryWorkerReadyVersion === state.queryRowsVersion &&
     !state.queryWorkerDirty,
   );
+}
+
+function initializeLargeDataWorker(worker, result) {
+  terminateQueryWorker();
+  state.largeDataWorker = worker;
+  state.largeData = {
+    rowCache: new Map(),
+    pendingRows: new Map(),
+    nextRowToken: 0,
+    nextQueryToken: 0,
+    pendingMutations: new Map(),
+  };
+  state.rows = createLargeRows(result.rowCount || 0);
+  state.rowChunks = [];
+  worker.onmessage = (event) => {
+    if (worker !== state.largeDataWorker) return;
+    const message = event.data || {};
+    if (message.type === "progress") {
+      setProgress(message.progress, message.stage);
+      return;
+    }
+    if (message.type === "rows") {
+      const pending = state.largeData.pendingRows.get(message.token);
+      state.largeData.pendingRows.delete(message.token);
+      (message.rows || []).forEach(({ rowIndex, row }) => state.largeData.rowCache.set(rowIndex, row));
+      while (state.largeData.rowCache.size > 12000) state.largeData.rowCache.delete(state.largeData.rowCache.keys().next().value);
+      if (pending) pending.resolve(message.rows || []);
+      return;
+    }
+    if (message.type === "query-complete") {
+      if (message.token !== state.queryToken) return;
+      applyQueryResult(message.result || { viewIndices: [], matchedRows: [] });
+      return;
+    }
+    if (message.type === "unique-values-complete") {
+      const columnKey = String(message.columnIndex);
+      if (message.token !== state.columnValueTokens.get(columnKey)) return;
+      state.columnValueCache.set(columnKey, message.values || []);
+      state.columnValuePending.delete(columnKey);
+      state.columnValueTokens.delete(columnKey);
+      if (state.columnFilterMenu.columnIndex === message.columnIndex) renderColumnFilterValues();
+      return;
+    }
+    if (message.type === "column-profile-complete") {
+      const columnKey = String(message.columnIndex);
+      if (message.token !== state.columnProfileTokens.get(columnKey)) return;
+      state.columnProfileCache.set(columnKey, message.profile);
+      state.columnProfilePending.delete(columnKey);
+      state.columnProfileTokens.delete(columnKey);
+      if (state.detailMode === "profile" && state.profileColumnIndex === message.columnIndex) renderColumnProfile();
+      return;
+    }
+    if (message.type === "patched" || message.type === "columns-transformed") {
+      const pending = state.largeData.pendingMutations.get(message.token);
+      state.largeData.pendingMutations.delete(message.token);
+      if (pending) pending.resolve();
+      return;
+    }
+    if (message.type === "error") {
+      const rowPending = state.largeData.pendingRows.get(message.token);
+      state.largeData.pendingRows.delete(message.token);
+      if (rowPending) rowPending.reject(new Error(message.message));
+      const mutationPending = state.largeData.pendingMutations.get(message.token);
+      state.largeData.pendingMutations.delete(message.token);
+      if (mutationPending) mutationPending.reject(new Error(message.message));
+      if (message.token === state.queryToken) els.leftStatus.textContent = `大文件计算失败：${message.message}`;
+    }
+  };
+}
+
+function runLargeDataMutation(kind, payload) {
+  if (!isLargeDataMode()) return Promise.resolve();
+  const token = state.largeData.nextQueryToken + 1;
+  state.largeData.nextQueryToken = token;
+  return new Promise((resolve, reject) => {
+    state.largeData.pendingMutations.set(token, { resolve, reject });
+    state.largeDataWorker.postMessage({ kind, token, ...payload });
+  });
 }
 
 function seedQueryWorker() {
@@ -566,10 +695,16 @@ function patchQueryWorkerCells(changes) {
     .map((change) => ({
       rowIndex: change.rowIndex,
       columnIndex: change.columnIndex,
-      value: state.rows[change.rowIndex]?.[change.columnIndex] ?? "",
+      value: getDataRow(change.rowIndex)?.[change.columnIndex] ?? "",
     }));
   if (!normalized.length) return;
   state.queryToken += 1;
+  if (isLargeDataMode()) {
+    runLargeDataMutation("patch-cells", { changes: normalized }).catch((error) => {
+      els.leftStatus.textContent = `保存大文件编辑失败：${error.message}`;
+    });
+    return;
+  }
   if (!canUseQueryWorker()) {
     state.queryWorkerDirty = Boolean(state.queryWorker);
     return;
@@ -585,10 +720,11 @@ function runQueryInWorker(request) {
   if (!canUseQueryWorker()) return false;
   const token = state.queryToken + 1;
   state.queryToken = token;
-  state.queryWorker.postMessage({
+  const worker = isLargeDataMode() ? state.largeDataWorker : state.queryWorker;
+  worker.postMessage({
     kind: "query",
     token,
-    version: state.queryRowsVersion,
+    ...(isLargeDataMode() ? {} : { version: state.queryRowsVersion }),
     request,
   });
   return true;

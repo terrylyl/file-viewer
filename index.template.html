@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="/*__CSP__*/" />
     <title>本地表格文件查看器</title>
     <style>
 /*__INLINE_CSS__*/
@@ -206,6 +207,7 @@
         <div class="progress-shell" aria-label="解析进度">
           <div class="progress" id="progressBar"></div>
         </div>
+        <button class="status-cancel" id="cancelLoadButton" type="button" hidden>取消</button>
         <span id="rightStatus">0 行 · 0 列</span>
       </footer>
     </div>
@@ -490,6 +492,22 @@
       </div>
     </div>
 
+    <div class="shortcut-help-backdrop recovery-draft-backdrop" id="recoveryDraftBackdrop" role="dialog" aria-modal="true" aria-label="恢复未保存编辑">
+      <div class="shortcut-help recovery-draft-dialog">
+        <div class="shortcut-help-head">
+          <div>
+            <span class="filter-eyebrow">RECOVERY</span>
+            <strong>发现未保存的编辑</strong>
+          </div>
+        </div>
+        <p class="recovery-draft-summary" id="recoveryDraftSummary"></p>
+        <div class="popover-actions">
+          <button id="discardRecoveryDraftButton">丢弃草稿</button>
+          <button class="primary" id="restoreRecoveryDraftButton">恢复编辑</button>
+        </div>
+      </div>
+    </div>
+
     <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="false"></div>
 
     <div class="modal-backdrop" id="modalBackdrop" role="dialog" aria-modal="true" aria-label="完整内容">
@@ -542,6 +560,10 @@
 
     <script id="query-worker-source" type="text/plain">
 /*__QUERY_WORKER__*/
+    </script>
+
+    <script id="large-data-worker-source" type="text/plain">
+/*__LARGE_DATA_WORKER__*/
     </script>
 
     <script id="excel-worker-source" type="text/plain">

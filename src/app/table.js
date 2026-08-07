@@ -199,6 +199,7 @@ function syncEditSummary() {
   els.editedCellCount.classList.toggle("warning", state.editedCells.size > 0);
   els.undoLastActionButton.disabled = state.undoStack.length === 0;
   els.redoLastActionButton.disabled = state.redoStack.length === 0;
+  syncPageLeaveGuard();
 }
 
 function pushEditHistory(entry) {
@@ -328,7 +329,26 @@ function renderCellDisplayContent(container, value, query, meta, options = {}) {
 }
 
 function getVisibleRowPosition(rowIndex) {
+  if (isLargeDataMode()) return state.viewIndices.indexOf(rowIndex);
   return state.rowPositionMap.get(rowIndex) ?? -1;
+}
+
+function isRowInCurrentView(rowIndex) {
+  return isLargeDataMode() ? state.viewIndices.includes(rowIndex) : state.rowPositionMap.has(rowIndex);
+}
+
+function isMatchedRow(rowIndex) {
+  if (!isLargeDataMode()) return state.matchedRows.has(rowIndex);
+  const matches = state.matchedRows;
+  let start = 0;
+  let end = matches.length - 1;
+  while (start <= end) {
+    const middle = Math.floor((start + end) / 2);
+    if (matches[middle] === rowIndex) return true;
+    if (matches[middle] < rowIndex) start = middle + 1;
+    else end = middle - 1;
+  }
+  return false;
 }
 
 function getVisibleColumnPosition(columnIndex) {
@@ -510,7 +530,7 @@ function normalizeSelectionForCurrentView() {
   }
   if (
     !state.selected ||
-    !state.rowPositionMap.has(state.selected.rowIndex) ||
+    !isRowInCurrentView(state.selected.rowIndex) ||
     !columns.includes(state.selected.columnIndex)
   ) {
     state.selected = first;
@@ -788,6 +808,7 @@ function renderRows() {
   const end = Math.min(totalRows, Math.ceil((Math.max(0, scrollTop - headerHeight) + viewportHeight) / rowHeight) + 10);
   const visibleColumns = getVisibleColumnIndexes();
   const totalWidth = getTotalWidth();
+  const missingRows = [];
   els.gridViewport.setAttribute("aria-rowcount", String(totalRows + 1));
   els.gridViewport.setAttribute("aria-colcount", String(visibleColumns.length + 1));
   els.gridViewport.classList.toggle("wrap-cells", state.wrapCells);
@@ -797,8 +818,9 @@ function renderRows() {
 
   for (let virtualIndex = start; virtualIndex < end; virtualIndex += 1) {
     const rowIndex = state.viewIndices[virtualIndex];
-    const row = state.rows[rowIndex];
-    const hit = state.matchedRows.has(rowIndex);
+    const row = getDataRow(rowIndex);
+    if (!row && isLargeDataMode()) missingRows.push(rowIndex);
+    const hit = isMatchedRow(rowIndex);
     const rowEl = document.createElement("div");
     rowEl.className = `data-row${hit ? " hit" : ""}`;
     rowEl.setAttribute("role", "row");
@@ -821,7 +843,7 @@ function renderRows() {
     rowEl.appendChild(rowNumber);
 
     for (const [visibleColumnIndex, col] of visibleColumns.entries()) {
-      const value = row[col] || "";
+      const value = row?.[col] || "";
       const summary = summarize(value);
       const meta = getCellMeta(rowIndex, col);
       const cell = document.createElement("div");
@@ -869,6 +891,7 @@ function renderRows() {
 
     els.rowLayer.appendChild(rowEl);
   }
+  if (missingRows.length) prefetchLargeRows(missingRows);
 }
 
 function dragColumn(fromColumn, toColumn) {

@@ -851,16 +851,48 @@ function normalizeSelectionAfterColumnDelete(removedColumnIndex) {
   clearSelectionToSelected();
 }
 
-function addDerivedColumn({ name, mode, sourceColumnIndex, constantValue }) {
+async function addDerivedColumn({ name, mode, sourceColumnIndex, constantValue }) {
   if (!state.headers.length) return;
   const columnIndex = state.headers.length;
   const columnName = String(name || "").trim() || getNextColumnName();
-  state.headers.push(columnName);
-  state.originalHeaders.push(columnName);
-
   const source = Number(sourceColumnIndex);
   const shouldCopy = mode === "copy" && Number.isInteger(source) && source >= 0 && source < columnIndex;
   const sharedValue = String(constantValue ?? "");
+  if (isLargeDataMode()) {
+    els.leftStatus.textContent = `正在生成列：${columnName}`;
+    await runLargeDataMutation("transform-columns", { operation: {
+      type: "add-derived",
+      columnIndex,
+      mode,
+      sourceColumnIndex: source,
+      constantValue: sharedValue,
+      headers: [...state.headers, columnName],
+    } });
+    state.headers.push(columnName);
+    state.originalHeaders.push(columnName);
+    state.visibleColumns[columnIndex] = true;
+    state.customColumns.add(columnIndex);
+    state.columnOrder = state.columnOrder.length ? [...state.columnOrder, columnIndex] : state.headers.map((_, index) => index);
+    state.columnWidths[columnIndex] = Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, columnName.length * 10 + 36)));
+    state.issues = { ...state.issues, duplicateColumns: detectDuplicateHeaderIssues(state.headers) };
+    invalidateColumnValueCache();
+    invalidateColumnProfileCache();
+    state.cellVersions = new Map();
+    invalidateCellRenderCache();
+    state.selected = state.rows.length ? { rowIndex: 0, columnIndex } : null;
+    clearSelectionToSelected();
+    updateSearchColumns();
+    renderColumnPopover();
+    renderColumnOverview();
+    updateFileStats();
+    recomputeView();
+    renderDetail();
+    closeAddColumnPopover();
+    els.leftStatus.textContent = `已添加列：${columnName}`;
+    return;
+  }
+  state.headers.push(columnName);
+  state.originalHeaders.push(columnName);
   state.rows.forEach((row, rowIndex) => {
     if (mode === "sequence") {
       row[columnIndex] = String(rowIndex + 1);
@@ -909,10 +941,38 @@ function addDerivedColumn({ name, mode, sourceColumnIndex, constantValue }) {
   els.leftStatus.textContent = `已添加列：${columnName}`;
 }
 
-function addConcatenatedColumn({ name, items }) {
+async function addConcatenatedColumn({ name, items }) {
   if (!state.headers.length || !items.length) return;
   const columnIndex = state.headers.length;
   const columnName = String(name || "").trim() || "用户问题";
+  if (isLargeDataMode()) {
+    els.leftStatus.textContent = `正在生成拼接列：${columnName}`;
+    await runLargeDataMutation("transform-columns", { operation: {
+      type: "add-concatenated",
+      columnIndex,
+      items,
+      headers: [...state.headers, columnName],
+    } });
+    saveConcatenateScheme({ name: columnName, items });
+    state.headers.push(columnName);
+    state.originalHeaders.push(columnName);
+    state.visibleColumns[columnIndex] = true;
+    state.customColumns.add(columnIndex);
+    state.columnOrder = state.columnOrder.length ? [...state.columnOrder, columnIndex] : state.headers.map((_, index) => index);
+    state.columnWidths[columnIndex] = Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, columnName.length * 10 + 36)));
+    state.issues = { ...state.issues, duplicateColumns: detectDuplicateHeaderIssues(state.headers) };
+    invalidateColumnValueCache();
+    invalidateColumnProfileCache();
+    state.cellVersions = new Map();
+    invalidateCellRenderCache();
+    state.selected = state.rows.length ? { rowIndex: 0, columnIndex } : null;
+    clearSelectionToSelected();
+    recomputeView();
+    refreshColumnDependentViews();
+    closeConcatenateColumnPopover();
+    els.leftStatus.textContent = `已生成拼接列：${columnName}`;
+    return;
+  }
   saveConcatenateScheme({ name: columnName, items });
   state.headers.push(columnName);
   state.originalHeaders.push(columnName);
@@ -965,12 +1025,20 @@ function restoreColumnName(columnIndex) {
   renameColumn(columnIndex, state.originalHeaders[columnIndex] || `Column ${columnIndex + 1}`);
 }
 
-function deleteCustomColumn(columnIndex) {
+async function deleteCustomColumn(columnIndex) {
   if (!isCustomColumn(columnIndex)) return;
   const removedName = state.headers[columnIndex] || `Column ${columnIndex + 1}`;
+  if (isLargeDataMode()) {
+    els.leftStatus.textContent = `正在删除列：${removedName}`;
+    await runLargeDataMutation("transform-columns", { operation: {
+      type: "delete-column",
+      columnIndex,
+      headers: state.headers.filter((_, index) => index !== columnIndex),
+    } });
+  }
   state.headers.splice(columnIndex, 1);
   state.originalHeaders.splice(columnIndex, 1);
-  state.rows.forEach((row) => row.splice(columnIndex, 1));
+  if (!isLargeDataMode()) state.rows.forEach((row) => row.splice(columnIndex, 1));
   state.visibleColumns.splice(columnIndex, 1);
   state.columnWidths.splice(columnIndex, 1);
   state.columnOrder = reindexColumnOrder(state.columnOrder, columnIndex);
@@ -995,14 +1063,16 @@ function deleteCustomColumn(columnIndex) {
   } else if (state.profileColumnIndex > columnIndex) {
     state.profileColumnIndex -= 1;
   }
-  state.issues = analyzeRows(state.headers, state.rows);
+  state.issues = isLargeDataMode()
+    ? { ...state.issues, duplicateColumns: detectDuplicateHeaderIssues(state.headers) }
+    : analyzeRows(state.headers, state.rows);
   closeColumnFilterMenu();
   updateSearchColumns();
   renderColumnPopover();
   renderColumnOverview();
   updateFileStats();
-  seedQueryWorker();
-  recomputeView();
+  if (isLargeDataMode()) recomputeView();
+  else seedQueryWorker();
   renderDetail();
   els.leftStatus.textContent = `已删除自定义列：${removedName}`;
 }

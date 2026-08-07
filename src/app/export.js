@@ -167,6 +167,18 @@ async function exportFilteredCsv(rowIndexes = state.viewIndices, suffix = "") {
   if (!state.rows.length) return;
   const visibleColumns = getVisibleColumnIndexes();
   const parts = [visibleColumns.map((col) => escapeCsv(state.headers[col])).join(",")];
+  if (isLargeDataMode()) {
+    const indexes = Array.from(rowIndexes);
+    for (let start = 0; start < indexes.length; start += 500) {
+      const rows = await getLargeDataRows(indexes.slice(start, start + 500));
+      parts.push(rows.map((row) => `\r\n${visibleColumns.map((col) => escapeCsv(row?.[col] || "")).join(",")}`).join(""));
+      setProgress(Math.min(0.98, (start + rows.length) / Math.max(1, indexes.length)), `导出 CSV · ${Math.min(start + rows.length, indexes.length).toLocaleString()} / ${indexes.length.toLocaleString()} 行`);
+    }
+    const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
+    await saveTextFile(`${base}-filtered${suffix}.csv`, parts);
+    setProgress(1, "CSV 导出完成");
+    return;
+  }
   let chunk = [];
   for (const rowIndex of rowIndexes) {
     const row = state.rows[rowIndex];
@@ -193,14 +205,46 @@ function getFilteredExportMatrix(rowIndexes = state.viewIndices) {
 
 async function exportFilteredXlsx(rowIndexes = state.viewIndices, suffix = "") {
   if (!state.rows.length) return;
-  const XLSX = await ensureSheetJs();
-  const matrix = getFilteredExportMatrix(rowIndexes);
-  const worksheet = XLSX.utils.aoa_to_sheet(matrix);
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Filtered");
+  let matrix;
+  if (isLargeDataMode()) {
+    const visibleColumns = getVisibleColumnIndexes();
+    matrix = [visibleColumns.map((col) => state.headers[col])];
+    const indexes = Array.from(rowIndexes);
+    for (let start = 0; start < indexes.length; start += 500) {
+      const rows = await getLargeDataRows(indexes.slice(start, start + 500));
+      matrix.push(...rows.map((row) => visibleColumns.map((col) => row?.[col] || "")));
+      setProgress(Math.min(0.94, (start + rows.length) / Math.max(1, indexes.length) * 0.94), "准备 XLSX 导出");
+    }
+  } else {
+    matrix = getFilteredExportMatrix(rowIndexes);
+  }
   const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
-  XLSX.writeFile(workbook, `${base}-filtered${suffix}.xlsx`);
+  const buffer = await exportXlsxInWorker(matrix);
+  await saveBinaryFile(
+    `${base}-filtered${suffix}.xlsx`,
+    buffer,
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
   els.leftStatus.textContent = "已导出 XLSX 文件";
+}
+
+function exportXlsxInWorker(matrix) {
+  return new Promise((resolve, reject) => {
+    const worker = createExcelWorker();
+    const token = Date.now();
+    worker.onmessage = (event) => {
+      const message = event.data || {};
+      if (message.token !== token) return;
+      worker.terminate();
+      if (message.type === "export-complete") resolve(message.buffer);
+      else reject(new Error(message.message || "XLSX 导出失败"));
+    };
+    worker.onerror = () => {
+      worker.terminate();
+      reject(new Error("XLSX 导出 Worker 启动失败"));
+    };
+    worker.postMessage({ kind: "export-xlsx", token, matrix });
+  });
 }
 
 async function exportFilteredTable() {

@@ -1,6 +1,6 @@
 const EXCEL_CELL_META_SCAN_MAX_CELLS = 200000;
 
-let XLSX = null;
+let sheetJs = null;
 let workbook = null;
 let workbookFile = null;
 let workbookSheetNames = [];
@@ -15,23 +15,10 @@ function getExcelReadOptions() {
   };
 }
 
-function ensureSheetJs(sources) {
-  if (self.XLSX) {
-    XLSX = self.XLSX;
-    return XLSX;
-  }
-  for (const source of sources || []) {
-    try {
-      importScripts(source);
-      if (self.XLSX) {
-        XLSX = self.XLSX;
-        return XLSX;
-      }
-    } catch (error) {
-      continue;
-    }
-  }
-  throw new Error("无法在 Worker 中加载 SheetJS");
+function ensureSheetJs() {
+  if (!sheetJs && self.XLSX) sheetJs = self.XLSX;
+  if (!sheetJs) throw new Error("内置 SheetJS 未初始化");
+  return sheetJs;
 }
 
 function normalizeExcelColor(color) {
@@ -67,7 +54,7 @@ function normalizeLinkHref(value) {
 function getExcelCell(sheet, rowIndex, columnIndex) {
   if (Array.isArray(sheet)) return sheet[rowIndex]?.[columnIndex] || null;
   if (Array.isArray(sheet["!data"])) return sheet["!data"][rowIndex]?.[columnIndex] || null;
-  return sheet[XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })] || null;
+  return sheet[sheetJs.utils.encode_cell({ r: rowIndex, c: columnIndex })] || null;
 }
 
 function extractExcelCellMeta(cell) {
@@ -102,11 +89,11 @@ function collectExcelCellMetaSafely(sheet, rowCount, columnCount, range = null) 
 }
 
 function buildExcelDatasetFromSheet(sheetName, startedAt) {
-  if (!workbook || !XLSX || !workbookFile) throw new Error("未加载 Excel 工作簿");
+  if (!workbook || !sheetJs || !workbookFile) throw new Error("未加载 Excel 工作簿");
   const sheet = workbook.Sheets[sheetName];
   if (!sheet) throw new Error(`未找到 Sheet：${sheetName}`);
-  const valueRange = trimExcelSheetRefToContent(sheet, XLSX);
-  const matrix = trimExcelMatrixToContent(XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" }));
+  const valueRange = trimExcelSheetRefToContent(sheet, sheetJs);
+  const matrix = trimExcelMatrixToContent(sheetJs.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" }));
   const maxColumns = getMatrixColumnCount(matrix);
   const rawHeaders = matrix[0] || [];
   const headers = Array.from({ length: maxColumns }, (_, index) => {
@@ -124,6 +111,7 @@ function buildExcelDatasetFromSheet(sheetName, startedAt) {
     file: {
       name: workbookFile.name,
       size: workbookFile.size,
+      lastModified: workbookFile.lastModified,
       encoding: "Excel workbook",
       delimiter: sheetName,
       parseMs: Date.now() - startedAt,
@@ -138,9 +126,9 @@ self.onmessage = (event) => {
   try {
     if (message.kind === "load-workbook") {
       const startedAt = message.startedAt || Date.now();
-      ensureSheetJs(message.sources || []);
+      ensureSheetJs();
       workbookFile = message.file || null;
-      workbook = XLSX.read(message.buffer, getExcelReadOptions());
+      workbook = sheetJs.read(message.buffer, getExcelReadOptions());
       workbookSheetNames = workbook.SheetNames || [];
       const sheetName = workbookSheetNames[0];
       if (!sheetName) throw new Error("工作簿中没有可读取的 Sheet");
@@ -151,6 +139,15 @@ self.onmessage = (event) => {
         activeSheetName: sheetName,
         result: buildExcelDatasetFromSheet(sheetName, startedAt),
       });
+      return;
+    }
+    if (message.kind === "export-xlsx") {
+      ensureSheetJs();
+      const worksheet = sheetJs.utils.aoa_to_sheet(message.matrix || []);
+      const exportWorkbook = sheetJs.utils.book_new();
+      sheetJs.utils.book_append_sheet(exportWorkbook, worksheet, "Filtered");
+      const buffer = sheetJs.write(exportWorkbook, { bookType: "xlsx", type: "array" });
+      self.postMessage({ type: "export-complete", token: message.token, buffer }, [buffer]);
       return;
     }
     if (message.kind === "load-sheet") {
@@ -167,7 +164,7 @@ self.onmessage = (event) => {
     self.postMessage({
       type: "error",
       token: message.token,
-      stage: XLSX ? "parse-workbook" : "load-sheetjs",
+      stage: sheetJs ? "parse-workbook" : "load-sheetjs",
       message: error && error.message ? error.message : String(error),
     });
   }

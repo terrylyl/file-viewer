@@ -1,7 +1,12 @@
 function copySelectedRow() {
   if (!state.selected) return;
   const visibleColumns = getVisibleColumnIndexes();
-  const row = state.rows[state.selected.rowIndex];
+  const row = getDataRow(state.selected.rowIndex);
+  if (!row && isLargeDataMode()) {
+    prefetchLargeRows([state.selected.rowIndex]);
+    els.leftStatus.textContent = "正在读取当前行，请再次复制";
+    return;
+  }
   copyText(visibleColumns.map((col) => row[col] || "").join("\t"));
 }
 
@@ -267,6 +272,7 @@ els.selectionExcludeButton.addEventListener("click", excludeSelectedRows);
 els.cancelClipboardImportButton.addEventListener("click", closeClipboardImportPopover);
 els.confirmClipboardImportButton.addEventListener("click", importClipboardTable);
 els.fileInput.addEventListener("change", (event) => handleFiles(event.target.files, null));
+els.cancelLoadButton.addEventListener("click", cancelActiveLoad);
 els.dropZone.addEventListener("dragover", (event) => {
   event.preventDefault();
   els.dropZone.classList.add("dragover");
@@ -369,7 +375,13 @@ els.detailResizeHandle.addEventListener("keydown", (event) => {
 });
 els.copyModalButton.addEventListener("click", () => {
   if (!state.modalCell) return;
-  copyText(state.rows[state.modalCell.rowIndex]?.[state.modalCell.columnIndex] || "");
+  const value = getDataRow(state.modalCell.rowIndex)?.[state.modalCell.columnIndex];
+  if (value == null && isLargeDataMode()) {
+    prefetchLargeRows([state.modalCell.rowIndex]);
+    els.leftStatus.textContent = "正在读取完整内容，请再次复制";
+    return;
+  }
+  copyText(value || "");
 });
 els.loadMoreModalButton.addEventListener("click", () => {
   state.modalVisibleChars += MODAL_CHUNK;
@@ -437,7 +449,7 @@ els.confirmAddColumnButton.addEventListener("click", () => {
     mode: els.newColumnModeSelect.value,
     sourceColumnIndex: Number(els.copyColumnSelect.value),
     constantValue: els.constantColumnValueInput.value,
-  });
+  }).catch((error) => { els.leftStatus.textContent = `新增列失败：${error.message}`; });
 });
 els.addConcatenateRowButton.addEventListener("click", () => {
   const item = createDefaultConcatenateItem(0);
@@ -457,7 +469,7 @@ els.confirmConcatenateColumnButton.addEventListener("click", () => {
   addConcatenatedColumn({
     name: els.concatenateColumnNameInput.value,
     items: resolved.items,
-  });
+  }).catch((error) => { els.leftStatus.textContent = `拼接列失败：${error.message}`; });
 });
 els.newColumnNameInput.addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;
@@ -530,7 +542,9 @@ els.renameColumnInput.addEventListener("keydown", (event) => {
   els.renameColumnButton.click();
 });
 els.restoreColumnNameButton.addEventListener("click", () => restoreColumnName(state.columnFilterMenu.columnIndex));
-els.deleteCustomColumnButton.addEventListener("click", () => deleteCustomColumn(state.columnFilterMenu.columnIndex));
+els.deleteCustomColumnButton.addEventListener("click", () => deleteCustomColumn(state.columnFilterMenu.columnIndex).catch((error) => {
+  els.leftStatus.textContent = `删除列失败：${error.message}`;
+}));
 els.viewColumnProfileButton.addEventListener("click", () => openColumnProfile(state.columnFilterMenu.columnIndex));
 els.contextMenu.addEventListener("click", (event) => {
   const action = event.target.dataset.action;
@@ -581,6 +595,12 @@ document.addEventListener("keydown", handleUndoShortcut);
 document.addEventListener("keydown", trapManagedDialogFocus);
 document.addEventListener("keydown", handleWorkspaceShortcuts);
 document.addEventListener("paste", handlePasteIntoCustomColumns);
+window.addEventListener("pagehide", flushRecoveryDraft);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushRecoveryDraft();
+});
+els.restoreRecoveryDraftButton.addEventListener("click", restoreRecoveryDraft);
+els.discardRecoveryDraftButton.addEventListener("click", discardRecoveryDraft);
 window.addEventListener("blur", closeContextMenu);
 window.addEventListener("blur", stopResize);
 document.addEventListener("keydown", (event) => {

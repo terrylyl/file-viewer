@@ -60,14 +60,17 @@ function setDataset(result) {
   const shouldRevealWorkspace =
     !state.headers.length &&
     !state.rows.length &&
-    Boolean(result.rows?.length) &&
+    Boolean(result.largeWorker ? result.rowCount : result.rows?.length) &&
     window.matchMedia("(min-width: 981px)").matches;
   if (shouldRevealWorkspace) beginWorkspaceReveal();
   else finishWorkspaceReveal();
   state.headers = result.headers || [];
   state.originalHeaders = [...state.headers];
-  state.rows = createChunkedRows(result.rows || []);
-  state.rowChunks = state.rows.__chunks;
+  if (result.largeWorker) initializeLargeDataWorker(result.largeWorker, result);
+  else {
+    state.rows = createChunkedRows(result.rows || []);
+    state.rowChunks = state.rows.__chunks;
+  }
   state.issues = result.issues || { inconsistentRows: [], sparseRows: [], longFields: [], duplicateColumns: [] };
   state.cellMeta = result.cellMeta instanceof Map
     ? result.cellMeta
@@ -75,6 +78,7 @@ function setDataset(result) {
       ? new Map(result.cellMetaEntries)
       : new Map();
   state.file = result.file || null;
+  state.datasetRecoveryKey = getDatasetRecoveryKey(state.file);
   state.visibleColumns = state.headers.map(() => true);
   state.columnOrder = state.headers.map((_, index) => index);
   state.columnWidths = state.headers.map((header) =>
@@ -111,9 +115,10 @@ function setDataset(result) {
   if (window.matchMedia("(min-width: 981px)").matches && els.detailPanel.classList.contains("collapsed")) {
     toggleDetailPanel({ animate: false });
   }
-  seedQueryWorker();
-  recomputeView();
+  if (isLargeDataMode()) recomputeView();
+  else seedQueryWorker();
   renderDetail();
+  checkForRecoveryDraft();
   els.columnsButton.disabled = !state.headers.length;
   els.addColumnButton.disabled = !state.headers.length;
   els.concatenateColumnButton.disabled = !state.headers.length;
@@ -125,6 +130,67 @@ function setDataset(result) {
   els.exportMenuButton.disabled = !state.rows.length;
   updateClipboardImportButton();
   setProgress(1, "解析完成");
+}
+
+function shouldUseLargeTextDataPath(file) {
+  return file.size >= LARGE_TEXT_FILE_THRESHOLD;
+}
+
+function cancelActiveLoad() {
+  if (!state.worker) return;
+  beginLoad();
+  setProgress(0, "已取消读取");
+  els.emptyState.style.display = "grid";
+  els.emptyState.querySelector("strong").textContent = "已取消读取";
+  els.emptyState.querySelector("span").textContent = "可以重新选择文件";
+}
+
+async function parseLargeTextFile(file, fileKind) {
+  if (file.size > LARGE_TEXT_FILE_MAX_BYTES) {
+    throw new Error(`大文件模式当前上限为 ${formatBytes(LARGE_TEXT_FILE_MAX_BYTES)}；请先拆分文件后重试`);
+  }
+  const loadToken = beginLoad();
+  resetExcelWorkbook();
+  setProgress(0.01, "准备大文件读取");
+  els.cancelLoadButton.hidden = false;
+  els.emptyState.style.display = "grid";
+  els.emptyState.querySelector("strong").textContent = "正在流式解析大文件";
+  els.emptyState.querySelector("span").textContent = `${file.name} · 将保留在本机浏览器临时存储中`;
+  const worker = createLargeDataWorker();
+  state.worker = worker;
+  worker.onmessage = (event) => {
+    if (!isCurrentLoad(loadToken)) return;
+    const message = event.data || {};
+    if (message.type === "progress") {
+      setProgress(message.progress, message.stage);
+      return;
+    }
+    if (message.type === "loaded") {
+      els.cancelLoadButton.hidden = true;
+      state.worker = null;
+      setDataset({ ...message.result, largeWorker: worker, rowCount: message.result.rowCount });
+      els.leftStatus.textContent = `大文件已就绪：${message.result.rowCount.toLocaleString()} 行；当前仅缓存视口附近的数据`;
+      return;
+    }
+    if (message.type === "error") {
+      els.cancelLoadButton.hidden = true;
+      state.worker = null;
+      worker.terminate();
+      setProgress(0, `大文件解析失败：${message.message}`);
+      els.emptyState.querySelector("strong").textContent = "大文件解析失败";
+      els.emptyState.querySelector("span").textContent = message.message;
+    }
+  };
+  const storeName = "table-viewer-large-active";
+  worker.postMessage({
+    kind: "load-large-file",
+    file,
+    fileKind,
+    encoding: els.encodingSelect.value,
+    previewLimit: PREVIEW_LIMIT,
+    longFieldThreshold: 50000,
+    storeName,
+  });
 }
 
 function updateSheetSelect(sheetNames = [], activeSheetName = "") {
@@ -154,9 +220,6 @@ function updateSheetSelect(sheetNames = [], activeSheetName = "") {
 function resetExcelWorkbook() {
   if (state.excelWorker) state.excelWorker.terminate();
   state.excelWorker = null;
-  state.excelWorkbook = null;
-  state.excelXLSX = null;
-  state.excelFile = null;
   updateSheetSelect([], "");
 }
 
@@ -165,41 +228,6 @@ function normalizeExcelWorkerResult(result) {
   return {
     ...result,
     cellMeta: Array.isArray(result.cellMetaEntries) ? new Map(result.cellMetaEntries) : new Map(),
-  };
-}
-
-function buildExcelDatasetFromSheet(sheetName, startedAt = Date.now()) {
-  if (!state.excelWorkbook || !state.excelXLSX || !state.excelFile) {
-    throw new Error("未加载 Excel 工作簿");
-  }
-  const sheet = state.excelWorkbook.Sheets[sheetName];
-  if (!sheet) throw new Error(`未找到 Sheet：${sheetName}`);
-  const XLSX = state.excelXLSX;
-  const valueRange = trimExcelSheetRefToContent(sheet, XLSX);
-  const matrix = trimExcelMatrixToContent(XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" }));
-  const maxColumns = getMatrixColumnCount(matrix);
-  const rawHeaders = matrix[0] || [];
-  const headers = Array.from({ length: maxColumns }, (_, index) => {
-    const value = rawHeaders[index] == null || rawHeaders[index] === "" ? `Column ${index + 1}` : String(rawHeaders[index]);
-    return value;
-  });
-  const rows = matrix.slice(1).map((row) =>
-    Array.from({ length: maxColumns }, (_, index) => (row[index] == null ? "" : String(row[index]))),
-  );
-  return {
-    headers,
-    rows,
-    cellMeta: collectExcelCellMetaSafely(sheet, matrix.length, maxColumns, XLSX, valueRange),
-    issues: analyzeRows(headers, rows),
-    file: {
-      name: state.excelFile.name,
-      size: state.excelFile.size,
-      encoding: "Excel workbook",
-      delimiter: sheetName,
-      parseMs: Date.now() - startedAt,
-      kind: "Excel",
-      sheetCount: state.excelSheetNames.length,
-    },
   };
 }
 
@@ -227,23 +255,15 @@ function requestExcelWorkerSheet(sheetName, startedAt = Date.now(), loadToken = 
 function loadExcelSheet(sheetName, startedAt = Date.now(), loadToken = state.loadToken) {
   if (!sheetName) return;
   if (!isCurrentLoad(loadToken)) return;
-  if (state.excelWorker && !state.excelWorkbook && requestExcelWorkerSheet(sheetName, startedAt, loadToken)) return;
-  try {
-    setProgress(0.58, `转换 Sheet：${sheetName}`);
-    updateSheetSelect(state.excelSheetNames, sheetName);
-    const result = buildExcelDatasetFromSheet(sheetName, startedAt);
-    if (!isCurrentLoad(loadToken)) return;
-    setDataset(result);
-  } catch (error) {
-    if (!isCurrentLoad(loadToken)) return;
-    setProgress(0, `Excel Sheet 读取失败：${error.message}`);
-    els.emptyState.style.display = "grid";
-    els.emptyState.querySelector("strong").textContent = "Excel Sheet 读取失败";
-    els.emptyState.querySelector("span").textContent = error.message;
-  }
+  if (state.excelWorker && requestExcelWorkerSheet(sheetName, startedAt, loadToken)) return;
+  setProgress(0, "Excel Sheet Worker 不可用");
 }
 
 async function parseCsvFile(file) {
+  if (shouldUseLargeTextDataPath(file)) {
+    await parseLargeTextFile(file, "CSV");
+    return;
+  }
   const loadToken = beginLoad();
   resetExcelWorkbook();
   setProgress(0.02, "读取文件");
@@ -280,6 +300,7 @@ async function parseCsvFile(file) {
         kind: "parse-csv",
         fileName: file.name,
         fileSize: file.size,
+        fileLastModified: file.lastModified,
         encoding: els.encodingSelect.value,
         previewLimit: PREVIEW_LIMIT,
         longFieldThreshold: 50000,
@@ -298,6 +319,10 @@ async function parseCsvFile(file) {
 }
 
 async function parseJsonlFile(file) {
+  if (shouldUseLargeTextDataPath(file)) {
+    await parseLargeTextFile(file, "JSONL");
+    return;
+  }
   const loadToken = beginLoad();
   resetExcelWorkbook();
   setProgress(0.02, "读取 JSONL 文件");
@@ -334,6 +359,7 @@ async function parseJsonlFile(file) {
         kind: "parse-jsonl",
         fileName: file.name,
         fileSize: file.size,
+        fileLastModified: file.lastModified,
         encoding: els.encodingSelect.value,
         longFieldThreshold: 50000,
         buffer,
@@ -350,90 +376,6 @@ async function parseJsonlFile(file) {
   }
 }
 
-async function ensureSheetJs() {
-  if (window.XLSX) return window.XLSX;
-  const sources = [
-    "vendor/xlsx.full.min.js",
-    "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
-  ];
-  for (const source of sources) {
-    try {
-      await new Promise((resolve, reject) => {
-        const script = document.createElement("script");
-        script.src = source;
-        script.async = true;
-        script.onload = resolve;
-        script.onerror = () => reject(new Error(`加载失败：${source}`));
-        document.head.appendChild(script);
-      });
-      if (window.XLSX) return window.XLSX;
-    } catch (error) {
-      continue;
-    }
-  }
-  throw new Error("无法加载 SheetJS，Excel 读取或 XLSX 导出需要网络或 vendor/xlsx.full.min.js");
-}
-
-function normalizeExcelColor(color) {
-  if (!color) return "";
-  if (typeof color === "string") {
-    const value = color.trim().replace(/^#/, "");
-    if (/^[0-9a-f]{8}$/i.test(value)) return `#${value.slice(2).toLowerCase()}`;
-    if (/^[0-9a-f]{6}$/i.test(value)) return `#${value.toLowerCase()}`;
-    return "";
-  }
-  if (color.rgb) {
-    const value = String(color.rgb).trim().replace(/^#/, "");
-    if (/^[0-9a-f]{8}$/i.test(value)) return `#${value.slice(2).toLowerCase()}`;
-    if (/^[0-9a-f]{6}$/i.test(value)) return `#${value.toLowerCase()}`;
-  }
-  if (color.indexed != null && Object.prototype.hasOwnProperty.call(EXCEL_INDEXED_COLORS, color.indexed)) {
-    return EXCEL_INDEXED_COLORS[color.indexed];
-  }
-  return "";
-}
-
-function getExcelCell(sheet, rowIndex, columnIndex, XLSX) {
-  if (Array.isArray(sheet)) return sheet[rowIndex]?.[columnIndex] || null;
-  if (Array.isArray(sheet["!data"])) return sheet["!data"][rowIndex]?.[columnIndex] || null;
-  return sheet[XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })] || null;
-}
-
-function extractExcelCellMeta(cell) {
-  if (!cell) return null;
-  const style = typeof cell.s === "object" && cell.s ? cell.s : {};
-  const fill = style.fill || style.patternFill || {};
-  const font = style.font || {};
-  const backgroundColor = normalizeExcelColor(fill.fgColor || fill.bgColor || style.fgColor || style.bgColor);
-  const color = normalizeExcelColor(font.color || style.color);
-  const html = typeof cell.h === "string" && /<[^>]+>/.test(cell.h) ? cell.h : "";
-  const link = normalizeLinkHref(cell.l?.Target || "");
-  const meta = {};
-  if (backgroundColor && backgroundColor !== "#ffffff") meta.backgroundColor = backgroundColor;
-  if (color) meta.color = color;
-  if (html) meta.html = html;
-  if (link) meta.link = link;
-  return Object.keys(meta).length ? meta : null;
-}
-
-function collectExcelCellMeta(sheet, rowCount, columnCount, XLSX, range = null) {
-  const cellMeta = new Map();
-  const startRow = range?.s?.r || 0;
-  const startColumn = range?.s?.c || 0;
-  for (let row = 1; row < rowCount; row += 1) {
-    for (let col = 0; col < columnCount; col += 1) {
-      const meta = extractExcelCellMeta(getExcelCell(sheet, startRow + row, startColumn + col, XLSX));
-      if (meta) cellMeta.set(`${row - 1}:${col}`, meta);
-    }
-  }
-  return cellMeta;
-}
-
-function collectExcelCellMetaSafely(sheet, rowCount, columnCount, XLSX, range = null) {
-  if (rowCount * columnCount > EXCEL_CELL_META_SCAN_MAX_CELLS) return new Map();
-  return collectExcelCellMeta(sheet, rowCount, columnCount, XLSX, range);
-}
-
 function refreshIssuesAfterCellEdits(rowIndexes) {
   const touchedRows = new Set([...rowIndexes].filter((rowIndex) => Number.isInteger(rowIndex) && rowIndex >= 0));
   const keepUntouchedRowIssue = (issue) => !touchedRows.has((issue.rowNumber || 0) - 2);
@@ -448,23 +390,6 @@ function refreshIssuesAfterCellEdits(rowIndexes) {
     .forEach((rowIndex) => appendRowIssues(state.issues, state.headers, state.rows[rowIndex], rowIndex));
 }
 
-async function parseExcelFileOnMainThread(file, loadToken, startedAt) {
-  const XLSX = await ensureSheetJs();
-  if (!isCurrentLoad(loadToken)) return;
-  setProgress(0.2, "读取 Excel");
-  const buffer = await file.arrayBuffer();
-  if (!isCurrentLoad(loadToken)) return;
-  const workbook = XLSX.read(buffer, getExcelReadOptions());
-  if (!isCurrentLoad(loadToken)) return;
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new Error("工作簿中没有可读取的 Sheet");
-  state.excelWorkbook = workbook;
-  state.excelXLSX = XLSX;
-  state.excelFile = file;
-  updateSheetSelect(workbook.SheetNames, sheetName);
-  loadExcelSheet(sheetName, startedAt, loadToken);
-}
-
 async function startExcelWorkerParse(file, loadToken, startedAt) {
   if (!window.Worker) return false;
   try {
@@ -472,7 +397,6 @@ async function startExcelWorkerParse(file, loadToken, startedAt) {
     if (!isCurrentLoad(loadToken)) return true;
     const worker = createExcelWorker();
     state.excelWorker = worker;
-    state.excelFile = file;
     worker.onmessage = async (event) => {
       if (worker !== state.excelWorker || !isCurrentLoad(loadToken)) return;
       const message = event.data || {};
@@ -484,22 +408,8 @@ async function startExcelWorkerParse(file, loadToken, startedAt) {
         return;
       }
       if (message.type === "error") {
-        if (message.stage === "load-sheetjs") {
-          worker.terminate();
-          if (state.excelWorker === worker) state.excelWorker = null;
-          try {
-            setProgress(0.12, "Worker 加载失败，改用主线程 Excel 解析");
-            await parseExcelFileOnMainThread(file, loadToken, startedAt);
-          } catch (fallbackError) {
-            if (!isCurrentLoad(loadToken)) return;
-            setProgress(0, `Excel 解析失败：${fallbackError.message}`);
-            els.emptyState.style.display = "grid";
-            els.emptyState.querySelector("strong").textContent = "Excel 解析失败";
-            els.emptyState.querySelector("span").textContent = fallbackError.message;
-            await offerXlsxCsvConversion(file, loadToken);
-          }
-          return;
-        }
+        worker.terminate();
+        if (state.excelWorker === worker) state.excelWorker = null;
         setProgress(0, `Excel 解析失败：${message.message}`);
         els.emptyState.style.display = "grid";
         els.emptyState.querySelector("strong").textContent = "Excel 解析失败";
@@ -513,8 +423,7 @@ async function startExcelWorkerParse(file, loadToken, startedAt) {
         kind: "load-workbook",
         token: loadToken,
         startedAt,
-        file: { name: file.name, size: file.size },
-        sources: getSheetJsWorkerSources(),
+        file: { name: file.name, size: file.size, lastModified: file.lastModified },
         buffer,
       },
       [buffer],
@@ -536,7 +445,7 @@ async function parseExcelFile(file) {
     await assertExcelSharedStringsWithinSafeLimit(file);
     if (!isCurrentLoad(loadToken)) return;
     if (await startExcelWorkerParse(file, loadToken, startedAt)) return;
-    await parseExcelFileOnMainThread(file, loadToken, startedAt);
+    throw new Error("当前浏览器无法启动隔离的 Excel Worker");
   } catch (error) {
     if (!isCurrentLoad(loadToken)) return;
     setProgress(0, `Excel 解析失败：${error.message}`);
@@ -580,6 +489,10 @@ async function openFileWithPicker() {
 function handleFiles(files, sourceFileHandle = null) {
   const file = files && files[0];
   if (!file) return;
+  if (!confirmDatasetReplacement()) {
+    if (els.fileInput) els.fileInput.value = "";
+    return;
+  }
   const lower = file.name.toLocaleLowerCase();
   els.fileHint.textContent = file.name;
   els.fileHint.title = file.name;

@@ -98,10 +98,11 @@ function requestColumnUniqueValues(columnIndex) {
   state.columnValueTokenCounter = token;
   state.columnValuePending.add(cacheKey);
   state.columnValueTokens.set(cacheKey, token);
-  state.queryWorker.postMessage({
+  const worker = isLargeDataMode() ? state.largeDataWorker : state.queryWorker;
+  worker.postMessage({
     kind: "unique-values",
     token,
-    version: state.queryRowsVersion,
+    ...(isLargeDataMode() ? {} : { version: state.queryRowsVersion }),
     columnIndex,
   });
 }
@@ -327,6 +328,10 @@ function rowPassesHiddenRows(rowIndex) {
 }
 
 function rebuildVisibleRowPositionMap() {
+  if (isLargeDataMode()) {
+    state.rowPositionMap = new Map();
+    return;
+  }
   state.rowPositionMap = new Map();
   state.viewIndices.forEach((rowIndex, position) => {
     state.rowPositionMap.set(rowIndex, position);
@@ -472,8 +477,10 @@ function computeViewSync(request = getViewQueryRequest()) {
 }
 
 function applyQueryResult(result) {
-  state.viewIndices = Array.isArray(result.viewIndices) ? result.viewIndices : [];
-  state.matchedRows = new Set(Array.isArray(result.matchedRows) ? result.matchedRows : []);
+  state.viewIndices = result.viewIndices && typeof result.viewIndices.length === "number" ? result.viewIndices : [];
+  state.matchedRows = isLargeDataMode()
+    ? result.matchedRows && typeof result.matchedRows.length === "number" ? result.matchedRows : new Uint32Array()
+    : new Set(Array.isArray(result.matchedRows) ? result.matchedRows : []);
   rebuildVisibleRowPositionMap();
   normalizeSelectionForCurrentView();
   els.rightStatus.textContent = `${state.viewIndices.length} / ${state.rows.length} 行 · ${state.headers.length} 列`;

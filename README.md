@@ -1,8 +1,8 @@
 # 本地表格文件查看器
 
-一个本地运行的轻量表格文件查看器，面向 CSV、TSV、TXT、JSONL 和 Excel 文件的查看、检索、编辑、复制与导出。文件在浏览器本地处理，CSV/JSONL 解析走 Web Worker，不会上传到服务器。
+一个本地运行的轻量表格文件查看器，面向 CSV、TSV、TXT、JSONL 和 Excel 文件的查看、检索、编辑、复制与导出。文件在浏览器本地处理，不会上传到服务器。
 
-当前版本：`0.2.0`
+当前基线版本：`2.3.5`
 
 ## 项目结构
 
@@ -18,7 +18,7 @@ file-viewer/
 │  ├─ app/main.js                # 主线程应用逻辑
 │  ├─ shared/*.js                # 主线程和 Worker 共用的纯逻辑
 │  ├─ styles.css                 # 应用样式
-│  └─ workers/*.js               # CSV/JSONL、查询、Excel Worker
+│  └─ workers/*.js               # CSV/JSONL、查询、大文件、Excel Worker
 ├─ tests/
 │  ├─ csv-worker-core.test.mjs   # CSV/JSONL Worker 核心行为测试
 │  ├─ query-worker-filter.test.mjs # 查询筛选核心测试
@@ -64,12 +64,30 @@ npm test
 node --test
 ```
 
+## v2.3.5 基线
+
+- 为表格及其他横向滚动区域增加过滚动限制，减少笔记本触摸区快速左右滑动触发浏览器后退的情况。
+- 存在未保存的 cell 编辑时，离开、刷新或切换文件会触发浏览器原生确认。
+- 编辑中的内容及已保存的 cell 编辑会作为本地恢复草稿保留；重新打开同一文件时可恢复或丢弃。草稿不保存完整源文件，也不会上传。
+
+## 发布与安全
+
+- 项目以 [MIT License](LICENSE) 发布；固定版本的 SheetJS 依赖及其许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- [sbom.cdx.json](sbom.cdx.json) 列出当前发布物的第三方软件组件。
+- 提交与 tag 会由 [GitHub Actions](.github/workflows/ci.yml) 构建、测试并校验 `index.html` 与源码一致；`v*` tag 会生成带 SHA-256 校验文件的 GitHub Release。
+- 执行 `npm run package` 可在 `dist/` 生成只包含最终 `index.html` 的发布 zip，以及 zip 的 SHA-256 校验文件；许可证、第三方声明、SBOM、变更日志和安全说明随仓库源码维护。
+- 安全问题请遵循 [SECURITY.md](SECURITY.md)，不要在公开 issue 中上传敏感表格或复现数据。
+- Excel 使用的 SheetJS Community Edition `0.18.5` 已随源码固化在 `vendor/xlsx.full.min.js`；构建会校验其 SHA-256 为 `c9506197caf809a075b6dee1da0d36fb19da7158ffe8a88e7b0c96c5d8623c99`，不通过则拒绝生成发布物。
+- 发布页内置 CSP：禁止页面建立外连（`connect-src 'none'`），只允许应用脚本的构建期哈希和 Blob Worker。部署说明见 [docs/deployment-security.md](docs/deployment-security.md)。
+
 ## 数据隐私
 
 - 文件读取、解析、筛选、编辑和导出都在浏览器本地完成。
 - CSV/JSONL 解析和大表查询优先在浏览器 Web Worker 中执行。
+- 超过 24 MiB 的 CSV/TSV/TXT/JSONL 会启用大文件模式：流式读取、在 Worker 中分块写入 OPFS，本页主线程只缓存当前视口附近的行；文件内容仍不会离开浏览器。
 - 使用 GitHub Pages 或本地服务器访问时，文件内容不会上传到云端。
-- Excel 支持会尝试加载 SheetJS。如果本地没有 `vendor/xlsx.full.min.js`，会从 CDN 加载库文件；这是加载解析库，不会上传用户文件。
+- 为避免误触浏览器后退导致编辑丢失，已编辑 cell 的增量会作为本地恢复草稿保存到当前浏览器；草稿不保存完整源文件，重新打开同一文件时可选择恢复或丢弃。
+- Excel 所需 SheetJS 已作为经 SHA-256 校验的本地构建输入内联进专用 Worker；运行时不请求 CDN 或其他第三方脚本。Worker 没有 DOM、剪贴板或文件选择器权限，只接收主线程转交的工作簿字节和导出矩阵。
 
 ## 支持格式
 
@@ -85,10 +103,12 @@ node --test
 - 拖拽或选择本地文件读取。
 - 支持 CSV/TSV/TXT/JSONL/XLSX/XLS。
 - CSV 支持引号字段、字段内逗号、字段内换行、双引号转义。
+- 对常见的非标准复杂字段做保守兼容：未包裹的 JSON object/array、JSON 风格反斜杠转义，以及未包裹的 Markdown 三反引号代码块中的逗号和换行不会再直接拆成新列或新行；无法闭合的引号、JSON/数组或代码块会作为导入异常提示。
 - CSV 解析修复过大行数下的 `too many function arguments` 问题。
 - 对部分未转义公式内容做容错，减少本应属于同一 cell 的内容被错误拆列。
 - 自动 UTF-8 解码，UTF-8 失败后尝试 GB18030/GBK。
 - 解析过程显示进度；CSV/JSONL 使用 Worker，避免解析阶段锁死页面。
+- CSV/TSV/TXT/JSONL 在 24 MiB 以上自动切换到大文件模式，当前支持到 256 MiB（覆盖至少 200 MiB 的目标）。大文件模式与普通 CSV 使用同一套复杂字段解析规则，正式支持最新版 Chrome/Edge 桌面端，并可在读取阶段取消。
 - 检测重复列名、列数不一致、空字段比例高和超长字段，并在界面中提示。
 
 ### 表格浏览与筛选
@@ -178,35 +198,28 @@ node --test
 - XLSX 转 CSV 备用入口只处理常见 `.xlsx` 压缩结构，暂不支持 `.xls`、加密文件、Zip64 和特殊压缩方式。
 - 单元格样式展示是 best-effort；当前版本优先保证大文件读取稳定性。
 
-## SheetJS 离线支持
+## SheetJS 供应链与离线支持
 
-Excel 的 XLSX/XLS 结构是压缩包加 XML 或二进制工作簿，项目采用 SheetJS 作为可选第三方库：
+Excel 的 XLSX/XLS 结构是压缩包加 XML 或二进制工作簿，项目将 SheetJS Community Edition `0.18.5` 固定为构建期依赖：
 
-1. 优先加载 `vendor/xlsx.full.min.js`
-2. 本地文件不存在时再尝试 CDN：`https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js`
+1. `vendor/xlsx.full.min.js` 是源码的一部分，其 SHA-256 由构建脚本固定校验。
+2. 构建时该文件只被内联到 `excel-worker-source`；主线程不执行 SheetJS，运行时也没有 CDN fallback。
+3. `index.html` 可离线使用；Excel Worker 仅处理主线程明确传入的文件字节。
 
-如果需要完全离线 Excel 支持，把 SheetJS 浏览器版文件放到：
-
-```text
-vendor/xlsx.full.min.js
-```
+如需升级 SheetJS，必须同时更新经过审查的 `vendor/xlsx.full.min.js`、`scripts/build-single-html.mjs` 中的哈希、[SBOM](sbom.cdx.json)、[第三方声明](THIRD_PARTY_NOTICES.md)和测试。
 
 CSV、TSV、TXT 和 JSONL 功能不依赖任何第三方库。
 
 ## 设计取舍
 
-- 当前 `file-viewer` 仍是单页本地工具，核心数据保留在浏览器内存中，DOM 只渲染可视区域。
-- CSV/JSONL 解析已经 Worker 化，但筛选、搜索和编辑仍基于内存中的完整数据集。
+- 小型数据集仍使用内存行数组；CSV/TSV/TXT/JSONL 超过 24 MiB 时，数据由大文件 Worker 以 OPFS 分块保存，主线程只保留视口缓存和当前筛选索引。
+- 大文件模式保留浏览、搜索、筛选、排序、编辑、自定义列、拼接列及 CSV/XLSX 导出；CSV 是低内存导出路径。XLSX 导出本身需要 SheetJS 构建完整工作簿，内存占用会随导出结果增长。
 - 单个超长 cell 不进入表格 DOM 全量渲染，只在详情面板和放大弹窗中按块显示。
-- Excel 解析优先在 Worker 中执行，Worker 无法加载 SheetJS 时才回退到主线程；对超大 `sharedStrings.xml`、大量长文本或超大压缩包会触发安全保护，避免浏览器直接崩溃。
+- Excel 解析与 XLSX 导出都在固定的专用 Worker 中执行，没有主线程或网络加载 fallback；对超大 `sharedStrings.xml`、大量长文本或超大压缩包会触发安全保护，避免浏览器直接崩溃。
 - 大型 Excel 的完整支持需要迁移到流式读取和 Worker 架构。
-- 大文件架构优化会在独立子项目 `file-viewer-stream` 中推进，方向包括流式解析、分块存储、Worker 筛选和分页索引。
 
 ## 后续可扩展
 
-- 流式解析 CSV/JSONL，避免一次性把完整文件读入内存。
-- 分块存储和分页索引，降低超大文件的内存压力。
-- 将更多筛选索引、去重统计和导出路径迁移到更低内存的分块模型。
-- 内置或锁定 SheetJS vendor 包，减少 CDN fallback 依赖。
+- 为更高于 256 MiB 的文本表格补充分区/外部排序与流式 XLSX 写出。
 - 增加列类型推断、数值过滤、正则搜索。
 - 保存列宽、隐藏列、弹窗尺寸和搜索偏好到 localStorage。

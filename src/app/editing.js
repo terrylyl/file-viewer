@@ -1,14 +1,262 @@
+function getDatasetRecoveryKey(file = state.file) {
+  if (!file || !Number.isFinite(Number(file.lastModified))) return "";
+  return [file.kind || "Table", file.name || "", file.size || 0, Number(file.lastModified), file.delimiter || ""].join("|");
+}
+
+function getRecoveryDraftChanges() {
+  const changes = new Map();
+  state.editedCells.forEach((originalValue, key) => {
+    const [rowIndex, columnIndex] = key.split(":").map(Number);
+    if (!getDataRow(rowIndex) || !Number.isInteger(columnIndex)) return;
+    changes.set(key, {
+      rowIndex,
+      columnIndex,
+      value: String(getDataRow(rowIndex)[columnIndex] ?? ""),
+    });
+  });
+  if (hasPendingCellEditChange()) {
+    const edit = state.cellEdit;
+    changes.set(getCellKey(edit.rowIndex, edit.columnIndex), {
+      rowIndex: edit.rowIndex,
+      columnIndex: edit.columnIndex,
+      value: String(edit.value ?? ""),
+    });
+  }
+  return [...changes.values()];
+}
+
+function hasWorkspaceRecoveryChanges() {
+  return getRecoveryDraftChanges().length > 0;
+}
+
+function createRecoveryDraftSnapshot() {
+  const key = state.datasetRecoveryKey;
+  const changes = getRecoveryDraftChanges();
+  if (!key || !changes.length) return null;
+  return {
+    key,
+    version: 1,
+    savedAt: Date.now(),
+    file: {
+      name: state.file?.name || "",
+      kind: state.file?.kind || "",
+      delimiter: state.file?.delimiter || "",
+    },
+    changes,
+  };
+}
+
+function getRecoveryDraftSessionKey(key) {
+  return `${RECOVERY_DRAFT_SESSION_PREFIX}${key}`;
+}
+
+function readRecoveryDraftFromSession(key) {
+  try {
+    const raw = sessionStorage.getItem(getRecoveryDraftSessionKey(key));
+    const draft = raw ? JSON.parse(raw) : null;
+    return draft?.key === key && Array.isArray(draft.changes) ? draft : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeRecoveryDraftToSession(draft) {
+  try {
+    sessionStorage.setItem(getRecoveryDraftSessionKey(draft.key), JSON.stringify(draft));
+  } catch {
+    // IndexedDB remains available as the larger best-effort recovery store.
+  }
+}
+
+function clearRecoveryDraftFromSession(key) {
+  try {
+    sessionStorage.removeItem(getRecoveryDraftSessionKey(key));
+  } catch {
+    // Storage can be disabled in private or restricted contexts.
+  }
+}
+
+function openRecoveryDraftDatabase() {
+  if (!window.indexedDB) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(RECOVERY_DRAFT_DATABASE, 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(RECOVERY_DRAFT_STORE)) {
+        database.createObjectStore(RECOVERY_DRAFT_STORE, { keyPath: "key" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("无法打开本地恢复草稿"));
+  });
+}
+
+async function readRecoveryDraftFromIndexedDb(key) {
+  const database = await openRecoveryDraftDatabase();
+  if (!database) return null;
+  try {
+    return await new Promise((resolve, reject) => {
+      const request = database.transaction(RECOVERY_DRAFT_STORE, "readonly").objectStore(RECOVERY_DRAFT_STORE).get(key);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error || new Error("无法读取本地恢复草稿"));
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function writeRecoveryDraftToIndexedDb(draft) {
+  const database = await openRecoveryDraftDatabase();
+  if (!database) return;
+  try {
+    await new Promise((resolve, reject) => {
+      const request = database.transaction(RECOVERY_DRAFT_STORE, "readwrite").objectStore(RECOVERY_DRAFT_STORE).put(draft);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error || new Error("无法保存本地恢复草稿"));
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function deleteRecoveryDraftFromIndexedDb(key) {
+  const database = await openRecoveryDraftDatabase();
+  if (!database) return;
+  try {
+    await new Promise((resolve, reject) => {
+      const request = database.transaction(RECOVERY_DRAFT_STORE, "readwrite").objectStore(RECOVERY_DRAFT_STORE).delete(key);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error || new Error("无法删除本地恢复草稿"));
+    });
+  } finally {
+    database.close();
+  }
+}
+
+function persistRecoveryDraft(draft) {
+  writeRecoveryDraftToSession(draft);
+  writeRecoveryDraftToIndexedDb(draft).catch(() => {});
+}
+
+function clearRecoveryDraft(key = state.datasetRecoveryKey) {
+  if (!key) return;
+  clearRecoveryDraftFromSession(key);
+  deleteRecoveryDraftFromIndexedDb(key).catch(() => {});
+}
+
+function handleBeforeUnload(event) {
+  if (!hasWorkspaceRecoveryChanges()) return;
+  flushRecoveryDraft();
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+function syncPageLeaveGuard() {
+  const shouldGuard = hasWorkspaceRecoveryChanges();
+  if (shouldGuard === state.hasBeforeUnloadGuard) return;
+  state.hasBeforeUnloadGuard = shouldGuard;
+  if (shouldGuard) window.addEventListener("beforeunload", handleBeforeUnload);
+  else window.removeEventListener("beforeunload", handleBeforeUnload);
+}
+
+function flushRecoveryDraft() {
+  if (state.recoveryDraftSaveTimer) {
+    clearTimeout(state.recoveryDraftSaveTimer);
+    state.recoveryDraftSaveTimer = 0;
+  }
+  const draft = createRecoveryDraftSnapshot();
+  if (draft) persistRecoveryDraft(draft);
+  else clearRecoveryDraft();
+  syncPageLeaveGuard();
+}
+
+function scheduleRecoveryDraftSave() {
+  syncPageLeaveGuard();
+  if (state.recoveryDraftSaveTimer) clearTimeout(state.recoveryDraftSaveTimer);
+  const datasetRecoveryKey = state.datasetRecoveryKey;
+  state.recoveryDraftSaveTimer = window.setTimeout(() => {
+    state.recoveryDraftSaveTimer = 0;
+    if (datasetRecoveryKey !== state.datasetRecoveryKey) return;
+    flushRecoveryDraft();
+  }, RECOVERY_DRAFT_SAVE_DELAY);
+}
+
+function closeRecoveryDraftDialog() {
+  if (els.recoveryDraftBackdrop.classList.contains("open")) closeManagedDialog(els.recoveryDraftBackdrop);
+  state.pendingRecoveryDraft = null;
+}
+
+async function checkForRecoveryDraft() {
+  const key = state.datasetRecoveryKey;
+  if (!key || hasWorkspaceRecoveryChanges()) return;
+  const token = state.recoveryDraftCheckToken + 1;
+  state.recoveryDraftCheckToken = token;
+  const sessionDraft = readRecoveryDraftFromSession(key);
+  let indexedDraft = null;
+  try {
+    indexedDraft = await readRecoveryDraftFromIndexedDb(key);
+  } catch {
+    // Session storage still provides same-tab recovery when IndexedDB is unavailable.
+  }
+  if (token !== state.recoveryDraftCheckToken || key !== state.datasetRecoveryKey) return;
+  const draft = [sessionDraft, indexedDraft]
+    .filter((item) => item?.key === key && Array.isArray(item.changes) && item.changes.length)
+    .sort((left, right) => Number(right.savedAt || 0) - Number(left.savedAt || 0))[0];
+  if (!draft) return;
+  state.pendingRecoveryDraft = draft;
+  els.recoveryDraftSummary.textContent = `检测到此文件有 ${draft.changes.length.toLocaleString()} 个未保存的 cell 编辑。草稿仅保存在当前浏览器，不包含完整源文件。`;
+  openManagedDialog(els.recoveryDraftBackdrop, els.restoreRecoveryDraftButton);
+}
+
+function restoreRecoveryDraft() {
+  const draft = state.pendingRecoveryDraft;
+  if (!draft || draft.key !== state.datasetRecoveryKey) return;
+  const changes = [];
+  for (const change of draft.changes) {
+    if (!Number.isInteger(change.rowIndex) || !Number.isInteger(change.columnIndex)) continue;
+    const changed = setCellValue(change.rowIndex, change.columnIndex, change.value, {
+      recordHistory: false,
+      invalidateCache: false,
+      refreshIssues: false,
+    });
+    if (changed) changes.push(change);
+  }
+  if (changes.length) {
+    refreshAfterCellValueBatchChange(changes);
+    els.leftStatus.textContent = `已恢复 ${changes.length.toLocaleString()} 个未保存编辑`;
+  } else {
+    syncEditSummary();
+    els.leftStatus.textContent = "恢复草稿中没有需要应用的编辑";
+  }
+  closeRecoveryDraftDialog();
+  scheduleRecoveryDraftSave();
+}
+
+function discardRecoveryDraft() {
+  const key = state.pendingRecoveryDraft?.key || state.datasetRecoveryKey;
+  clearRecoveryDraft(key);
+  closeRecoveryDraftDialog();
+  els.leftStatus.textContent = "已丢弃本地恢复草稿";
+}
+
+function confirmDatasetReplacement() {
+  if (!hasWorkspaceRecoveryChanges()) return true;
+  flushRecoveryDraft();
+  return window.confirm("当前文件有未保存的编辑。继续加载新文件吗？这些编辑会保留为本浏览器中的恢复草稿。");
+}
+
 function selectCell(rowIndex, columnIndex) {
   if (!setFocusedCell(rowIndex, columnIndex)) return;
   clearSelectionToSelected();
   ensureCellVisible(rowIndex, columnIndex);
   renderGrid();
   renderDetail();
+  prefetchLargeRows([rowIndex]);
 }
 
 function getSelectedValue() {
   if (!state.selected) return "";
-  return state.rows[state.selected.rowIndex]?.[state.selected.columnIndex] || "";
+  return getDataRow(state.selected.rowIndex)?.[state.selected.columnIndex] || "";
 }
 
 function selectionIncludesHeaders(range = state.selectionRange) {
@@ -47,7 +295,7 @@ function getSelectionCopyPayload() {
     htmlRows.push(buildClipboardHtmlRow(headers, "th"));
   }
   for (let rowPosition = endpoints.startRowPosition; rowPosition <= endpoints.endRowPosition; rowPosition += 1) {
-    const row = state.rows[state.viewIndices[rowPosition]];
+    const row = getDataRow(state.viewIndices[rowPosition]);
     const cells = columns.map((columnIndex) => row?.[columnIndex] || "");
     plainRows.push(cells.map(formatPlainClipboardCell).join("\t"));
     htmlRows.push(buildClipboardHtmlRow(cells));
@@ -651,7 +899,7 @@ function isEditingSelectedCell() {
 function hasPendingCellEditChange() {
   const edit = state.cellEdit;
   if (!edit) return false;
-  const currentValue = String(state.rows[edit.rowIndex]?.[edit.columnIndex] ?? "");
+  const currentValue = String(getDataRow(edit.rowIndex)?.[edit.columnIndex] ?? "");
   return String(edit.value ?? "") !== currentValue;
 }
 
@@ -682,6 +930,7 @@ function renderCellEditor() {
   textarea.addEventListener("input", () => {
     if (state.cellEdit) state.cellEdit.value = textarea.value;
     els.detailStatus.textContent = `${textarea.value.length.toLocaleString()} 字符 · 编辑中`;
+    scheduleRecoveryDraftSave();
   });
   textarea.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -698,6 +947,11 @@ function renderCellEditor() {
 
 function beginCellEdit() {
   if (!state.selected) return;
+  if (isLargeDataMode() && !getDataRow(state.selected.rowIndex)) {
+    els.leftStatus.textContent = "正在读取单元格内容…";
+    prefetchLargeRows([state.selected.rowIndex]);
+    return;
+  }
   state.cellEdit = {
     rowIndex: state.selected.rowIndex,
     columnIndex: state.selected.columnIndex,
@@ -710,20 +964,23 @@ function beginCellEdit() {
 function cancelCellEdit() {
   if (!state.cellEdit) return;
   state.cellEdit = null;
+  scheduleRecoveryDraftSave();
   renderDetail();
 }
 
 function setCellValue(rowIndex, columnIndex, value, options = {}) {
   if (!Number.isInteger(rowIndex) || !Number.isInteger(columnIndex)) return false;
-  if (!state.rows[rowIndex] || columnIndex < 0 || columnIndex >= state.headers.length) return false;
+  const row = getDataRow(rowIndex);
+  if (!row || columnIndex < 0 || columnIndex >= state.headers.length) return false;
   const nextValue = String(value ?? "");
-  const currentValue = String(state.rows[rowIndex][columnIndex] ?? "");
+  const currentValue = String(row[columnIndex] ?? "");
   if (currentValue === nextValue) return false;
   const key = getCellKey(rowIndex, columnIndex);
   const originalValue = state.editedCells.has(key)
     ? getEditedCellOriginalValue(rowIndex, columnIndex)
     : currentValue;
-  state.rows[rowIndex][columnIndex] = nextValue;
+  if (isLargeDataMode()) row[columnIndex] = nextValue;
+  else state.rows[rowIndex][columnIndex] = nextValue;
   touchCellVersion(rowIndex, columnIndex);
   syncEditedCellTracking(rowIndex, columnIndex, originalValue, nextValue);
   if (state.cellMeta?.size) state.cellMeta.delete(`${rowIndex}:${columnIndex}`);
@@ -741,6 +998,7 @@ function setCellValue(rowIndex, columnIndex, value, options = {}) {
       nextValue,
     });
   }
+  scheduleRecoveryDraftSave();
   return true;
 }
 
@@ -794,7 +1052,7 @@ function saveCellEdit() {
 }
 
 function focusOperationCell(rowIndex, columnIndex) {
-  if (!state.rows[rowIndex] || columnIndex < 0 || columnIndex >= state.headers.length) return;
+  if (!getDataRow(rowIndex) || columnIndex < 0 || columnIndex >= state.headers.length) return;
   state.selected = { rowIndex, columnIndex };
   state.detailMode = "cell";
   clearSelectionToSelected();
@@ -802,7 +1060,7 @@ function focusOperationCell(rowIndex, columnIndex) {
 
 function setManualHighlight(rowIndex, columnIndex, color, options = {}) {
   if (!Number.isInteger(rowIndex) || !Number.isInteger(columnIndex)) return false;
-  if (!state.rows[rowIndex] || columnIndex < 0 || columnIndex >= state.headers.length) return false;
+  if (!getDataRow(rowIndex) || columnIndex < 0 || columnIndex >= state.headers.length) return false;
   const nextColor = MANUAL_HIGHLIGHT_COLORS.has(color) ? color : "";
   const key = getCellKey(rowIndex, columnIndex);
   const previousColor = state.manualHighlights.get(key) || "";
@@ -999,7 +1257,7 @@ function renderDetail() {
 function renderModal() {
   const cell = state.modalCell;
   if (!cell) return;
-  const value = state.rows[cell.rowIndex]?.[cell.columnIndex] || "";
+  const value = getDataRow(cell.rowIndex)?.[cell.columnIndex] || "";
   const cellMeta = getCellMeta(cell.rowIndex, cell.columnIndex);
   const shown = String(value).slice(0, state.modalVisibleChars);
   const format = resolveModalFormat(shown, cellMeta);
@@ -1025,6 +1283,7 @@ function openModalForCell(rowIndex, columnIndex) {
   els.modalBackdrop.querySelector(".modal").style.removeProperty("--modal-width");
   els.modalBackdrop.querySelector(".modal").style.removeProperty("--modal-height");
   renderModal();
+  prefetchLargeRows([rowIndex], { detail: false, modal: true });
   openManagedDialog(els.modalBackdrop, els.modalSearchInput);
 }
 
@@ -1067,7 +1326,7 @@ function eventPathHasSelector(event, selector) {
 }
 
 function getOpenManagedDialog() {
-  return [els.shortcutHelpBackdrop, els.commandPaletteBackdrop, els.modalBackdrop]
+  return [els.recoveryDraftBackdrop, els.shortcutHelpBackdrop, els.commandPaletteBackdrop, els.modalBackdrop]
     .find((backdrop) => backdrop.classList.contains("open")) || null;
 }
 

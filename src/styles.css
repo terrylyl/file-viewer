@@ -65,6 +65,7 @@
 html,
 body {
   height: 100%;
+  overscroll-behavior-x: contain;
 }
 
 body {
@@ -369,6 +370,7 @@ label {
 .command-row {
   flex-wrap: nowrap;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   scrollbar-width: thin;
   padding-bottom: 1px;
 }
@@ -452,6 +454,7 @@ label {
   max-height: 28px;
   overflow-x: auto;
   overflow-y: auto;
+  overscroll-behavior-x: contain;
   display: flex;
   align-items: flex-start;
   align-content: flex-start;
@@ -485,6 +488,7 @@ label {
   align-items: center;
   gap: 7px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   padding-top: 5px;
   border-top: 1px solid var(--line);
   scrollbar-width: thin;
@@ -678,6 +682,7 @@ body.detail-resizing .detail-resize-handle::after {
   position: absolute;
   inset: 0;
   overflow: auto;
+  overscroll-behavior-x: contain;
   background: var(--panel);
 }
 
@@ -1507,6 +1512,15 @@ mark {
   border-radius: 999px;
   background: #dce4e8;
   overflow: hidden;
+}
+
+.status-cancel {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 3px 9px;
+  border-color: color-mix(in srgb, var(--danger, #d9534f) 55%, var(--border));
+  color: var(--danger, #b53a35);
+  font-size: 12px;
 }
 
 .progress {
@@ -2396,6 +2410,18 @@ kbd {
   align-items: center;
   gap: 0 18px;
   padding: 6px 14px 14px;
+}
+
+.recovery-draft-summary {
+  margin: 0;
+  padding: 4px 18px 14px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.recovery-draft-dialog .popover-actions {
+  margin: 0;
+  padding: 12px 18px 18px;
 }
 
 .shortcut-help-grid > span,

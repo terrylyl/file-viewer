@@ -1,13 +1,34 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const buildScript = readFileSync(new URL("../scripts/build-single-html.mjs", import.meta.url), "utf8");
+const releaseScript = readFileSync(new URL("../scripts/create-release.mjs", import.meta.url), "utf8");
+const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const sbom = JSON.parse(readFileSync(new URL("../sbom.cdx.json", import.meta.url), "utf8"));
 
-test("app package version is 0.2.0", () => {
-  assert.equal(packageJson.version, "0.2.0");
+test("app package version is 2.3.5", () => {
+  assert.equal(packageJson.version, "2.3.5");
+});
+
+test("release governance artifacts stay aligned with the baseline", () => {
+  for (const file of ["LICENSE", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md", "SECURITY.md", "sbom.cdx.json"]) {
+    assert.ok(existsSync(new URL(`../${file}`, import.meta.url)), `missing release governance file: ${file}`);
+  }
+  assert.match(readFileSync(new URL("../LICENSE", import.meta.url), "utf8"), /^MIT License/m, "the project should use the MIT License");
+  assert.equal(sbom.metadata.component.version, packageJson.version, "SBOM application version should match package metadata");
+  assert.equal(sbom.components[0].name, "SheetJS Community Edition", "SBOM should record the optional Excel runtime dependency");
+  assert.match(releaseScript, /const releaseFiles = \["index\.html"\]/, "release archive should contain only the final application artifact");
+  assert.doesNotMatch(releaseScript, /release-manifest\.json/, "single-artifact releases should not add package metadata inside the archive");
+  assert.match(releaseScript, /const checksumPath = `\$\{archivePath\}\.sha256`/, "packaging should create a release checksum path");
+  assert.match(releaseScript, /writeFile\(checksumPath/, "packaging should write the release checksum");
+  assert.equal(packageJson.scripts.package, "npm run build && node scripts/create-release.mjs", "package script should use the release builder");
+  assert.match(ciWorkflow, /npm test/, "CI should run the full test suite");
+  assert.match(ciWorkflow, /git diff --exit-code -- index\.html/, "CI should verify the generated artifact is current");
+  assert.match(ciWorkflow, /gh release create/, "tag releases should publish the verified archive");
 });
 
 test("index.html contains the required application regions", () => {
@@ -97,9 +118,9 @@ test("Excel import defaults to safe low-memory SheetJS options", () => {
   assert.match(html, /function getExcelReadOptions\(\)/, "missing Excel read options helper");
   assert.match(html, /cellStyles:\s*false/, "Excel import should not request styles by default");
   assert.match(html, /cellHTML:\s*false/, "Excel import should not request rich text HTML by default");
-  assert.match(html, /XLSX\.read\(buffer,\s*getExcelReadOptions\(\)\)/, "Excel parser should use guarded read options");
-  assert.doesNotMatch(html, /XLSX\.read\(buffer,\s*\{[^}]*cellStyles:\s*true[^}]*\}/s, "Excel parser should not inline style-heavy options");
-  assert.doesNotMatch(html, /XLSX\.read\(buffer,\s*\{[^}]*cellHTML:\s*true[^}]*\}/s, "Excel parser should not inline HTML-heavy options");
+  assert.match(html, /sheetJs\.read\(message\.buffer,\s*getExcelReadOptions\(\)\)/, "Excel parser should use guarded read options in its Worker");
+  assert.doesNotMatch(html, /sheetJs\.read\(message\.buffer,\s*\{[^}]*cellStyles:\s*true[^}]*\}/s, "Excel parser should not inline style-heavy options");
+  assert.doesNotMatch(html, /sheetJs\.read\(message\.buffer,\s*\{[^}]*cellHTML:\s*true[^}]*\}/s, "Excel parser should not inline HTML-heavy options");
 });
 
 test("Excel import has size and metadata scan guards", () => {
@@ -158,10 +179,10 @@ test("Excel sheet conversion avoids spreading large matrices", () => {
 
 test("Excel import trims inflated blank worksheet ranges before matrix conversion", () => {
   assert.match(html, /function trimExcelSheetRefToContent\(/, "missing Excel worksheet range trim helper");
-  assert.match(html, /trimExcelSheetRefToContent\(sheet,\s*XLSX\)/, "Excel sheets should shrink inflated !ref ranges");
+  assert.match(html, /trimExcelSheetRefToContent\(sheet,\s*sheetJs\)/, "Excel sheets should shrink inflated !ref ranges");
   assert.match(
     html,
-    /trimExcelMatrixToContent\(XLSX\.utils\.sheet_to_json\(sheet,\s*\{\s*header:\s*1,\s*raw:\s*false,\s*defval:\s*""\s*\}\)\)/,
+    /trimExcelMatrixToContent\(sheetJs\.utils\.sheet_to_json\(sheet,\s*\{\s*header:\s*1,\s*raw:\s*false,\s*defval:\s*""\s*\}\)\)/,
     "Excel matrix conversion should trim trailing empty rows and columns",
   );
 });
@@ -493,6 +514,25 @@ test("table rows are stored behind a chunked array facade", () => {
   assert.match(html, /chunks:\s*state\.rowChunks/, "query worker should receive row chunks");
 });
 
+test("large text files use a streamed, disk-backed data worker", () => {
+  assert.match(html, /LARGE_TEXT_FILE_THRESHOLD\s*=\s*24 \* 1024 \* 1024/, "large-file threshold should be explicit");
+  assert.match(html, /LARGE_TEXT_FILE_MAX_BYTES\s*=\s*256 \* 1024 \* 1024/, "large-file capacity should exceed 200 MiB");
+  assert.match(html, /function createLargeDataWorker\(\)/, "missing large data worker factory");
+  assert.match(html, /id="large-data-worker-source"/, "large data worker must be embedded in the single HTML build");
+  assert.match(html, /file\.stream\(\)\.getReader\(\)/, "large data parser should stream the input file");
+  assert.match(html, /navigator\.storage\?\.getDirectory/, "large data path should use OPFS storage");
+  assert.match(html, /function requestLargeRows\(/, "main thread should request paged rows on demand");
+  assert.match(html, /function prefetchLargeRows\(/, "grid should prefetch its viewport rows");
+  assert.match(html, /const row = getDataRow\(rowIndex\)/, "grid should read rows from the bounded cache");
+  assert.match(html, /cancelLoadButton/, "large-file loading should offer cancellation");
+});
+
+test("large data worker script parses", () => {
+  const match = html.match(/<script id="large-data-worker-source" type="text\/plain">([\s\S]*?)<\/script>/);
+  assert.ok(match, "index.html should embed large-data-worker-source");
+  assert.doesNotThrow(() => new Function(match[1]));
+});
+
 test("query worker script parses", () => {
   const match = html.match(/<script id="query-worker-source" type="text\/plain">([\s\S]*?)<\/script>/);
   assert.ok(match, "index.html should embed query-worker-source");
@@ -522,14 +562,17 @@ test("visible cell rendering uses a bounded cache", () => {
   assert.match(html, /appendCachedCellRender\(container,\s*options\.cacheKey,\s*meta\)/, "cell renderer should use cached nodes");
 });
 
-test("Excel parsing can run in a dedicated worker with main-thread fallback", () => {
+test("Excel parsing and export stay inside the dedicated worker", () => {
   assert.match(html, /id="excel-worker-source"/, "missing Excel worker source");
   assert.match(html, /function createExcelWorker\(\)/, "missing Excel worker factory");
   assert.match(html, /function startExcelWorkerParse\(/, "missing Excel worker launcher");
   assert.match(html, /kind:\s*"load-workbook"/, "Excel worker should load workbooks");
   assert.match(html, /kind:\s*"load-sheet"/, "Excel worker should load sheets on demand");
-  assert.match(html, /function parseExcelFileOnMainThread\(/, "missing main-thread Excel fallback");
-  assert.match(html, /Worker 加载失败，改用主线程 Excel 解析/, "SheetJS worker loading failures should fall back");
+  assert.match(html, /kind:\s*"export-xlsx"/, "Excel worker should create XLSX exports");
+  assert.match(html, /function exportXlsxInWorker\(/, "main thread should delegate XLSX export to the worker");
+  assert.doesNotMatch(html, /function parseExcelFileOnMainThread\(/, "SheetJS must not execute on the main thread");
+  assert.doesNotMatch(html, /https:\/\/cdn\.jsdelivr\.net/, "Excel support must not fetch runtime code from a CDN");
+  assert.doesNotMatch(html, /importScripts\(/, "embedded SheetJS must not use runtime script loading");
   assert.match(html, /state\.excelWorker\.terminate\(\)/, "Excel workbook reset should terminate the worker");
 });
 
@@ -541,7 +584,7 @@ test("Excel worker script parses", () => {
 
 test("file loading guards against stale async results", () => {
   const csvStart = html.indexOf("async function parseCsvFile(file)");
-  const csvEnd = html.indexOf("async function ensureSheetJs()", csvStart);
+  const csvEnd = html.indexOf("async function startExcelWorkerParse(file", csvStart);
   const csvSource = html.slice(csvStart, csvEnd);
   const excelStart = html.indexOf("async function parseExcelFile(file)");
   const excelEnd = html.indexOf("async function openFileWithPicker()", excelStart);
@@ -553,7 +596,6 @@ test("file loading guards against stale async results", () => {
   assert.match(csvSource, /const loadToken = beginLoad\(\);/, "CSV parsing should start a guarded load");
   assert.match(csvSource, /if \(!isCurrentLoad\(loadToken\)\) return;/, "CSV async steps should ignore stale work");
   assert.match(excelSource, /const loadToken = beginLoad\(\);/, "Excel parsing should start a guarded load");
-  assert.match(html, /loadExcelSheet\(sheetName,\s*startedAt,\s*loadToken\)/, "main-thread Excel fallback should preserve the active load token");
   assert.match(excelSource, /startExcelWorkerParse\(file,\s*loadToken,\s*startedAt\)/, "Excel parsing should prefer a guarded worker load");
   assert.match(html, /requestExcelWorkerSheet\(sheetName,\s*startedAt,\s*loadToken\)/, "Excel sheet switching should preserve the active load token");
   assert.match(html, /if \(state\.worker\) state\.worker\.terminate\(\);/, "starting a new load should terminate an active CSV worker");
@@ -564,7 +606,7 @@ test("CSV and JSONL imports report file-read and worker startup failures", () =>
   const csvEnd = html.indexOf("async function parseJsonlFile(file)", csvStart);
   const csvSource = html.slice(csvStart, csvEnd);
   const jsonlStart = csvEnd;
-  const jsonlEnd = html.indexOf("async function ensureSheetJs()", jsonlStart);
+  const jsonlEnd = html.indexOf("async function startExcelWorkerParse(file", jsonlStart);
   const jsonlSource = html.slice(jsonlStart, jsonlEnd);
 
   assert.match(csvSource, /try \{[\s\S]*?await file\.arrayBuffer\(\)/, "CSV import should catch file-read failures");
@@ -681,8 +723,8 @@ test("filtered export supports CSV by default and optional XLSX", () => {
   assert.match(html, /<option value="xlsx">XLSX<\/option>/, "XLSX should be available as an export format");
   assert.match(html, /async function exportFilteredXlsx\(/, "missing filtered XLSX export path");
   assert.match(html, /async function exportFilteredTable\(/, "missing export dispatcher");
-  assert.match(html, /XLSX\.utils\.aoa_to_sheet\(matrix\)/, "XLSX export should build a worksheet from visible filtered rows");
-  assert.match(html, /XLSX\.writeFile\(workbook, `\$\{base\}-filtered\$\{suffix\}\.xlsx`\)/, "XLSX export should save an xlsx file");
+  assert.match(html, /sheetJs\.utils\.aoa_to_sheet\(message\.matrix \|\| \[\]\)/, "XLSX worker should build a worksheet from visible filtered rows");
+  assert.match(html, /saveBinaryFile\(/, "XLSX export should save the worker-generated binary");
   assert.match(html, /exportFormatSelect\.value === "xlsx"/, "export dispatcher should branch on the selected format");
   assert.match(html, /exportCsvButton\.addEventListener\("click",\s*exportFilteredTable\)/, "export button should use the selected format");
 });
@@ -913,6 +955,29 @@ test("narrow tables keep natural column width", () => {
   assert.match(html, /getTotalWidth\(\)/, "grid should still use computed total column width");
 });
 
+test("horizontal overscroll and local recovery protect in-progress edits", () => {
+  assert.match(html, /html,\s*body\s*\{[\s\S]*?overscroll-behavior-x:\s*contain/, "the app root should contain horizontal overscroll");
+  assert.match(html, /\.grid-viewport\s*\{[\s\S]*?overscroll-behavior-x:\s*contain/, "the table viewport should contain horizontal overscroll");
+  for (const id of [
+    "recoveryDraftBackdrop",
+    "recoveryDraftSummary",
+    "discardRecoveryDraftButton",
+    "restoreRecoveryDraftButton",
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`), `missing recovery UI #${id}`);
+  }
+  assert.match(html, /function getDatasetRecoveryKey\(/, "recovery drafts should match a stable file identity");
+  assert.match(html, /fileLastModified:\s*file\.lastModified/, "text imports should retain the file timestamp for recovery matching");
+  assert.match(html, /lastModified:\s*workbookFile\.lastModified/, "Excel worker imports should retain the file timestamp for recovery matching");
+  assert.match(html, /sessionStorage\.setItem/, "same-tab recovery should be written synchronously");
+  assert.match(html, /window\.indexedDB\.open/, "recovery drafts should use IndexedDB for larger edit sets");
+  assert.match(html, /window\.addEventListener\("beforeunload", handleBeforeUnload\)/, "unsaved edits should enable a leave-page warning");
+  assert.match(html, /window\.addEventListener\("pagehide", flushRecoveryDraft\)/, "page transitions should flush the recovery draft");
+  assert.match(html, /function confirmDatasetReplacement\(/, "loading another file should confirm replacement when edits exist");
+  assert.match(html, /function restoreRecoveryDraft\(/, "matching local drafts should be restorable");
+  assert.match(html, /scheduleRecoveryDraftSave\(\);\s*return true;/, "cell mutations should schedule recovery persistence");
+});
+
 test("inline application script parses", () => {
   const scripts = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)];
   const applicationScripts = scripts
@@ -932,11 +997,36 @@ test("build script validates all template placeholders", () => {
     "/*__CSV_WORKER__*/",
     "/*__QUERY_WORKER__*/",
     "/*__EXCEL_WORKER__*/",
+    "/*__LARGE_DATA_WORKER__*/",
     "/*__APP_JS__*/",
+    "/*__CSP__*/",
   ]) {
     assert.ok(buildScript.includes(placeholder), `build script should validate ${placeholder}`);
   }
-  assert.match(buildScript, /placeholders\.some/, "build script should fail when any placeholder remains");
+  assert.match(buildScript, /remainingPlaceholders\.length/, "build script should fail when any placeholder remains");
+});
+
+test("Excel dependency is pinned, verified, and constrained by CSP", () => {
+  assert.match(buildScript, /SHEETJS_SHA256\s*=\s*"c9506197caf809a075b6dee1da0d36fb19da7158ffe8a88e7b0c96c5d8623c99"/, "SheetJS hash must be fixed in the build");
+  assert.match(buildScript, /SheetJS integrity check failed/, "build must reject a modified SheetJS asset");
+  assert.match(html, /Content-Security-Policy/, "single-file distribution needs a CSP");
+  assert.match(html, /connect-src 'none'/, "CSP should block outbound connections");
+  assert.match(html, /worker-src blob:/, "CSP should allow only generated Workers");
+  assert.doesNotMatch(html, /cdn\.jsdelivr\.net/, "distribution must not retain a CDN endpoint");
+  const vendor = readFileSync(new URL("../vendor/xlsx.full.min.js", import.meta.url));
+  assert.equal(
+    createHash("sha256").update(vendor).digest("hex"),
+    "c9506197caf809a075b6dee1da0d36fb19da7158ffe8a88e7b0c96c5d8623c99",
+    "vendored SheetJS asset must match the build-time integrity hash",
+  );
+  const appMatch = html.match(/<script>\n([\s\S]*?)\n    <\/script>/);
+  const cspHash = html.match(/script-src 'sha256-([^']+)'/);
+  assert.ok(appMatch && cspHash, "CSP must authorize the generated application script by hash");
+  assert.equal(
+    createHash("sha256").update(`\n${appMatch[1]}\n    `).digest("base64"),
+    cspHash[1],
+    "CSP application hash must match the generated inline script",
+  );
 });
 
 test("build script composes application source fragments in dependency order", () => {

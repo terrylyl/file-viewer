@@ -17,16 +17,6 @@ function assertExcelFileWithinSafeLimit(file) {
   );
 }
 
-function getExcelReadOptions() {
-  return {
-    type: "array",
-    cellDates: false,
-    dense: true,
-    cellStyles: false,
-    cellHTML: false,
-  };
-}
-
 function isXlsxFile(file) {
   return /\.xlsx$/i.test(file?.name || "");
 }
@@ -385,6 +375,37 @@ function downloadText(filename, content, mime = "text/csv;charset=utf-8") {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function downloadBinaryFile(filename, buffer, mime) {
+  const blob = new Blob([buffer], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function saveBinaryFile(filename, buffer, mime) {
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: "Excel workbook", accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(new Blob([buffer], { type: mime }));
+      await writable.close();
+      els.leftStatus.textContent = "已导出 XLSX 文件";
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+    }
+  }
+  downloadBinaryFile(filename, buffer, mime);
 }
 
 async function saveTextFile(filename, content, mime = "text/csv;charset=utf-8") {
