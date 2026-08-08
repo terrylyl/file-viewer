@@ -220,3 +220,95 @@ test("parseJsonlText reports malformed and non-object lines", () => {
     /第 2 行不是 JSON object/,
   );
 });
+
+test("a bracket that is not JSON never swallows the rest of the file", () => {
+  const core = loadWorkerCore();
+
+  for (const input of [
+    "name,note\nalice,[TODO\nbob,ok\ncarol,fine",
+    'name,note\nalice,"[TODO"\nbob,ok\ncarol,fine',
+    "name,note\nalice,{草稿\nbob,ok\ncarol,fine",
+  ]) {
+    const parsed = core.parseCsvText(input, { delimiter: "," });
+    assert.equal(parsed.rows.length, 3, `should keep every row for ${JSON.stringify(input)}`);
+    assert.equal(parsed.rows[1][1], "ok");
+    assert.equal(parsed.rows[2][1], "fine");
+  }
+});
+
+test("an unclosed Markdown fence falls back to plain CSV instead of eating later rows", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("name,note\na,```\nb,ok\nc,fine", { delimiter: "," });
+
+  assert.equal(parsed.rows.length, 3);
+  assert.equal(parsed.rows[0][1], "```");
+  assert.equal(parsed.rows[1][1], "ok");
+  assert.equal(parsed.rows[2][1], "fine");
+});
+
+test("a quoted field ending in a backslash closes at its own quote", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText('path,next\n"C:\\data\\",2024\nb,3', { delimiter: "," });
+
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(parsed.rows[0][0], "C:\\data\\");
+  assert.equal(parsed.rows[0][1], "2024");
+  assert.equal(parsed.rows[1][0], "b");
+});
+
+test("an unquoted trailing backslash does not merge two columns", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("path,next\nC:\\data\\,2024\nb,3", { delimiter: "," });
+
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(parsed.rows[0][0], "C:\\data\\");
+  assert.equal(parsed.rows[0][1], "2024");
+  assert.equal(parsed.issues.inconsistentRows.length, 0);
+});
+
+test("exported CSV survives a round trip through the parser", () => {
+  const core = loadWorkerCore();
+  const rows = [
+    ["id", "value"],
+    ["1", "[draft"],
+    ["2", "C:\\data\\"],
+    ["3", "-5"],
+    ["4", "```"],
+    ["5", "{"],
+    ["6", 'say "hi", ok'],
+    ["7", "line1\nline2"],
+  ];
+  const csv = rows.map((row) => row.map(core.escapeCsv).join(",")).join("\r\n");
+  const parsed = core.parseCsvText(csv, { delimiter: "," });
+
+  assert.equal(parsed.rows.length, rows.length - 1);
+  for (let index = 1; index < rows.length; index += 1) {
+    // 解析结果来自 vm 上下文，数组原型不同，按现有测试惯例用 JSON 比较
+    assert.equal(
+      JSON.stringify(parsed.rows[index - 1]),
+      JSON.stringify(rows[index]),
+      `row ${index} should round trip unchanged`,
+    );
+  }
+});
+
+test("a JSON-looking field that never closes gives up after the tolerance budget", () => {
+  const core = loadWorkerCore();
+  // `[{` 能通过 JSON 前瞻，但永不闭合；超过字符预算后必须回滚，不能吞掉后面所有行
+  const filler = "row,data\n".repeat(150_000);
+  const parsed = core.parseCsvText(`id,note\n1,[{${filler}`, { delimiter: "," });
+
+  assert.ok(parsed.rows.length > 100_000, `expected the later rows back, got ${parsed.rows.length}`);
+  // 回滚后首条记录多切出一列，因此所有行按 maxColumns 补齐，这里只校验实际内容
+  const lastRow = parsed.rows.at(-1);
+  assert.equal(lastRow[0], "row");
+  assert.equal(lastRow[1], "data");
+});
+
+test("detectDelimiter ignores separator-like characters inside a single column", () => {
+  const core = loadWorkerCore();
+
+  assert.equal(core.detectDelimiter("id,tags\n1,a|b|c|d\n2,e|f|g|h\n3,i|j|k|l"), ",");
+  assert.equal(core.detectDelimiter("id,notes\n1,x;y;z\n2,p;q;r\n3,m;n;o"), ",");
+  assert.equal(core.detectDelimiter("id;tags\n1;a|b|c\n2;d|e|f"), ";");
+});

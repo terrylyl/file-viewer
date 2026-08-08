@@ -110,6 +110,10 @@ function updateColumnConditionFilter(columnIndex, options = {}) {
   if (columnIndex < 0) return;
   const type = els.columnConditionOperatorSelect.value;
   const value = columnFilterConditionNeedsValue(type) ? els.columnConditionValueInput.value : "";
+  if (type === "duplicate" && !canRunLargeExpensiveOperation()) {
+    showToast("超大文本文件暂不执行重复值统计，请改用文本或正则条件", { tone: "error" });
+    return;
+  }
   const allValues = getColumnUniqueValues(columnIndex);
   const next = cloneColumnFilter(getColumnFilter(columnIndex)) || { mode: "all", values: new Set() };
   if (type === "duplicate") {
@@ -166,7 +170,8 @@ function renderColumnFilterValues(options = {}) {
   const totalCount = condition ? conditionMatchedValues.length : allValues.length;
   const conditionLabel = duplicateCondition ? "重复值" : getColumnFilterConditionLabel(condition);
   const conditionText = conditionLabel ? `，条件：${conditionLabel}` : "";
-  els.columnFilterSummary.textContent = `已选择 ${selectedCount} / ${totalCount} 个值，当前显示 ${shownValues.length} 个${conditionText}`;
+  const truncatedText = state.columnValueTruncated.has(String(columnIndex)) ? "，长文本或高基数值已省略" : "";
+  els.columnFilterSummary.textContent = `已选择 ${selectedCount} / ${totalCount} 个值，当前显示 ${shownValues.length} 个${conditionText}${truncatedText}`;
 
   if (!shownValues.length) {
     const empty = document.createElement("div");

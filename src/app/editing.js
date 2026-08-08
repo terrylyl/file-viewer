@@ -7,11 +7,11 @@ function getRecoveryDraftChanges() {
   const changes = new Map();
   state.editedCells.forEach((originalValue, key) => {
     const [rowIndex, columnIndex] = key.split(":").map(Number);
-    if (!getDataRow(rowIndex) || !Number.isInteger(columnIndex)) return;
+    if (!hasDataRowIndex(rowIndex) || !Number.isInteger(columnIndex)) return;
     changes.set(key, {
       rowIndex,
       columnIndex,
-      value: String(getDataRow(rowIndex)[columnIndex] ?? ""),
+      value: String(getDataCellValue(rowIndex, columnIndex) ?? ""),
     });
   });
   if (hasPendingCellEditChange()) {
@@ -251,12 +251,12 @@ function selectCell(rowIndex, columnIndex) {
   ensureCellVisible(rowIndex, columnIndex);
   renderGrid();
   renderDetail();
-  prefetchLargeRows([rowIndex]);
+  prefetchLargeCell(rowIndex, columnIndex);
 }
 
 function getSelectedValue() {
   if (!state.selected) return "";
-  return getDataRow(state.selected.rowIndex)?.[state.selected.columnIndex] || "";
+  return getDataCellValue(state.selected.rowIndex, state.selected.columnIndex) ?? "";
 }
 
 function selectionIncludesHeaders(range = state.selectionRange) {
@@ -276,10 +276,14 @@ function buildClipboardHtmlRow(cells, tagName = "td") {
   return `<tr>${cellsHtml}</tr>`;
 }
 
-function getSelectionCopyPayload() {
+async function getSelectionCopyPayload() {
   const endpoints = getSelectionEndpoints();
   if (!endpoints) {
-    const value = getSelectedValue();
+    let value = getSelectedValue();
+    if (state.selected && isLargeDataMode() && getDataCellValue(state.selected.rowIndex, state.selected.columnIndex) === undefined) {
+      const cell = await requestLargeCell(state.selected.rowIndex, state.selected.columnIndex);
+      value = cell?.value || "";
+    }
     return {
       plainText: formatPlainClipboardCell(value),
       html: `<table><tbody>${buildClipboardHtmlRow([value])}</tbody></table>`,
@@ -294,8 +298,15 @@ function getSelectionCopyPayload() {
     plainRows.push(headers.map(formatPlainClipboardCell).join("\t"));
     htmlRows.push(buildClipboardHtmlRow(headers, "th"));
   }
+  const selectedRowIndexes = state.viewIndices.slice(endpoints.startRowPosition, endpoints.endRowPosition + 1);
+  if (isLargeDataMode() && !canRunLargeExpensiveOperation() && selectedRowIndexes.length > LARGE_CLIPBOARD_MAX_ROWS) {
+    throw new Error(`超大文件一次最多复制 ${LARGE_CLIPBOARD_MAX_ROWS} 行；请缩小选区或使用流式 CSV 导出`);
+  }
+  const largeRows = isLargeDataMode() ? await getLargeDataRows(selectedRowIndexes) : null;
   for (let rowPosition = endpoints.startRowPosition; rowPosition <= endpoints.endRowPosition; rowPosition += 1) {
-    const row = getDataRow(state.viewIndices[rowPosition]);
+    const row = largeRows
+      ? largeRows[rowPosition - endpoints.startRowPosition]
+      : getDataRow(state.viewIndices[rowPosition]);
     const cells = columns.map((columnIndex) => row?.[columnIndex] || "");
     plainRows.push(cells.map(formatPlainClipboardCell).join("\t"));
     htmlRows.push(buildClipboardHtmlRow(cells));
@@ -306,8 +317,13 @@ function getSelectionCopyPayload() {
   };
 }
 
-function copySelection() {
-  return copyClipboardPayload(getSelectionCopyPayload());
+async function copySelection() {
+  try {
+    return await copyClipboardPayload(await getSelectionCopyPayload());
+  } catch (error) {
+    els.leftStatus.textContent = `复制失败：${error.message}`;
+    return false;
+  }
 }
 
 function parseClipboardTable(text) {
@@ -495,10 +511,9 @@ function pasteClipboardTextIntoSelection(text) {
   const changes = [];
   for (let rowOffset = 0; rowOffset < writableRowCount; rowOffset += 1) {
     const rowIndex = state.viewIndices[startRowPosition + rowOffset];
-    const row = state.rows[rowIndex];
     for (let columnOffset = 0; columnOffset < pastedColumnCount; columnOffset += 1) {
       const columnIndex = targetColumns[columnOffset];
-      const previousValue = String(row[columnIndex] ?? "");
+      const previousValue = String(getDataCellValue(rowIndex, columnIndex) ?? "");
       const nextValue = String(pastedRows[rowOffset]?.[columnOffset] ?? "");
       const changed = setCellValue(rowIndex, columnIndex, nextValue, {
         recordHistory: false,
@@ -554,17 +569,17 @@ function countOccurrences(text, query, caseSensitive) {
   return count;
 }
 
-function renderTextContent(container, value, query, limit, meta = null) {
+function renderTextContent(container, value, query, limit, meta = null, start = 0) {
   const text = value == null ? "" : String(value);
-  const shown = text.slice(0, limit);
+  const shown = text.slice(start, start + limit);
   renderCellDisplayContent(container, shown, query, meta, {
     allowHtml: Boolean(meta?.html) && shown.length === text.length,
   });
-  if (shown.length < text.length) {
+  if (start > 0 || start + shown.length < text.length) {
     const tail = document.createElement("div");
     tail.style.marginTop = "12px";
     tail.style.color = "var(--muted)";
-    tail.textContent = `已显示 ${shown.length.toLocaleString()} / ${text.length.toLocaleString()} 字符`;
+    tail.textContent = `已显示 ${(start + 1).toLocaleString()}～${(start + shown.length).toLocaleString()} / ${text.length.toLocaleString()} 字符`;
     container.appendChild(tail);
   }
 }
@@ -899,7 +914,7 @@ function isEditingSelectedCell() {
 function hasPendingCellEditChange() {
   const edit = state.cellEdit;
   if (!edit) return false;
-  const currentValue = String(getDataRow(edit.rowIndex)?.[edit.columnIndex] ?? "");
+  const currentValue = String(getDataCellValue(edit.rowIndex, edit.columnIndex) ?? "");
   return String(edit.value ?? "") !== currentValue;
 }
 
@@ -958,6 +973,7 @@ function beginCellEdit() {
     value: getSelectedValue(),
   };
   state.detailVisibleChars = DETAIL_CHUNK;
+  state.detailVisibleStart = 0;
   renderDetail();
 }
 
@@ -971,16 +987,17 @@ function cancelCellEdit() {
 function setCellValue(rowIndex, columnIndex, value, options = {}) {
   if (!Number.isInteger(rowIndex) || !Number.isInteger(columnIndex)) return false;
   const row = getDataRow(rowIndex);
-  if (!row || columnIndex < 0 || columnIndex >= state.headers.length) return false;
+  if ((!row && !isLargeDataMode()) || !hasDataRowIndex(rowIndex) || columnIndex < 0 || columnIndex >= state.headers.length) return false;
   const nextValue = String(value ?? "");
-  const currentValue = String(row[columnIndex] ?? "");
+  const currentValue = String(getDataCellValue(rowIndex, columnIndex) ?? "");
   if (currentValue === nextValue) return false;
   const key = getCellKey(rowIndex, columnIndex);
   const originalValue = state.editedCells.has(key)
     ? getEditedCellOriginalValue(rowIndex, columnIndex)
     : currentValue;
-  if (isLargeDataMode()) row[columnIndex] = nextValue;
+  if (isLargeDataMode() && row) row[columnIndex] = nextValue;
   else state.rows[rowIndex][columnIndex] = nextValue;
+  if (isLargeDataMode()) syncLargePreviewAfterCellChange(rowIndex, columnIndex, nextValue);
   touchCellVersion(rowIndex, columnIndex);
   syncEditedCellTracking(rowIndex, columnIndex, originalValue, nextValue);
   if (state.cellMeta?.size) state.cellMeta.delete(`${rowIndex}:${columnIndex}`);
@@ -1052,7 +1069,7 @@ function saveCellEdit() {
 }
 
 function focusOperationCell(rowIndex, columnIndex) {
-  if (!getDataRow(rowIndex) || columnIndex < 0 || columnIndex >= state.headers.length) return;
+  if (!hasDataRowIndex(rowIndex) || columnIndex < 0 || columnIndex >= state.headers.length) return;
   state.selected = { rowIndex, columnIndex };
   state.detailMode = "cell";
   clearSelectionToSelected();
@@ -1060,7 +1077,7 @@ function focusOperationCell(rowIndex, columnIndex) {
 
 function setManualHighlight(rowIndex, columnIndex, color, options = {}) {
   if (!Number.isInteger(rowIndex) || !Number.isInteger(columnIndex)) return false;
-  if (!getDataRow(rowIndex) || columnIndex < 0 || columnIndex >= state.headers.length) return false;
+  if (!hasDataRowIndex(rowIndex) || columnIndex < 0 || columnIndex >= state.headers.length) return false;
   const nextColor = MANUAL_HIGHLIGHT_COLORS.has(color) ? color : "";
   const key = getCellKey(rowIndex, columnIndex);
   const previousColor = state.manualHighlights.get(key) || "";
@@ -1202,13 +1219,16 @@ function renderDetail() {
     return;
   }
   const selected = state.selected;
-  const value = getSelectedValue();
   const hasSelection = Boolean(selected);
+  const rawValue = selected ? getDataCellValue(selected.rowIndex, selected.columnIndex) : "";
+  const isLoadingLargeCell = Boolean(selected && isLargeDataMode() && rawValue === undefined);
+  const value = rawValue ?? "";
   const isEditing = isEditingSelectedCell();
   renderSelectionToolbar();
   syncEditSummary();
   syncCellEditControls(hasSelection, isEditing);
-  els.loadMoreDetailButton.disabled = !hasSelection || isEditing || value.length <= state.detailVisibleChars;
+  els.loadMoreDetailButton.disabled = !hasSelection || isEditing || state.detailVisibleStart + state.detailVisibleChars >= value.length;
+  els.loadMoreDetailButton.textContent = "下一页";
   els.detailContent.classList.toggle("mono", els.monoInput.checked);
   els.detailContent.classList.toggle("editing", isEditing);
 
@@ -1218,6 +1238,15 @@ function renderDetail() {
     applyCellMetaStyle(els.detailContent, null);
     els.detailContent.textContent = "";
     els.detailStatus.textContent = "未选择单元格";
+    return;
+  }
+
+  if (isLoadingLargeCell) {
+    applyCellMetaStyle(els.detailContent, null);
+    els.detailContent.textContent = "正在读取完整单元格内容…";
+    els.detailStatus.textContent = "读取中";
+    els.loadMoreDetailButton.disabled = true;
+    prefetchLargeCell(selected.rowIndex, selected.columnIndex, { modal: false });
     return;
   }
 
@@ -1249,33 +1278,45 @@ function renderDetail() {
   }
 
   const occurrences = countOccurrences(value, els.detailSearchInput.value, els.caseSensitiveInput.checked);
-  renderTextContent(els.detailContent, value, els.detailSearchInput.value, state.detailVisibleChars, cellMeta);
-  els.detailStatus.textContent = `${Math.min(value.length, state.detailVisibleChars).toLocaleString()} / ${value.length.toLocaleString()} 字符 · 命中 ${occurrences.toLocaleString()}`;
+  renderTextContent(els.detailContent, value, els.detailSearchInput.value, state.detailVisibleChars, cellMeta, state.detailVisibleStart);
+  const detailEnd = Math.min(value.length, state.detailVisibleStart + state.detailVisibleChars);
+  els.detailStatus.textContent = `${(value.length ? state.detailVisibleStart + 1 : 0).toLocaleString()}～${detailEnd.toLocaleString()} / ${value.length.toLocaleString()} 字符 · 命中 ${occurrences.toLocaleString()}`;
   els.leftStatus.textContent = `选中 R${selected.rowIndex + 2}C${selected.columnIndex + 1}`;
 }
 
 function renderModal() {
   const cell = state.modalCell;
   if (!cell) return;
-  const value = getDataRow(cell.rowIndex)?.[cell.columnIndex] || "";
+  const rawValue = getDataCellValue(cell.rowIndex, cell.columnIndex);
+  if (isLargeDataMode() && rawValue === undefined) {
+    els.modalContent.textContent = "正在读取完整单元格内容…";
+    els.modalStatus.textContent = "读取中";
+    els.loadMoreModalButton.disabled = true;
+    prefetchLargeCell(cell.rowIndex, cell.columnIndex, { detail: false, modal: true });
+    return;
+  }
+  const value = rawValue ?? "";
   const cellMeta = getCellMeta(cell.rowIndex, cell.columnIndex);
-  const shown = String(value).slice(0, state.modalVisibleChars);
+  const shown = String(value).slice(state.modalVisibleStart, state.modalVisibleStart + state.modalVisibleChars);
   const format = resolveModalFormat(shown, cellMeta);
   els.modalContent.classList.toggle("mono", els.modalMonoInput.checked);
   els.modalTitle.textContent = `R${cell.rowIndex + 2}C${cell.columnIndex + 1} · ${state.headers[cell.columnIndex] || ""}`;
-  renderTextContent(els.modalContent, value, els.modalSearchInput.value, state.modalVisibleChars, cellMeta);
+  renderTextContent(els.modalContent, value, els.modalSearchInput.value, state.modalVisibleChars, cellMeta, state.modalVisibleStart);
   renderModalParsedContent(shown, format, cellMeta);
   const occurrences = countOccurrences(value, els.modalSearchInput.value, els.caseSensitiveInput.checked);
   els.modalDetectedFormat.textContent = els.modalFormatSelect.value === "auto"
     ? `自动：${MODAL_FORMAT_LABELS[format] || "纯文本"}`
     : MODAL_FORMAT_LABELS[format] || "纯文本";
-  els.modalStatus.textContent = `${Math.min(value.length, state.modalVisibleChars).toLocaleString()} / ${value.length.toLocaleString()} 字符 · 命中 ${occurrences.toLocaleString()}`;
-  els.loadMoreModalButton.disabled = value.length <= state.modalVisibleChars;
+  const modalEnd = Math.min(value.length, state.modalVisibleStart + state.modalVisibleChars);
+  els.modalStatus.textContent = `${(value.length ? state.modalVisibleStart + 1 : 0).toLocaleString()}～${modalEnd.toLocaleString()} / ${value.length.toLocaleString()} 字符 · 命中 ${occurrences.toLocaleString()}`;
+  els.loadMoreModalButton.disabled = state.modalVisibleStart + state.modalVisibleChars >= value.length;
+  els.loadMoreModalButton.textContent = "下一页";
 }
 
 function openModalForCell(rowIndex, columnIndex) {
   state.modalCell = { rowIndex, columnIndex };
   state.modalVisibleChars = MODAL_CHUNK;
+  state.modalVisibleStart = 0;
   els.modalSearchInput.value = els.detailSearchInput.value;
   els.modalFormatSelect.value = "auto";
   state.modalSuppressBackdropClickUntil = 0;
@@ -1283,7 +1324,7 @@ function openModalForCell(rowIndex, columnIndex) {
   els.modalBackdrop.querySelector(".modal").style.removeProperty("--modal-width");
   els.modalBackdrop.querySelector(".modal").style.removeProperty("--modal-height");
   renderModal();
-  prefetchLargeRows([rowIndex], { detail: false, modal: true });
+  prefetchLargeCell(rowIndex, columnIndex, { detail: false, modal: true });
   openManagedDialog(els.modalBackdrop, els.modalSearchInput);
 }
 

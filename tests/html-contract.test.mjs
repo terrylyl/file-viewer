@@ -10,8 +10,8 @@ const releaseScript = readFileSync(new URL("../scripts/create-release.mjs", impo
 const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const sbom = JSON.parse(readFileSync(new URL("../sbom.cdx.json", import.meta.url), "utf8"));
 
-test("app package version is 2.3.5", () => {
-  assert.equal(packageJson.version, "2.3.5");
+test("app package version is 2.3.7", () => {
+  assert.equal(packageJson.version, "2.3.7");
 });
 
 test("release governance artifacts stay aligned with the baseline", () => {
@@ -514,17 +514,24 @@ test("table rows are stored behind a chunked array facade", () => {
   assert.match(html, /chunks:\s*state\.rowChunks/, "query worker should receive row chunks");
 });
 
-test("large text files use a streamed, disk-backed data worker", () => {
+test("large text files use a streamed offset index over the original File", () => {
   assert.match(html, /LARGE_TEXT_FILE_THRESHOLD\s*=\s*24 \* 1024 \* 1024/, "large-file threshold should be explicit");
-  assert.match(html, /LARGE_TEXT_FILE_MAX_BYTES\s*=\s*256 \* 1024 \* 1024/, "large-file capacity should exceed 200 MiB");
+  assert.match(html, /LARGE_TEXT_FILE_MAX_BYTES\s*=\s*500 \* 1024 \* 1024/, "large-file capacity should be 500 MiB");
   assert.match(html, /function createLargeDataWorker\(\)/, "missing large data worker factory");
   assert.match(html, /id="large-data-worker-source"/, "large data worker must be embedded in the single HTML build");
   assert.match(html, /file\.stream\(\)\.getReader\(\)/, "large data parser should stream the input file");
-  assert.match(html, /navigator\.storage\?\.getDirectory/, "large data path should use OPFS storage");
+  assert.match(html, /rowCellOffsets\s*=\s*new Uint32Array/, "large data path should keep compact row/cell offsets");
+  assert.match(html, /sourceFile\.slice\(start, end\)\.arrayBuffer\(\)/, "large data path should read exact ranges from the original File");
+  assert.doesNotMatch(html, /navigator\.storage\?\.getDirectory/, "large data path should not require OPFS");
+  assert.match(html, /function requestLargePreviews\(/, "main thread should request bounded row previews");
+  assert.match(html, /function requestLargeCell\(/, "main thread should request a full cell only on demand");
   assert.match(html, /function requestLargeRows\(/, "main thread should request paged rows on demand");
-  assert.match(html, /function prefetchLargeRows\(/, "grid should prefetch its viewport rows");
-  assert.match(html, /const row = getDataRow\(rowIndex\)/, "grid should read rows from the bounded cache");
+  assert.match(html, /LARGE_PREVIEW_CACHE_MAX_BYTES\s*=\s*32 \* 1024 \* 1024/, "preview cache should have a byte limit");
+  assert.match(html, /LARGE_CELL_CACHE_MAX_BYTES\s*=\s*64 \* 1024 \* 1024/, "full-cell cache should have a byte limit");
+  assert.match(html, /const row = getDisplayRow\(rowIndex\)/, "grid should render bounded previews instead of complete rows");
   assert.match(html, /cancelLoadButton/, "large-file loading should offer cancellation");
+  assert.match(html, /LARGE_LOAD_STALL_NOTICE_MS\s*=\s*15000/, "large-file loading should have a progress watchdog");
+  assert.match(html, /LARGE_LOAD_STALL_FAILURE_MS\s*=\s*45000/, "a silent large-file worker should eventually fail instead of hanging forever");
 });
 
 test("large data worker script parses", () => {
@@ -700,6 +707,9 @@ test("filtered CSV export avoids building one giant joined string", () => {
   const source = html.slice(start, end);
   assert.match(source, /const parts = \[/, "CSV export should collect blob parts");
   assert.match(source, /parts\.push\(chunk\.join\(""\)\)/, "CSV export should flush row chunks");
+  assert.match(source, /openTextFileWritable\(filename\)/, "large CSV export should open a streaming file writer");
+  assert.match(source, /target\.writable\.write\(line\)/, "large CSV export should write each decoded row incrementally");
+  assert.match(html, /LARGE_EXPORT_BATCH_ROWS\s*=\s*10/, "large CSV export should request small row batches");
   assert.doesNotMatch(source, /lines\.join\("\\r\\n"\)/, "filtered CSV export should not join every row into one huge string");
 });
 
@@ -793,7 +803,7 @@ test("selection copy preserves spreadsheet cell boundaries and optional headers"
   assert.match(html, /<table><tbody>\$\{htmlRows\.join\(""\)\}<\/tbody><\/table>/, "selection copy should provide an HTML table");
   assert.match(html, /new ClipboardItem\(\{[\s\S]*?"text\/html":\s*new Blob/, "clipboard write should include text/html");
   assert.match(html, /"text\/plain":\s*new Blob/, "clipboard write should include text/plain fallback");
-  assert.match(html, /copyClipboardPayload\(getSelectionCopyPayload\(\)\)/, "selection copy should use the structured clipboard payload");
+  assert.match(html, /copyClipboardPayload\(await getSelectionCopyPayload\(\)\)/, "selection copy should await the structured clipboard payload");
 });
 
 test("context menu closes when focus moves away", () => {

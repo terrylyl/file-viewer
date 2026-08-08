@@ -2,7 +2,7 @@
 
 ## Supported version
 
-Security fixes are applied to the latest baseline release only. The current supported baseline is `2.3.5`.
+Security fixes are applied to the latest baseline release only. The current supported baseline is `2.3.7`.
 
 ## Reporting a vulnerability
 

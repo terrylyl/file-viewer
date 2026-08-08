@@ -49,12 +49,14 @@ function getColumnUniqueValues(columnIndex) {
 function invalidateColumnValueCache(columnIndex = null) {
   if (columnIndex == null) {
     state.columnValueCache.clear();
+    state.columnValueTruncated.clear();
     state.columnValuePending.clear();
     state.columnValueTokens.clear();
     return;
   }
   const cacheKey = String(columnIndex);
   state.columnValueCache.delete(cacheKey);
+  state.columnValueTruncated.delete(cacheKey);
   state.columnValuePending.delete(cacheKey);
   state.columnValueTokens.delete(cacheKey);
 }
@@ -86,7 +88,7 @@ function computeColumnUniqueValuesSync(columnIndex) {
 function shouldUseAsyncColumnUniqueValues(columnIndex) {
   return (
     Number.isInteger(columnIndex) &&
-    state.rows.length >= COLUMN_UNIQUE_WORKER_THRESHOLD &&
+    (isLargeDataMode() || state.rows.length >= COLUMN_UNIQUE_WORKER_THRESHOLD) &&
     canUseQueryWorker()
   );
 }
@@ -328,6 +330,8 @@ function rowPassesHiddenRows(rowIndex) {
 }
 
 function rebuildVisibleRowPositionMap() {
+  // 大文件模式不能给几百万行都建 Map，改为在 getVisibleRowPosition 里按需记忆少量查询结果。
+  state.largeRowPositionMemo = new Map();
   if (isLargeDataMode()) {
     state.rowPositionMap = new Map();
     return;

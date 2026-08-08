@@ -1,3 +1,5 @@
+const LARGE_EXPORT_BATCH_ROWS = 10;
+
 function getExportSplitCount() {
   const value = Math.floor(Number(els.exportSplitCountInput.value));
   const splitCount = Number.isFinite(value) && value > 0 ? value : 1;
@@ -166,19 +168,38 @@ function getFilteredExportRowGroups() {
 async function exportFilteredCsv(rowIndexes = state.viewIndices, suffix = "") {
   if (!state.rows.length) return;
   const visibleColumns = getVisibleColumnIndexes();
-  const parts = [visibleColumns.map((col) => escapeCsv(state.headers[col])).join(",")];
+  const header = visibleColumns.map((col) => escapeCsv(state.headers[col])).join(",");
   if (isLargeDataMode()) {
     const indexes = Array.from(rowIndexes);
-    for (let start = 0; start < indexes.length; start += 500) {
-      const rows = await getLargeDataRows(indexes.slice(start, start + 500));
-      parts.push(rows.map((row) => `\r\n${visibleColumns.map((col) => escapeCsv(row?.[col] || "")).join(",")}`).join(""));
-      setProgress(Math.min(0.98, (start + rows.length) / Math.max(1, indexes.length)), `导出 CSV · ${Math.min(start + rows.length, indexes.length).toLocaleString()} / ${indexes.length.toLocaleString()} 行`);
-    }
     const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
-    await saveTextFile(`${base}-filtered${suffix}.csv`, parts);
-    setProgress(1, "CSV 导出完成");
-    return;
+    const filename = `${base}-filtered${suffix}.csv`;
+    const target = await openTextFileWritable(filename);
+    if (target.cancelled) return false;
+    if (!target.writable && Number(state.file?.size || 0) > LARGE_EXPENSIVE_OPERATION_MAX_BYTES) {
+      throw new Error("当前浏览器不支持流式保存；为避免内存溢出，超过 128 MiB 的大文件不能回退为内存导出。请使用支持文件保存选择器的 Chromium 浏览器。");
+    }
+    const parts = target.writable ? null : [header];
+    try {
+      if (target.writable) await target.writable.write(`\ufeff${header}`);
+      for (let start = 0; start < indexes.length; start += LARGE_EXPORT_BATCH_ROWS) {
+        const rows = await getLargeDataRows(indexes.slice(start, start + LARGE_EXPORT_BATCH_ROWS));
+        for (const row of rows) {
+          const line = `\r\n${visibleColumns.map((col) => escapeCsv(row?.[col] ?? "")).join(",")}`;
+          if (target.writable) await target.writable.write(line);
+          else parts.push(line);
+        }
+        setProgress(Math.min(0.98, (start + rows.length) / Math.max(1, indexes.length)), `导出 CSV · ${Math.min(start + rows.length, indexes.length).toLocaleString()} / ${indexes.length.toLocaleString()} 行`);
+      }
+      if (target.writable) await target.writable.close();
+      else await saveTextFile(filename, parts);
+      setProgress(1, "CSV 导出完成");
+      return true;
+    } catch (error) {
+      if (target.writable?.abort) await target.writable.abort().catch(() => {});
+      throw error;
+    }
   }
+  const parts = [header];
   let chunk = [];
   for (const rowIndex of rowIndexes) {
     const row = state.rows[rowIndex];
@@ -191,6 +212,7 @@ async function exportFilteredCsv(rowIndexes = state.viewIndices, suffix = "") {
   if (chunk.length) parts.push(chunk.join(""));
   const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
   await saveTextFile(`${base}-filtered${suffix}.csv`, parts);
+  return true;
 }
 
 function getFilteredExportMatrix(rowIndexes = state.viewIndices) {
@@ -205,6 +227,9 @@ function getFilteredExportMatrix(rowIndexes = state.viewIndices) {
 
 async function exportFilteredXlsx(rowIndexes = state.viewIndices, suffix = "") {
   if (!state.rows.length) return;
+  if (isLargeDataMode() && !canRunLargeExpensiveOperation()) {
+    throw new Error("大文件暂不支持 XLSX 导出；XLSX 必须在内存中构建完整工作簿，请改用流式 CSV 导出。");
+  }
   let matrix;
   if (isLargeDataMode()) {
     const visibleColumns = getVisibleColumnIndexes();
@@ -260,7 +285,8 @@ async function exportFilteredTable() {
       if (els.exportFormatSelect.value === "xlsx") {
         await exportFilteredXlsx(rowGroups[partIndex], suffix);
       } else {
-        await exportFilteredCsv(rowGroups[partIndex], suffix);
+        const exported = await exportFilteredCsv(rowGroups[partIndex], suffix);
+        if (exported === false) return;
       }
     }
     const message = rowGroups.length > 1

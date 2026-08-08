@@ -1,14 +1,48 @@
+const CSV_NUMERIC_PATTERN = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+
 function escapeSpreadsheetFormula(value) {
   const text = value == null ? "" : String(value);
-  return /^[=+\-@]/.test(text.trimStart()) ? `'${text}` : text;
+  const leading = text.trimStart();
+  if (!/^[=+\-@]/.test(leading)) return text;
+  // 纯数值不是公式：给 -5 / +1.5e3 加前缀会把数字列变成文本列。
+  if (CSV_NUMERIC_PATTERN.test(leading)) return text;
+  return `'${text}`;
+}
+
+// 解析器对未加引号的 JSON、反斜杠转义和 Markdown 围栏是宽容的，
+// 因此导出时这些触发字符也必须加引号，否则自己导出的文件自己读不回来。
+function needsCsvQuoting(text) {
+  if (/[",\r\n\t;\\`]/.test(text)) return true;
+  return /^\s*[{[]/.test(text);
 }
 
 function escapeCsv(value) {
   const text = escapeSpreadsheetFormula(value);
-  if (/[",\r\n\t;]/.test(text)) {
+  if (needsCsvQuoting(text)) {
     return `"${text.replaceAll('"', '""')}"`;
   }
   return text;
+}
+
+// 宽容解析（未加引号的 JSON、Markdown 围栏）一旦不闭合就会吞掉后面所有内容。
+// 超过这个字符预算就判定为误判，回滚到字段开头按标准 CSV 重新解析。
+const CSV_TOLERANCE_MAX_CHARS = 1024 * 1024;
+
+// `{` / `[` 只有后面真的跟着 JSON 才进入结构化模式，
+// 避免 `[TODO`、`{草稿` 这类普通文本吞掉整个文件。
+function isJsonStructureLead(open, next) {
+  if (open === "{") return next === '"' || next === "}";
+  return (
+    next === '"' ||
+    next === "{" ||
+    next === "[" ||
+    next === "]" ||
+    next === "-" ||
+    next === "t" ||
+    next === "f" ||
+    next === "n" ||
+    (next >= "0" && next <= "9")
+  );
 }
 
 function createCsvRecordParser(delimiter = ",") {
@@ -18,13 +52,61 @@ function createCsvRecordParser(delimiter = ",") {
   let inQuotes = false;
   let pendingQuote = false;
   let pendingBackslash = false;
+  let pendingEscapedQuote = false;
   let skipLineFeed = false;
   let codeFence = false;
   let backtickRun = 0;
   let structureStack = [];
   let structureInString = false;
   let structureEscaped = false;
+  let structurePendingOpen = "";
+  let structurePendingQuote = false;
+  let specMode = "";
+  let specBuffer = "";
+  let specField = "";
+  let specRecordLength = 0;
+  let specStarted = false;
+  let specInQuotes = false;
+  let toleranceDisabled = false;
   let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false };
+
+  // 进入推测性解析前记录现场，预算用尽或到达文件末尾仍未闭合时可以回滚重放。
+  const beginSpeculation = (mode, entryChar) => {
+    specMode = mode;
+    specBuffer = entryChar;
+    specField = field;
+    specRecordLength = record.length;
+    specStarted = started;
+    specInQuotes = inQuotes;
+  };
+
+  const endSpeculation = () => {
+    specMode = "";
+    specBuffer = "";
+  };
+
+  const rollbackSpeculation = (records) => {
+    const replay = specBuffer;
+    field = specField;
+    started = specStarted;
+    inQuotes = specInQuotes;
+    record.length = specRecordLength;
+    endSpeculation();
+    structurePendingOpen = "";
+    structurePendingQuote = false;
+    structureStack = [];
+    structureInString = false;
+    structureEscaped = false;
+    codeFence = false;
+    backtickRun = 0;
+    pendingQuote = false;
+    pendingBackslash = false;
+    pendingEscapedQuote = false;
+    toleranceDisabled = true;
+    // 走 feed 而不是 processCharacter：重放过程中如果又开启了一次推测性解析，
+    // 它的缓冲区也必须被填上，否则嵌套回滚会重放一段不完整的文本。
+    for (const ch of replay) feed(ch, records);
+  };
 
   const emitRecord = (records) => {
     record.push(field);
@@ -35,12 +117,16 @@ function createCsvRecordParser(delimiter = ",") {
     inQuotes = false;
     pendingQuote = false;
     pendingBackslash = false;
+    pendingEscapedQuote = false;
     skipLineFeed = false;
     codeFence = false;
     backtickRun = 0;
     structureStack = [];
     structureInString = false;
     structureEscaped = false;
+    structurePendingOpen = "";
+    toleranceDisabled = false;
+    endSpeculation();
   };
 
   const appendStructuredCharacter = (ch) => {
@@ -66,19 +152,23 @@ function createCsvRecordParser(delimiter = ",") {
     const open = structureStack.at(-1);
     if ((ch === "}" && open === "{") || (ch === "]" && open === "[")) {
       structureStack.pop();
+      if (!structureStack.length) endSpeculation();
       return;
     }
     if (ch === "}" || ch === "]") {
       structureStack = [];
       structureInString = false;
       structureEscaped = false;
+      endSpeculation();
     }
   };
 
-  const startStructuredField = (ch) => {
-    structureStack = [ch];
-    structureInString = false;
-    structureEscaped = false;
+  // 先只记下开括号，等下一个字符确认像 JSON 再真正进入结构化模式。
+  const startPendingStructure = (ch) => {
+    if (!toleranceDisabled) {
+      beginSpeculation("structure", ch);
+      structurePendingOpen = ch;
+    }
     field += ch;
     started = true;
   };
@@ -89,8 +179,73 @@ function createCsvRecordParser(delimiter = ",") {
       if (ch === "\n") return;
     }
 
+    if (structurePendingQuote) {
+      structurePendingQuote = false;
+      const open = structurePendingOpen;
+      structurePendingOpen = "";
+      if (ch === delimiter || ch === "\n" || ch === "\r") {
+        // 那个引号是这个字段的收尾引号，开括号只是普通内容，例如导出的 "{"
+        endSpeculation();
+        inQuotes = false;
+        processCharacter(ch, records);
+        return;
+      }
+      // 引号后面还有内容，说明是没做双写转义的 JSON 串，按结构化字段处理
+      structureStack = [open];
+      structureInString = false;
+      structureEscaped = false;
+      processCharacter('"', records);
+      processCharacter(ch, records);
+      return;
+    }
+
+    if (structurePendingOpen) {
+      if (ch === " " || ch === "\t") {
+        field += ch;
+        started = true;
+        return;
+      }
+      // 引号内的 `"` 有歧义：可能是 JSON 串的开头，也可能是本字段的收尾引号，再看一个字符
+      if (inQuotes && ch === '"') {
+        structurePendingQuote = true;
+        return;
+      }
+      const open = structurePendingOpen;
+      structurePendingOpen = "";
+      if (isJsonStructureLead(open, ch)) {
+        structureStack = [open];
+        structureInString = false;
+        structureEscaped = false;
+      } else {
+        endSpeculation();
+      }
+      processCharacter(ch, records);
+      return;
+    }
+
+    if (pendingEscapedQuote) {
+      pendingEscapedQuote = false;
+      if (ch === delimiter || ch === "\n" || ch === "\r") {
+        // 反斜杠属于字段内容，那个引号是收尾引号，例如 "C:\dir\",next
+        field += "\\";
+        started = true;
+        inQuotes = false;
+        processCharacter(ch, records);
+        return;
+      }
+      field += '\\"';
+      started = true;
+      processCharacter(ch, records);
+      return;
+    }
+
     if (pendingBackslash) {
       pendingBackslash = false;
+      if (ch === '"' && inQuotes) {
+        // 可能是转义引号，也可能是以反斜杠结尾的字段的收尾引号，再看一个字符才能定
+        pendingEscapedQuote = true;
+        return;
+      }
       if (ch === '"' || ch === delimiter || ch === "\\") {
         field += `\\${ch}`;
         started = true;
@@ -140,7 +295,7 @@ function createCsvRecordParser(delimiter = ",") {
         return;
       }
       if ((ch === "{" || ch === "[") && !field.trim()) {
-        startStructuredField(ch);
+        startPendingStructure(ch);
         return;
       }
       field += ch;
@@ -156,6 +311,7 @@ function createCsvRecordParser(delimiter = ",") {
         if (backtickRun === 3) {
           codeFence = false;
           backtickRun = 0;
+          endSpeculation();
         }
       } else {
         backtickRun = 0;
@@ -180,7 +336,8 @@ function createCsvRecordParser(delimiter = ",") {
       return;
     }
 
-    if (ch === "`" && /^`{0,2}$/.test(field.trim())) {
+    if (ch === "`" && !toleranceDisabled && /^`{0,2}$/.test(field.trim())) {
+      if (!backtickRun) beginSpeculation("fence", ch);
       field += ch;
       started = true;
       backtickRun += 1;
@@ -190,10 +347,13 @@ function createCsvRecordParser(delimiter = ",") {
       }
       return;
     }
-    backtickRun = 0;
+    if (backtickRun) {
+      backtickRun = 0;
+      if (specMode === "fence") endSpeculation();
+    }
 
     if ((ch === "{" || ch === "[") && !field.trim()) {
-      startStructuredField(ch);
+      startPendingStructure(ch);
       return;
     }
 
@@ -201,6 +361,8 @@ function createCsvRecordParser(delimiter = ",") {
       record.push(field);
       field = "";
       started = true;
+      toleranceDisabled = false;
+      endSpeculation();
       return;
     }
 
@@ -214,19 +376,47 @@ function createCsvRecordParser(delimiter = ",") {
     started = true;
   };
 
+  const feed = (ch, records) => {
+    if (specMode) {
+      specBuffer += ch;
+      if (specBuffer.length > CSV_TOLERANCE_MAX_CHARS) {
+        // 缓冲区里已经包含这个字符，回滚时会一起重放
+        rollbackSpeculation(records);
+        return;
+      }
+    }
+    processCharacter(ch, records);
+  };
+
   return {
     push(text) {
       const records = [];
-      for (const ch of String(text == null ? "" : text)) processCharacter(ch, records);
+      for (const ch of String(text == null ? "" : text)) feed(ch, records);
       return records;
     },
     finish() {
       const records = [];
+      // 围栏一直到文件结束都没闭合，几乎一定是把单元格里的 ``` 当成了代码块。
+      // 未闭合的 JSON 括号则保留原样，由导入警告提示用户源文件被截断。
+      if (specMode === "fence" && codeFence) rollbackSpeculation(records);
+      if (structurePendingQuote) {
+        // 文件在开括号后的引号处结束，那个引号是收尾引号
+        structurePendingQuote = false;
+        structurePendingOpen = "";
+        inQuotes = false;
+        endSpeculation();
+      }
       diagnostics = {
-        unclosedQuotedField: inQuotes && !pendingQuote,
+        unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
         unclosedStructuredField: structureStack.length > 0,
         unclosedCodeFence: codeFence,
       };
+      if (pendingEscapedQuote) {
+        field += "\\";
+        started = true;
+        inQuotes = false;
+        pendingEscapedQuote = false;
+      }
       if (pendingBackslash) {
         field += "\\";
         pendingBackslash = false;
@@ -258,21 +448,28 @@ function detectCsvDelimiter(text) {
   let best = ",";
   let bestScore = -Infinity;
 
-  for (const delimiter of candidates) {
+  candidates.forEach((delimiter, priority) => {
     const parser = createCsvRecordParser(delimiter);
     const records = parser.push(sample).filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
     const counts = records.map((record) => Math.max(0, record.length - 1));
     const nonZero = counts.filter((count) => count > 0);
-    if (!nonZero.length) continue;
+    if (!nonZero.length) return;
     const average = nonZero.reduce((sum, count) => sum + count, 0) / nonZero.length;
     const variance = nonZero.reduce((sum, count) => sum + Math.abs(count - average), 0) / nonZero.length;
     const consistency = nonZero.length / Math.max(1, records.length);
-    const score = average * 4 + consistency * 8 - variance * 3;
+    // 真正的分隔符会让数据行的列数稳定复现表头列数；
+    // 只是恰好出现在某个单元格里的字符（tags 列的 a|b|c）做不到这一点。
+    const headerColumns = records[0] ? records[0].length : 0;
+    const dataRecords = records.slice(1);
+    const headerMatch = dataRecords.length
+      ? dataRecords.filter((record) => record.length === headerColumns).length / dataRecords.length
+      : 1;
+    const score = average * 4 + consistency * 8 + headerMatch * 12 - variance * 3 - priority * 0.5;
     if (score > bestScore) {
       best = delimiter;
       bestScore = score;
     }
-  }
+  });
 
   return best;
 }

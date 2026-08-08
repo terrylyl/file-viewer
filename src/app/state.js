@@ -5,7 +5,14 @@ const EXCEL_SAFE_READ_MAX_BYTES = 80 * 1024 * 1024;
 const EXCEL_SHARED_STRINGS_MAX_BYTES = 120 * 1024 * 1024;
 const EXCEL_CELL_META_SCAN_MAX_CELLS = 200000;
 const LARGE_TEXT_FILE_THRESHOLD = 24 * 1024 * 1024;
-const LARGE_TEXT_FILE_MAX_BYTES = 256 * 1024 * 1024;
+const LARGE_TEXT_FILE_MAX_BYTES = 500 * 1024 * 1024;
+const LARGE_PREVIEW_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const LARGE_CELL_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const LARGE_FULL_ROW_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const LARGE_EXPENSIVE_OPERATION_MAX_BYTES = 128 * 1024 * 1024;
+const LARGE_LOAD_STALL_NOTICE_MS = 15000;
+const LARGE_LOAD_STALL_FAILURE_MS = 45000;
+const LARGE_CLIPBOARD_MAX_ROWS = 20;
 const ROW_HEIGHT = 34;
 const WRAP_ROW_HEIGHT = 180;
 const HEADER_HEIGHT = 38;
@@ -235,6 +242,7 @@ const state = {
   sourceFileHandle: null,
   viewIndices: [],
   rowPositionMap: new Map(),
+  largeRowPositionMemo: new Map(),
   matchedRows: new Set(),
   visibleColumns: [],
   columnOrder: [],
@@ -243,6 +251,7 @@ const state = {
   duplicateFilters: new Set(),
   rowWindow: { mode: "all" },
   columnValueCache: new Map(),
+  columnValueTruncated: new Set(),
   columnValuePending: new Set(),
   columnValueTokens: new Map(),
   columnValueTokenCounter: 0,
@@ -276,12 +285,15 @@ const state = {
   selectionRange: null,
   selectionDrag: null,
   detailVisibleChars: DETAIL_CHUNK,
+  detailVisibleStart: 0,
   modalVisibleChars: MODAL_CHUNK,
+  modalVisibleStart: 0,
   modalCell: null,
   modalSplitResize: null,
   modalResize: null,
   modalSuppressBackdropClickUntil: 0,
   worker: null,
+  largeLoadWatchdog: 0,
   largeDataWorker: null,
   largeData: null,
   excelWorker: null,
@@ -440,23 +452,174 @@ function getDataRow(rowIndex) {
   return isLargeDataMode() ? state.largeData.rowCache.get(rowIndex) : state.rows[rowIndex];
 }
 
-function requestLargeRows(rowIndices) {
+function hasDataRowIndex(rowIndex) {
+  return Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < state.rows.length;
+}
+
+function estimateLargeTextBytes(value) {
+  return String(value == null ? "" : value).length * 2 + 16;
+}
+
+function estimateLargeRowBytes(row) {
+  return (row || []).reduce((sum, value) => sum + estimateLargeTextBytes(value), 32);
+}
+
+function setLargeWeightedCacheEntry(cache, key, value, bytes, sizeKey, maxBytes) {
+  const existing = cache.get(key);
+  if (existing) state.largeData[sizeKey] -= existing.bytes;
+  cache.delete(key);
+  cache.set(key, { ...value, bytes });
+  state.largeData[sizeKey] += bytes;
+  while (state.largeData[sizeKey] > maxBytes && cache.size > 1) {
+    const oldestKey = cache.keys().next().value;
+    const oldest = cache.get(oldestKey);
+    cache.delete(oldestKey);
+    state.largeData[sizeKey] -= oldest?.bytes || 0;
+  }
+}
+
+function cacheLargePreview(entry) {
+  const bytes = estimateLargeRowBytes(entry.row) + (entry.lengths?.length || 0) * 8;
+  setLargeWeightedCacheEntry(
+    state.largeData.previewCache,
+    entry.rowIndex,
+    { row: entry.row, lengths: entry.lengths || [] },
+    bytes,
+    "previewCacheBytes",
+    LARGE_PREVIEW_CACHE_MAX_BYTES,
+  );
+}
+
+function cacheLargeCell(cell) {
+  const key = getCellKey(cell.rowIndex, cell.columnIndex);
+  setLargeWeightedCacheEntry(
+    state.largeData.cellCache,
+    key,
+    { value: String(cell.value ?? "") },
+    estimateLargeTextBytes(cell.value),
+    "cellCacheBytes",
+    LARGE_CELL_CACHE_MAX_BYTES,
+  );
+}
+
+function cacheLargeFullRow(rowIndex, row) {
+  const bytes = estimateLargeRowBytes(row);
+  const existing = state.largeData.rowCache.get(rowIndex);
+  if (existing) state.largeData.rowCacheBytes -= estimateLargeRowBytes(existing);
+  state.largeData.rowCache.delete(rowIndex);
+  state.largeData.rowCache.set(rowIndex, row);
+  state.largeData.rowCacheBytes += bytes;
+  while (state.largeData.rowCacheBytes > LARGE_FULL_ROW_CACHE_MAX_BYTES && state.largeData.rowCache.size > 1) {
+    const oldestKey = state.largeData.rowCache.keys().next().value;
+    const oldest = state.largeData.rowCache.get(oldestKey);
+    state.largeData.rowCache.delete(oldestKey);
+    state.largeData.rowCacheBytes -= estimateLargeRowBytes(oldest);
+  }
+}
+
+function getDisplayRow(rowIndex) {
+  if (!isLargeDataMode()) return getDataRow(rowIndex);
+  const fullRow = state.largeData.rowCache.get(rowIndex);
+  if (fullRow) return fullRow;
+  return state.largeData.previewCache.get(rowIndex)?.row;
+}
+
+function getDataCellValue(rowIndex, columnIndex) {
+  if (isLargeDataMode() && state.largeData.editedValues.has(getCellKey(rowIndex, columnIndex))) {
+    return state.largeData.editedValues.get(getCellKey(rowIndex, columnIndex));
+  }
+  const row = getDataRow(rowIndex);
+  if (row) return row[columnIndex] == null ? "" : String(row[columnIndex]);
+  if (!isLargeDataMode()) return undefined;
+  return state.largeData.cellCache.get(getCellKey(rowIndex, columnIndex))?.value;
+}
+
+function syncLargePreviewAfterCellChange(rowIndex, columnIndex, value) {
+  if (!isLargeDataMode()) return;
+  state.largeData.editedValues.set(getCellKey(rowIndex, columnIndex), String(value ?? ""));
+  const preview = state.largeData.previewCache.get(rowIndex);
+  if (preview) {
+    // 多留一个字符，summarize() 才能识别出编辑后的长文本同样是被截断显示的
+    preview.row[columnIndex] = String(value ?? "").slice(0, PREVIEW_LIMIT + 1);
+    preview.lengths[columnIndex] = String(value ?? "").length;
+  }
+  cacheLargeCell({ rowIndex, columnIndex, value });
+}
+
+function canRunLargeExpensiveOperation() {
+  return !isLargeDataMode() || Number(state.file?.size || 0) <= LARGE_EXPENSIVE_OPERATION_MAX_BYTES;
+}
+
+function requestLargePreviews(rowIndices) {
   if (!isLargeDataMode()) return Promise.resolve([]);
   const indices = [...new Set(rowIndices || [])].filter((rowIndex) =>
-    Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < state.rows.length && !state.largeData.rowCache.has(rowIndex),
+    Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < state.rows.length &&
+      !state.largeData.previewCache.has(rowIndex) && !state.largeData.rowCache.has(rowIndex),
+  );
+  if (!indices.length) return Promise.resolve([]);
+  const token = state.largeData.nextPreviewToken + 1;
+  state.largeData.nextPreviewToken = token;
+  return new Promise((resolve, reject) => {
+    state.largeData.pendingPreviews.set(token, { resolve, reject });
+    state.largeDataWorker.postMessage({ kind: "get-previews", token, indices, previewChars: PREVIEW_LIMIT });
+  });
+}
+
+function prefetchLargePreviews(rowIndices) {
+  if (!isLargeDataMode()) return;
+  requestLargePreviews(rowIndices).then((rows) => {
+    if (!rows.length) return;
+    renderGrid();
+  }).catch((error) => {
+    els.leftStatus.textContent = `读取大文件预览失败：${error.message}`;
+  });
+}
+
+function requestLargeCell(rowIndex, columnIndex) {
+  if (!isLargeDataMode()) return Promise.resolve(null);
+  const key = getCellKey(rowIndex, columnIndex);
+  const cachedValue = getDataCellValue(rowIndex, columnIndex);
+  if (cachedValue !== undefined) return Promise.resolve({ rowIndex, columnIndex, value: cachedValue });
+  const pending = state.largeData.pendingCellKeys.get(key);
+  if (pending) return pending;
+  const token = state.largeData.nextCellToken + 1;
+  state.largeData.nextCellToken = token;
+  const promise = new Promise((resolve, reject) => {
+    state.largeData.pendingCells.set(token, { resolve, reject, key });
+    state.largeDataWorker.postMessage({ kind: "get-cell", token, rowIndex, columnIndex });
+  });
+  state.largeData.pendingCellKeys.set(key, promise);
+  return promise;
+}
+
+function prefetchLargeCell(rowIndex, columnIndex, options = {}) {
+  if (!isLargeDataMode()) return;
+  requestLargeCell(rowIndex, columnIndex).then((cell) => {
+    if (!cell) return;
+    if (options.detail !== false) renderDetail();
+    if (state.modalCell && options.modal !== false) renderModal();
+  }).catch((error) => {
+    els.leftStatus.textContent = `读取完整单元格失败：${error.message}`;
+  });
+}
+
+function requestLargeRows(rowIndices, options = {}) {
+  if (!isLargeDataMode()) return Promise.resolve((rowIndices || []).map((rowIndex) => getDataRow(rowIndex)));
+  const indices = [...new Set(rowIndices || [])].filter((rowIndex) =>
+    Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < state.rows.length,
   );
   if (!indices.length) return Promise.resolve([]);
   const token = state.largeData.nextRowToken + 1;
   state.largeData.nextRowToken = token;
   return new Promise((resolve, reject) => {
-    state.largeData.pendingRows.set(token, { resolve, reject });
+    state.largeData.pendingRows.set(token, { resolve, reject, cache: options.cache === true });
     state.largeDataWorker.postMessage({ kind: "get-rows", token, indices });
   });
 }
 
 function prefetchLargeRows(rowIndices, options = {}) {
   if (!isLargeDataMode()) return;
-  requestLargeRows(rowIndices).then((rows) => {
+  requestLargeRows(rowIndices, { cache: true }).then((rows) => {
     if (!rows.length) return;
     renderGrid();
     if (options.detail !== false) renderDetail();
@@ -468,12 +631,15 @@ function prefetchLargeRows(rowIndices, options = {}) {
 
 async function getLargeDataRows(rowIndices) {
   if (!isLargeDataMode()) return (rowIndices || []).map((rowIndex) => getDataRow(rowIndex));
-  await requestLargeRows(rowIndices);
-  return (rowIndices || []).map((rowIndex) => getDataRow(rowIndex));
+  const rows = await requestLargeRows(rowIndices, { cache: false });
+  const rowsByIndex = new Map(rows.map(({ rowIndex, row }) => [rowIndex, row]));
+  return (rowIndices || []).map((rowIndex) => rowsByIndex.get(rowIndex));
 }
 
 function beginLoad() {
   state.loadToken += 1;
+  if (state.largeLoadWatchdog) window.clearInterval(state.largeLoadWatchdog);
+  state.largeLoadWatchdog = 0;
   if (state.worker) state.worker.terminate();
   state.worker = null;
   if (state.largeDataWorker) state.largeDataWorker.terminate();
@@ -511,8 +677,19 @@ function initializeLargeDataWorker(worker, result) {
   state.largeDataWorker = worker;
   state.largeData = {
     rowCache: new Map(),
+    rowCacheBytes: 0,
+    previewCache: new Map(),
+    previewCacheBytes: 0,
+    cellCache: new Map(),
+    cellCacheBytes: 0,
     pendingRows: new Map(),
+    pendingPreviews: new Map(),
+    pendingCells: new Map(),
+    pendingCellKeys: new Map(),
+    editedValues: new Map(),
     nextRowToken: 0,
+    nextPreviewToken: 0,
+    nextCellToken: 0,
     nextQueryToken: 0,
     pendingMutations: new Map(),
   };
@@ -525,12 +702,30 @@ function initializeLargeDataWorker(worker, result) {
       setProgress(message.progress, message.stage);
       return;
     }
+    if (message.type === "operation-progress") {
+      if (message.token === state.queryToken) setProgress(message.progress, message.stage);
+      return;
+    }
     if (message.type === "rows") {
       const pending = state.largeData.pendingRows.get(message.token);
       state.largeData.pendingRows.delete(message.token);
-      (message.rows || []).forEach(({ rowIndex, row }) => state.largeData.rowCache.set(rowIndex, row));
-      while (state.largeData.rowCache.size > 12000) state.largeData.rowCache.delete(state.largeData.rowCache.keys().next().value);
+      if (pending?.cache) (message.rows || []).forEach(({ rowIndex, row }) => cacheLargeFullRow(rowIndex, row));
       if (pending) pending.resolve(message.rows || []);
+      return;
+    }
+    if (message.type === "previews") {
+      const pending = state.largeData.pendingPreviews.get(message.token);
+      state.largeData.pendingPreviews.delete(message.token);
+      (message.rows || []).forEach(cacheLargePreview);
+      if (pending) pending.resolve(message.rows || []);
+      return;
+    }
+    if (message.type === "cell") {
+      const pending = state.largeData.pendingCells.get(message.token);
+      state.largeData.pendingCells.delete(message.token);
+      if (pending?.key) state.largeData.pendingCellKeys.delete(pending.key);
+      if (message.cell) cacheLargeCell(message.cell);
+      if (pending) pending.resolve(message.cell || null);
       return;
     }
     if (message.type === "query-complete") {
@@ -542,6 +737,8 @@ function initializeLargeDataWorker(worker, result) {
       const columnKey = String(message.columnIndex);
       if (message.token !== state.columnValueTokens.get(columnKey)) return;
       state.columnValueCache.set(columnKey, message.values || []);
+      if (message.truncated) state.columnValueTruncated.add(columnKey);
+      else state.columnValueTruncated.delete(columnKey);
       state.columnValuePending.delete(columnKey);
       state.columnValueTokens.delete(columnKey);
       if (state.columnFilterMenu.columnIndex === message.columnIndex) renderColumnFilterValues();
@@ -566,12 +763,38 @@ function initializeLargeDataWorker(worker, result) {
       const rowPending = state.largeData.pendingRows.get(message.token);
       state.largeData.pendingRows.delete(message.token);
       if (rowPending) rowPending.reject(new Error(message.message));
+      const previewPending = state.largeData.pendingPreviews.get(message.token);
+      state.largeData.pendingPreviews.delete(message.token);
+      if (previewPending) previewPending.reject(new Error(message.message));
+      const cellPending = state.largeData.pendingCells.get(message.token);
+      state.largeData.pendingCells.delete(message.token);
+      if (cellPending?.key) state.largeData.pendingCellKeys.delete(cellPending.key);
+      if (cellPending) cellPending.reject(new Error(message.message));
       const mutationPending = state.largeData.pendingMutations.get(message.token);
       state.largeData.pendingMutations.delete(message.token);
       if (mutationPending) mutationPending.reject(new Error(message.message));
       if (message.token === state.queryToken) els.leftStatus.textContent = `大文件计算失败：${message.message}`;
     }
   };
+  const handleLargeWorkerFailure = (message) => {
+    if (worker !== state.largeDataWorker || !state.largeData) return;
+    const error = new Error(message);
+    for (const pending of state.largeData.pendingRows.values()) pending.reject(error);
+    for (const pending of state.largeData.pendingPreviews.values()) pending.reject(error);
+    for (const pending of state.largeData.pendingCells.values()) pending.reject(error);
+    for (const pending of state.largeData.pendingMutations.values()) pending.reject(error);
+    state.largeData.pendingRows.clear();
+    state.largeData.pendingPreviews.clear();
+    state.largeData.pendingCells.clear();
+    state.largeData.pendingCellKeys.clear();
+    state.largeData.pendingMutations.clear();
+    els.leftStatus.textContent = `大文件 Worker 已停止：${message}`;
+  };
+  worker.onerror = (event) => {
+    event.preventDefault?.();
+    handleLargeWorkerFailure(event.message || "可能是浏览器内存不足或原文件读取失败");
+  };
+  worker.onmessageerror = () => handleLargeWorkerFailure("Worker 返回的数据无法读取");
 }
 
 function runLargeDataMutation(kind, payload) {
@@ -695,7 +918,7 @@ function patchQueryWorkerCells(changes) {
     .map((change) => ({
       rowIndex: change.rowIndex,
       columnIndex: change.columnIndex,
-      value: getDataRow(change.rowIndex)?.[change.columnIndex] ?? "",
+      value: getDataCellValue(change.rowIndex, change.columnIndex) ?? "",
     }));
   if (!normalized.length) return;
   state.queryToken += 1;

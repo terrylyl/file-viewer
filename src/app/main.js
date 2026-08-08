@@ -1,13 +1,15 @@
-function copySelectedRow() {
+async function copySelectedRow() {
   if (!state.selected) return;
-  const visibleColumns = getVisibleColumnIndexes();
-  const row = getDataRow(state.selected.rowIndex);
-  if (!row && isLargeDataMode()) {
-    prefetchLargeRows([state.selected.rowIndex]);
-    els.leftStatus.textContent = "正在读取当前行，请再次复制";
-    return;
+  try {
+    const visibleColumns = getVisibleColumnIndexes();
+    const row = isLargeDataMode()
+      ? (await getLargeDataRows([state.selected.rowIndex]))[0]
+      : getDataRow(state.selected.rowIndex);
+    if (!row) return;
+    await copyText(visibleColumns.map((col) => row[col] || "").join("\t"));
+  } catch (error) {
+    els.leftStatus.textContent = `复制当前行失败：${error.message}`;
   }
-  copyText(visibleColumns.map((col) => row[col] || "").join("\t"));
 }
 
 function copySelectedHeader() {
@@ -331,11 +333,12 @@ els.columnProfileModeButton.addEventListener("click", () => {
 els.refreshColumnProfileButton.addEventListener("click", refreshColumnProfile);
 els.detailSearchInput.addEventListener("input", () => {
   state.detailVisibleChars = DETAIL_CHUNK;
+  state.detailVisibleStart = 0;
   renderDetail();
 });
 els.monoInput.addEventListener("change", renderDetail);
 els.loadMoreDetailButton.addEventListener("click", () => {
-  state.detailVisibleChars += DETAIL_CHUNK;
+  state.detailVisibleStart += state.detailVisibleChars;
   renderDetail();
 });
 els.closeModalButton.addEventListener("click", closeModal);
@@ -349,6 +352,7 @@ els.modalBackdrop.addEventListener("click", (event) => {
 });
 els.modalSearchInput.addEventListener("input", () => {
   state.modalVisibleChars = MODAL_CHUNK;
+  state.modalVisibleStart = 0;
   renderModal();
 });
 els.modalFormatSelect.addEventListener("change", renderModal);
@@ -373,18 +377,19 @@ els.detailResizeHandle.addEventListener("keydown", (event) => {
   event.preventDefault();
   nudgeDetailPanelWidth(event.key === "ArrowLeft" ? DETAIL_PANEL_WIDTH_STEP : -DETAIL_PANEL_WIDTH_STEP);
 });
-els.copyModalButton.addEventListener("click", () => {
+els.copyModalButton.addEventListener("click", async () => {
   if (!state.modalCell) return;
-  const value = getDataRow(state.modalCell.rowIndex)?.[state.modalCell.columnIndex];
-  if (value == null && isLargeDataMode()) {
-    prefetchLargeRows([state.modalCell.rowIndex]);
-    els.leftStatus.textContent = "正在读取完整内容，请再次复制";
-    return;
+  try {
+    const value = isLargeDataMode()
+      ? (await requestLargeCell(state.modalCell.rowIndex, state.modalCell.columnIndex))?.value
+      : getDataRow(state.modalCell.rowIndex)?.[state.modalCell.columnIndex];
+    await copyText(value ?? "");
+  } catch (error) {
+    els.leftStatus.textContent = `复制单元格失败：${error.message}`;
   }
-  copyText(value || "");
 });
 els.loadMoreModalButton.addEventListener("click", () => {
-  state.modalVisibleChars += MODAL_CHUNK;
+  state.modalVisibleStart += state.modalVisibleChars;
   renderModal();
 });
 els.commandPaletteInput.addEventListener("input", () => {
@@ -494,6 +499,10 @@ els.hideAllColumnsButton.addEventListener("click", () => {
 els.filterSortAscButton.addEventListener("click", () => {
   const columnIndex = state.columnFilterMenu.columnIndex;
   if (columnIndex < 0) return;
+  if (!canRunLargeExpensiveOperation()) {
+    showToast("超大文本文件暂不执行整列排序", { tone: "error" });
+    return;
+  }
   state.sort = { column: columnIndex, direction: "asc" };
   recomputeView();
   closeColumnFilterMenu();
@@ -501,6 +510,10 @@ els.filterSortAscButton.addEventListener("click", () => {
 els.filterSortDescButton.addEventListener("click", () => {
   const columnIndex = state.columnFilterMenu.columnIndex;
   if (columnIndex < 0) return;
+  if (!canRunLargeExpensiveOperation()) {
+    showToast("超大文本文件暂不执行整列排序", { tone: "error" });
+    return;
+  }
   state.sort = { column: columnIndex, direction: "desc" };
   recomputeView();
   closeColumnFilterMenu();
@@ -549,7 +562,7 @@ els.viewColumnProfileButton.addEventListener("click", () => openColumnProfile(st
 els.contextMenu.addEventListener("click", (event) => {
   const action = event.target.dataset.action;
   if (!action) return;
-  if (action === "copy-cell") copyText(getSelectedValue());
+  if (action === "copy-cell") copySelection();
   if (action === "copy-row") copySelectedRow();
   if (action === "exclude-row") excludeSelectedRow();
   if (action === "copy-header") copySelectedHeader();

@@ -64,6 +64,10 @@ function computeColumnProfileSync(columnIndex) {
 function requestColumnProfile(columnIndex) {
   const columnKey = String(columnIndex);
   if (state.columnProfileCache.has(columnKey) || state.columnProfilePending.has(columnKey)) return;
+  if (!canRunLargeExpensiveOperation()) {
+    renderColumnProfileError("超大文本文件暂不执行整列画像，以避免扫描和缓存全部长文本");
+    return;
+  }
   const token = state.columnProfileTokenCounter + 1;
   state.columnProfileTokenCounter = token;
   state.columnProfilePending.add(columnKey);

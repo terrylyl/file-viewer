@@ -1,16 +1,112 @@
-const LARGE_CHUNK_SIZE = 1000;
+const INDEX_PREVIEW_SOURCE_BYTES = 4096;
+const INDEX_PREVIEW_CHARS = 500;
+// 多返回一个字符，主线程的 summarize() 才能区分"正好 500 字符"和"被截断了"。
+const INDEX_PREVIEW_SLICE_CHARS = INDEX_PREVIEW_CHARS + 1;
+// 一整行小于这个字节数时整行读一次，避免逐 cell slice；超过的行按 cell 限量读。
+const INDEX_PREVIEW_ROW_INLINE_MAX_BYTES = 64 * 1024;
+const INDEX_READ_BATCH_BYTES = 8 * 1024 * 1024;
+const INDEX_PROGRESS_INTERVAL_MS = 150;
+const INDEX_UNIQUE_VALUE_LIMIT = 2000;
+const INDEX_UNIQUE_VALUE_MAX_CHARS = 2000;
 const ISSUE_SAMPLE_LIMIT = 1000;
-const chunkCache = new Map();
-let storageDirectory = null;
-let chunkCount = 0;
-let rowCount = 0;
+const ISSUE_SAMPLE_MAX_BYTES = 4096;
+// 与 shared/csv-utils.js 的 CSV_TOLERANCE_MAX_CHARS 对应：宽容解析的字节预算。
+const INDEX_TOLERANCE_MAX_BYTES = 1024 * 1024;
+const CELL_FLAG_QUOTED = 1;
+
+const BYTE_QUOTE = 0x22;
+const BYTE_BACKSLASH = 0x5c;
+const BYTE_BACKTICK = 0x60;
+const BYTE_OPEN_BRACE = 0x7b;
+const BYTE_CLOSE_BRACE = 0x7d;
+const BYTE_OPEN_BRACKET = 0x5b;
+const BYTE_CLOSE_BRACKET = 0x5d;
+const BYTE_LINE_FEED = 0x0a;
+const BYTE_CARRIAGE_RETURN = 0x0d;
+
+let sourceFile = null;
+let sourceEncoding = "utf-8";
+let sourceEncodingName = "UTF-8";
+let sourceDecoder = new TextDecoder("utf-8");
+let sourceIsMultiByteLead = false;
+let sourceColumnCount = 0;
 let headers = [];
 let rawHeaders = [];
 let dataKind = "CSV";
 let delimiter = ",";
+let rowCount = 0;
+let rowCellOffsets = new Uint32Array([0]);
+let cellStarts = new Uint32Array();
+let cellEnds = new Uint32Array();
+let cellFlags = new Uint8Array();
+let jsonlRowStarts = new Uint32Array();
+let jsonlRowEnds = new Uint32Array();
+let virtualColumns = new Map();
+let cellOverrides = new Map();
 let duplicateValueCache = new Map();
-let lastViewIndices = new Uint32Array();
 let operationQueue = Promise.resolve();
+let latestQueryToken = 0;
+let latestScanToken = 0;
+
+function setSourceEncoding(label, name) {
+  sourceEncoding = label;
+  sourceEncodingName = name;
+  sourceDecoder = new TextDecoder(label);
+  // GB18030/GBK 的次字节落在 0x40-0xFE，会和 ASCII 的 \ [ { | ` 重叠。
+  // 字节级扫描必须跳过首字节之后的次字节，否则汉字会被当成转义符或结构起始。
+  sourceIsMultiByteLead = label === "gb18030" || label === "gbk";
+}
+
+// 可增长的定长数组：直接写 TypedArray，避免每个 cell 在普通数组里留一个装箱数字。
+function createGrowableU32(initialCapacity = 1024) {
+  let data = new Uint32Array(initialCapacity);
+  let length = 0;
+  return {
+    push(value) {
+      if (length === data.length) {
+        const next = new Uint32Array(data.length * 2);
+        next.set(data);
+        data = next;
+      }
+      data[length] = value;
+      length += 1;
+    },
+    get length() {
+      return length;
+    },
+    truncate(nextLength) {
+      length = nextLength;
+    },
+    toTyped() {
+      return data.slice(0, length);
+    },
+  };
+}
+
+function createGrowableU8(initialCapacity = 1024) {
+  let data = new Uint8Array(initialCapacity);
+  let length = 0;
+  return {
+    push(value) {
+      if (length === data.length) {
+        const next = new Uint8Array(data.length * 2);
+        next.set(data);
+        data = next;
+      }
+      data[length] = value;
+      length += 1;
+    },
+    get length() {
+      return length;
+    },
+    truncate(nextLength) {
+      length = nextLength;
+    },
+    toTyped() {
+      return data.slice(0, length);
+    },
+  };
+}
 
 function normalizeHeaders(raw, columnCount) {
   const used = new Map();
@@ -22,18 +118,32 @@ function normalizeHeaders(raw, columnCount) {
   });
 }
 
+// 采样是按固定字节数截的，很可能把一个多字节字符切成两半。
+// 不回退到字符边界的话，正常的 UTF-8 中文文件会因为末尾半个字而被判成 GB18030。
+function trimToUtf8Boundary(bytes) {
+  for (let back = 0; back < 4 && back < bytes.length; back += 1) {
+    const index = bytes.length - 1 - back;
+    const byte = bytes[index];
+    if ((byte & 0xc0) === 0x80) continue;
+    const needed = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+    return back + 1 >= needed ? bytes : bytes.subarray(0, index);
+  }
+  return bytes;
+}
+
 function chooseEncoding(bytes, requested) {
   if (requested && requested !== "auto") return { label: requested, name: requested.toUpperCase() };
+  const sample = trimToUtf8Boundary(bytes);
   try {
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    new TextDecoder("utf-8", { fatal: true }).decode(sample);
     return { label: "utf-8", name: "UTF-8" };
   } catch (error) {
-    try {
-      new TextDecoder("gb18030").decode(bytes);
+    // TextDecoder("gb18030") 不支持 fatal，永远不抛异常，
+    // 必须自己检查替换字符，否则任何非 UTF-8 采样都会被无条件判成 GB18030。
+    if (!new TextDecoder("gb18030").decode(sample).includes("�")) {
       return { label: "gb18030", name: "GB18030/GBK" };
-    } catch (innerError) {
-      return { label: "utf-8", name: "UTF-8 (replacement)" };
     }
+    return { label: "utf-8", name: "UTF-8 (replacement)" };
   }
 }
 
@@ -49,42 +159,667 @@ function buildIssue(type, rowNumber, columnIndex, columnName, detail, sample) {
   return { type, rowNumber, columnIndex, columnName, detail, sample: String(sample ?? "").slice(0, 300) };
 }
 
-async function openStorage(name) {
-  if (!navigator.storage?.getDirectory) throw new Error("当前浏览器不支持 OPFS 大文件存储；请使用最新版 Chrome 或 Edge。");
-  const root = await navigator.storage.getDirectory();
-  await root.removeEntry(name, { recursive: true }).catch(() => {});
-  storageDirectory = await root.getDirectoryHandle(name, { create: true });
-  chunkCache.clear();
-  chunkCount = 0;
-  rowCount = 0;
+function createProgressReporter(file, label, maxProgress = 0.94) {
+  let lastReportedAt = 0;
+  return (processedBytes, force = false, stage = "建立偏移索引") => {
+    const now = Date.now();
+    if (!force && now - lastReportedAt < INDEX_PROGRESS_INTERVAL_MS) return;
+    lastReportedAt = now;
+    self.postMessage({
+      type: "progress",
+      progress: Math.min(maxProgress, processedBytes / Math.max(1, file.size) * maxProgress),
+      stage: `${stage} ${label} · ${Math.round(processedBytes / 1024 / 1024).toLocaleString()} / ${Math.round(file.size / 1024 / 1024).toLocaleString()} MiB · ${rowCount.toLocaleString()} 行`,
+    });
+  };
 }
 
-async function writeChunk(index, rows) {
-  const file = await storageDirectory.getFileHandle(`chunk-${index}.json`, { create: true });
-  const writable = await file.createWritable();
-  await writable.write(JSON.stringify(rows));
-  await writable.close();
-  chunkCache.set(index, rows);
-  while (chunkCache.size > 6) chunkCache.delete(chunkCache.keys().next().value);
-}
-
-async function readChunk(index) {
-  if (chunkCache.has(index)) {
-    const cached = chunkCache.get(index);
-    chunkCache.delete(index);
-    chunkCache.set(index, cached);
-    return cached;
+function normalizeDecodedCsvCell(text, flags, complete = true) {
+  let value = String(text ?? "");
+  if (flags & CELL_FLAG_QUOTED) {
+    if (value.startsWith('"')) value = value.slice(1);
+    if (complete && value.endsWith('"')) value = value.slice(0, -1);
+    value = value.replaceAll('""', '"');
   }
-  const fileHandle = await storageDirectory.getFileHandle(`chunk-${index}.json`);
-  const file = await fileHandle.getFile();
-  const rows = JSON.parse(await file.text());
-  chunkCache.set(index, rows);
-  while (chunkCache.size > 6) chunkCache.delete(chunkCache.keys().next().value);
-  return rows;
+  return value;
 }
 
-function toRow(row) {
-  return Array.from({ length: headers.length }, (_, index) => row[index] == null ? "" : String(row[index]));
+function isJsonStructureLeadByte(open, next) {
+  if (open === BYTE_OPEN_BRACE) return next === BYTE_QUOTE || next === BYTE_CLOSE_BRACE;
+  return (
+    next === BYTE_QUOTE ||
+    next === BYTE_OPEN_BRACE ||
+    next === BYTE_OPEN_BRACKET ||
+    next === BYTE_CLOSE_BRACKET ||
+    next === 0x2d ||
+    next === 0x74 ||
+    next === 0x66 ||
+    next === 0x6e ||
+    (next >= 0x30 && next <= 0x39)
+  );
+}
+
+function createCsvByteIndexer(file, delimiterByte, reportProgress) {
+  const starts = createGrowableU32(4096);
+  const ends = createGrowableU32(4096);
+  const flags = createGrowableU8(4096);
+  const offsets = createGrowableU32(1024);
+  offsets.push(0);
+  let headerDescriptors = null;
+  let maxColumns = 0;
+  let currentRecord = [];
+  let fieldStart = 0;
+  let fieldStarted = false;
+  let fieldHasNonWhitespace = false;
+  let fieldQuoted = false;
+  let fieldEscapes = [];
+  let inQuotes = false;
+  let pendingQuote = false;
+  let pendingBackslash = false;
+  let pendingEscapedQuote = false;
+  let pendingTrailByte = false;
+  let skipLineFeed = false;
+  let codeFence = false;
+  let backtickRun = 0;
+  let leadingFenceEligible = true;
+  let leadingBacktickCount = 0;
+  let structureStack = [];
+  let structureInString = false;
+  let structureEscaped = false;
+  let structurePendingOpen = 0;
+  let structurePendingQuote = false;
+  let specMode = "";
+  let specBytes = null;
+  let specLength = 0;
+  let specStartOffset = 0;
+  let specFieldStart = 0;
+  let specFieldStarted = false;
+  let specFieldHasNonWhitespace = false;
+  let specFieldQuoted = false;
+  let specEscapeLength = 0;
+  let specInQuotes = false;
+  let specRecordLength = 0;
+  let toleranceDisabled = false;
+
+  const isWhitespaceByte = (byte) => byte === 0x20 || byte === 0x09 || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN;
+
+  const appendFieldByte = (byte, countsAsContent = true) => {
+    fieldStarted = true;
+    if (countsAsContent && !isWhitespaceByte(byte)) fieldHasNonWhitespace = true;
+  };
+
+  const beginSpeculation = (mode, offset) => {
+    if (!specBytes) specBytes = new Uint8Array(INDEX_TOLERANCE_MAX_BYTES);
+    specMode = mode;
+    specLength = 0;
+    specStartOffset = offset;
+    specFieldStart = fieldStart;
+    specFieldStarted = fieldStarted;
+    specFieldHasNonWhitespace = fieldHasNonWhitespace;
+    specFieldQuoted = fieldQuoted;
+    specEscapeLength = fieldEscapes.length;
+    specInQuotes = inQuotes;
+    specRecordLength = currentRecord.length;
+  };
+
+  const endSpeculation = () => {
+    specMode = "";
+    specLength = 0;
+  };
+
+  const updateStructuredState = (byte) => {
+    if (structureEscaped) {
+      structureEscaped = false;
+      return;
+    }
+    if (structureInString) {
+      if (byte === BYTE_BACKSLASH) structureEscaped = true;
+      else if (byte === BYTE_QUOTE) structureInString = false;
+      return;
+    }
+    if (byte === BYTE_QUOTE) {
+      structureInString = true;
+      return;
+    }
+    if (byte === BYTE_OPEN_BRACE || byte === BYTE_OPEN_BRACKET) {
+      structureStack.push(byte);
+      return;
+    }
+    const open = structureStack.at(-1);
+    if ((byte === BYTE_CLOSE_BRACE && open === BYTE_OPEN_BRACE) || (byte === BYTE_CLOSE_BRACKET && open === BYTE_OPEN_BRACKET)) {
+      structureStack.pop();
+      if (!structureStack.length) endSpeculation();
+      return;
+    }
+    if (byte === BYTE_CLOSE_BRACE || byte === BYTE_CLOSE_BRACKET) {
+      structureStack = [];
+      structureInString = false;
+      structureEscaped = false;
+      endSpeculation();
+    }
+  };
+
+  const appendStructuredByte = (byte) => {
+    appendFieldByte(byte);
+    updateStructuredState(byte);
+  };
+
+  const resetField = (nextStart) => {
+    fieldStart = nextStart;
+    fieldStarted = false;
+    fieldHasNonWhitespace = false;
+    fieldQuoted = false;
+    fieldEscapes = [];
+    inQuotes = false;
+    pendingQuote = false;
+    pendingBackslash = false;
+    pendingEscapedQuote = false;
+    codeFence = false;
+    backtickRun = 0;
+    leadingFenceEligible = true;
+    leadingBacktickCount = 0;
+    structureStack = [];
+    structureInString = false;
+    structureEscaped = false;
+    structurePendingOpen = 0;
+    structurePendingQuote = false;
+    toleranceDisabled = false;
+    endSpeculation();
+  };
+
+  const finishField = (endOffset, nextStart) => {
+    currentRecord.push({
+      start: fieldStart,
+      end: endOffset,
+      flags: fieldQuoted ? CELL_FLAG_QUOTED : 0,
+      escapes: fieldEscapes.length ? fieldEscapes : null,
+    });
+    resetField(nextStart);
+  };
+
+  const isDescriptorEmpty = (descriptor) => {
+    const length = descriptor.end - descriptor.start;
+    if (length <= 0) return true;
+    return (descriptor.flags & CELL_FLAG_QUOTED) !== 0 && length === 2;
+  };
+
+  // 未加引号的 `\` + 分隔符会被当成转义而少切一列（Windows 路径 C:\dir\,next）。
+  // 只有这一行确实比表头短时才按记录到的转义位置拆回来。
+  const repairShortRecord = () => {
+    if (!headerDescriptors) return;
+    const expected = headerDescriptors.length;
+    if (!expected || currentRecord.length >= expected) return;
+    let missing = expected - currentRecord.length;
+    const repaired = [];
+    for (const descriptor of currentRecord) {
+      if (missing <= 0 || !descriptor.escapes) {
+        repaired.push(descriptor);
+        continue;
+      }
+      const takes = Math.min(missing, descriptor.escapes.length);
+      let cursor = descriptor.start;
+      for (let index = 0; index < takes; index += 1) {
+        repaired.push({ start: cursor, end: descriptor.escapes[index], flags: descriptor.flags, escapes: null });
+        cursor = descriptor.escapes[index] + 1;
+      }
+      repaired.push({ start: cursor, end: descriptor.end, flags: descriptor.flags, escapes: null });
+      missing -= takes;
+    }
+    if (repaired.length === expected) currentRecord = repaired;
+  };
+
+  const finishRecord = () => {
+    repairShortRecord();
+    maxColumns = Math.max(maxColumns, currentRecord.length);
+    if (!headerDescriptors) {
+      headerDescriptors = currentRecord;
+    } else if (currentRecord.some((descriptor) => !isDescriptorEmpty(descriptor))) {
+      for (const descriptor of currentRecord) {
+        starts.push(descriptor.start);
+        ends.push(descriptor.end);
+        flags.push(descriptor.flags);
+      }
+      offsets.push(starts.length);
+      rowCount += 1;
+    }
+    currentRecord = [];
+  };
+
+  const rollbackSpeculation = () => {
+    const replay = specBytes.slice(0, specLength);
+    const replayOffset = specStartOffset;
+    fieldStart = specFieldStart;
+    fieldStarted = specFieldStarted;
+    fieldHasNonWhitespace = specFieldHasNonWhitespace;
+    fieldQuoted = specFieldQuoted;
+    fieldEscapes.length = specEscapeLength;
+    inQuotes = specInQuotes;
+    currentRecord.length = specRecordLength;
+    endSpeculation();
+    structurePendingOpen = 0;
+    structurePendingQuote = false;
+    structureStack = [];
+    structureInString = false;
+    structureEscaped = false;
+    codeFence = false;
+    backtickRun = 0;
+    leadingBacktickCount = 0;
+    pendingQuote = false;
+    pendingBackslash = false;
+    pendingEscapedQuote = false;
+    toleranceDisabled = true;
+    // 走 feedByte 而不是 processByte：重放过程中如果又开启了一次推测性解析，
+    // 它的缓冲区也必须被填上，否则嵌套回滚会重放一段不完整的字节。
+    for (let index = 0; index < replay.length; index += 1) feedByte(replay[index], replayOffset + index);
+  };
+
+  const processByte = (byte, offset) => {
+    if (skipLineFeed) {
+      skipLineFeed = false;
+      if (byte === BYTE_LINE_FEED) {
+        fieldStart = offset + 1;
+        return;
+      }
+    }
+
+    if (pendingTrailByte) {
+      pendingTrailByte = false;
+      appendFieldByte(byte);
+      return;
+    }
+
+    if (pendingEscapedQuote) {
+      pendingEscapedQuote = false;
+      if (byte === delimiterByte || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN) {
+        inQuotes = false;
+        processByte(byte, offset);
+        return;
+      }
+      appendFieldByte(byte);
+      return;
+    }
+
+    if (pendingBackslash) {
+      pendingBackslash = false;
+      if (byte === BYTE_QUOTE && inQuotes) {
+        pendingEscapedQuote = true;
+        return;
+      }
+      if (byte === BYTE_QUOTE || byte === delimiterByte || byte === BYTE_BACKSLASH) {
+        if (byte === delimiterByte && !inQuotes) fieldEscapes.push(offset);
+        appendFieldByte(byte);
+        return;
+      }
+      processByte(byte, offset);
+      return;
+    }
+
+    if (pendingQuote) {
+      pendingQuote = false;
+      if (structureStack.length) {
+        updateStructuredState(BYTE_QUOTE);
+        if (byte === BYTE_QUOTE) {
+          appendFieldByte(byte);
+          return;
+        }
+        processByte(byte, offset);
+        return;
+      }
+      if (byte === BYTE_QUOTE) {
+        appendFieldByte(byte);
+        return;
+      }
+      if (byte === delimiterByte || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN) {
+        inQuotes = false;
+        processByte(byte, offset);
+        return;
+      }
+      processByte(byte, offset);
+      return;
+    }
+
+    if (structurePendingQuote) {
+      structurePendingQuote = false;
+      const open = structurePendingOpen;
+      structurePendingOpen = 0;
+      if (byte === delimiterByte || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN) {
+        // 那个引号是这个字段的收尾引号，开括号只是普通内容
+        endSpeculation();
+        inQuotes = false;
+        processByte(byte, offset);
+        return;
+      }
+      structureStack = [open];
+      structureInString = false;
+      structureEscaped = false;
+      processByte(BYTE_QUOTE, offset - 1);
+      processByte(byte, offset);
+      return;
+    }
+
+    if (structurePendingOpen) {
+      if (byte === 0x20 || byte === 0x09) {
+        appendFieldByte(byte);
+        return;
+      }
+      // 引号内的 `"` 有歧义：可能是 JSON 串的开头，也可能是本字段的收尾引号，再看一个字节
+      if (inQuotes && byte === BYTE_QUOTE) {
+        structurePendingQuote = true;
+        return;
+      }
+      const open = structurePendingOpen;
+      structurePendingOpen = 0;
+      if (isJsonStructureLeadByte(open, byte)) {
+        structureStack = [open];
+        structureInString = false;
+        structureEscaped = false;
+      } else {
+        endSpeculation();
+      }
+      processByte(byte, offset);
+      return;
+    }
+
+    // GB18030 双字节字符的次字节和 ASCII 标点重叠，必须整字符跳过再判断。
+    if (sourceIsMultiByteLead && byte >= 0x81 && byte <= 0xfe) {
+      pendingTrailByte = true;
+      if (structureStack.length) appendStructuredByte(byte);
+      else appendFieldByte(byte);
+      if (!inQuotes && !codeFence && !structureStack.length) leadingFenceEligible = false;
+      return;
+    }
+
+    if (inQuotes) {
+      if (byte === BYTE_QUOTE) {
+        appendFieldByte(byte);
+        pendingQuote = true;
+        return;
+      }
+      if (structureStack.length) {
+        appendStructuredByte(byte);
+        return;
+      }
+      if (byte === BYTE_BACKSLASH) {
+        appendFieldByte(byte);
+        pendingBackslash = true;
+        return;
+      }
+      if ((byte === BYTE_OPEN_BRACE || byte === BYTE_OPEN_BRACKET) && !fieldHasNonWhitespace && !toleranceDisabled) {
+        appendFieldByte(byte);
+        beginSpeculation("structure", offset);
+        structurePendingOpen = byte;
+        return;
+      }
+      appendFieldByte(byte);
+      return;
+    }
+
+    if (codeFence) {
+      appendFieldByte(byte);
+      if (byte === BYTE_BACKTICK) {
+        backtickRun += 1;
+        if (backtickRun === 3) {
+          codeFence = false;
+          backtickRun = 0;
+          endSpeculation();
+        }
+      } else {
+        backtickRun = 0;
+      }
+      return;
+    }
+
+    if (structureStack.length) {
+      appendStructuredByte(byte);
+      return;
+    }
+
+    if (byte === BYTE_BACKSLASH) {
+      appendFieldByte(byte);
+      pendingBackslash = true;
+      return;
+    }
+
+    if (byte === BYTE_QUOTE) {
+      if (!fieldStarted) {
+        fieldQuoted = true;
+        inQuotes = true;
+        appendFieldByte(byte, false);
+        return;
+      }
+      appendFieldByte(byte);
+      return;
+    }
+
+    if (byte === BYTE_BACKTICK && leadingFenceEligible && leadingBacktickCount < 3 && !toleranceDisabled) {
+      if (!leadingBacktickCount) beginSpeculation("fence", offset);
+      appendFieldByte(byte);
+      leadingBacktickCount += 1;
+      if (leadingBacktickCount === 3) {
+        codeFence = true;
+        backtickRun = 0;
+      }
+      return;
+    }
+    if (leadingBacktickCount && leadingBacktickCount < 3 && specMode === "fence") endSpeculation();
+
+    if ((byte === BYTE_OPEN_BRACE || byte === BYTE_OPEN_BRACKET) && !fieldHasNonWhitespace && !toleranceDisabled) {
+      appendFieldByte(byte);
+      beginSpeculation("structure", offset);
+      structurePendingOpen = byte;
+      return;
+    }
+
+    if (byte === delimiterByte) {
+      finishField(offset, offset + 1);
+      return;
+    }
+
+    if (byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN) {
+      finishField(offset, offset + 1);
+      finishRecord();
+      skipLineFeed = byte === BYTE_CARRIAGE_RETURN;
+      return;
+    }
+
+    if (!isWhitespaceByte(byte) && byte !== BYTE_BACKTICK) leadingFenceEligible = false;
+    appendFieldByte(byte);
+  };
+
+  const feedByte = (byte, offset) => {
+    if (specMode) {
+      if (specLength >= INDEX_TOLERANCE_MAX_BYTES) {
+        rollbackSpeculation();
+        feedByte(byte, offset);
+        return;
+      }
+      specBytes[specLength] = byte;
+      specLength += 1;
+    }
+    processByte(byte, offset);
+  };
+
+  const scan = async () => {
+    const reader = file.stream().getReader();
+    let processedBytes = 0;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      for (let index = 0; index < value.length; index += 1) feedByte(value[index], processedBytes + index);
+      processedBytes += value.byteLength;
+      reportProgress(processedBytes);
+    }
+    // 围栏到文件末尾都没闭合，几乎一定是把单元格里的 ``` 当成了代码块。
+    if (specMode === "fence" && codeFence) rollbackSpeculation();
+    if (structurePendingQuote) {
+      structurePendingQuote = false;
+      structurePendingOpen = 0;
+      inQuotes = false;
+      endSpeculation();
+    }
+    const diagnostics = {
+      unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
+      unclosedStructuredField: structureStack.length > 0,
+      unclosedCodeFence: codeFence,
+    };
+    if (fieldStarted || currentRecord.length || fieldStart < file.size) {
+      finishField(file.size, file.size);
+      finishRecord();
+    }
+    return {
+      starts: starts.toTyped(),
+      ends: ends.toTyped(),
+      flags: flags.toTyped(),
+      offsets: offsets.toTyped(),
+      headerDescriptors: headerDescriptors || [],
+      maxColumns,
+      diagnostics,
+    };
+  };
+
+  return { scan };
+}
+
+async function decodeFileRange(start, end) {
+  const bytes = new Uint8Array(await sourceFile.slice(start, end).arrayBuffer());
+  return sourceDecoder.decode(bytes);
+}
+
+function getCellByteLength(cellIndex) {
+  return Math.max(0, cellEnds[cellIndex] - cellStarts[cellIndex]);
+}
+
+function isIndexedCellEmpty(cellIndex) {
+  const length = getCellByteLength(cellIndex);
+  if (length <= 0) return true;
+  return (cellFlags[cellIndex] & CELL_FLAG_QUOTED) !== 0 && length === 2;
+}
+
+// issue 的 sample 只需要一小段文本，按行范围限量读，不为此常驻全表预览。
+async function decodeIssueSample(rowIndex) {
+  const range = getIndexedRowByteRange(rowIndex);
+  if (!range || range.end <= range.start) return "";
+  const end = Math.min(range.end, range.start + ISSUE_SAMPLE_MAX_BYTES);
+  return (await decodeFileRange(range.start, end)).slice(0, 300);
+}
+
+async function attachIssueSamples(issues) {
+  for (const key of ["inconsistentRows", "sparseRows", "longFields"]) {
+    for (const issue of issues[key]) {
+      if (issue.sampleRowIndex == null) continue;
+      issue.sample = await decodeIssueSample(issue.sampleRowIndex);
+      delete issue.sampleRowIndex;
+    }
+  }
+}
+
+async function decodeCsvDescriptor(descriptor) {
+  const text = await decodeFileRange(descriptor.start, descriptor.end);
+  return normalizeDecodedCsvCell(text, descriptor.flags, true);
+}
+
+function detectDuplicateHeaderIssues(sourceHeaders) {
+  const groups = new Map();
+  sourceHeaders.forEach((value, index) => {
+    const key = value == null || value === "" ? `Column ${index + 1}` : String(value);
+    groups.set(key, [...(groups.get(key) || []), index]);
+  });
+  return [...groups.entries()].filter(([, indexes]) => indexes.length > 1).map(([columnName, columnIndexes]) => (
+    buildIssue("重复列名", 1, columnIndexes[0], columnName, `列名出现 ${columnIndexes.length} 次：${columnIndexes.map((index) => index + 1).join(", ")}`, columnName)
+  ));
+}
+
+async function loadIndexedCsv(file, options) {
+  const sample = new Uint8Array(await file.slice(0, 512 * 1024).arrayBuffer());
+  const encoding = chooseEncoding(sample, options.encoding);
+  setSourceEncoding(encoding.label, encoding.name);
+  delimiter = options.delimiter || detectCsvDelimiter(sourceDecoder.decode(trimToUtf8Boundary(sample)));
+  dataKind = "CSV";
+  rowCount = 0;
+  const issues = createIssues();
+  const reportProgress = createProgressReporter(file, "CSV");
+  const indexer = createCsvByteIndexer(file, delimiter.charCodeAt(0), reportProgress);
+  const indexed = await indexer.scan();
+  cellStarts = indexed.starts;
+  cellEnds = indexed.ends;
+  cellFlags = indexed.flags;
+  rowCellOffsets = indexed.offsets;
+  rawHeaders = [];
+  for (const descriptor of indexed.headerDescriptors) rawHeaders.push(await decodeCsvDescriptor(descriptor));
+  sourceColumnCount = Math.max(rawHeaders.length, indexed.maxColumns);
+  headers = normalizeHeaders(rawHeaders, sourceColumnCount);
+  issues.duplicateColumns = detectDuplicateHeaderIssues(rawHeaders);
+  // 只用偏移索引判定问题行，样本文本稍后按需读取，避免为此常驻整表预览。
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const startCell = rowCellOffsets[rowIndex];
+    const columnCount = rowCellOffsets[rowIndex + 1] - startCell;
+    const rowNumber = rowIndex + 2;
+    if (columnCount !== rawHeaders.length) {
+      const issue = buildIssue("列数不一致", rowNumber, -1, "", `期望 ${rawHeaders.length} 列，实际 ${columnCount} 列`, "");
+      issue.sampleRowIndex = rowIndex;
+      addIssue(issues, "inconsistentRows", issue);
+    }
+    let emptyCount = sourceColumnCount - columnCount;
+    for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+      if (isIndexedCellEmpty(startCell + columnIndex)) emptyCount += 1;
+    }
+    if (sourceColumnCount > 1 && emptyCount / sourceColumnCount >= 0.6) {
+      const issue = buildIssue("空字段比例高", rowNumber, -1, "", `空字段 ${emptyCount}/${sourceColumnCount}`, "");
+      issue.sampleRowIndex = rowIndex;
+      addIssue(issues, "sparseRows", issue);
+    }
+    for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+      const byteLength = getCellByteLength(startCell + columnIndex);
+      if (byteLength >= 50000) {
+        const issue = buildIssue("超长字段", rowNumber, columnIndex, headers[columnIndex] || `Column ${columnIndex + 1}`, `至少 ${byteLength} 字节`, "");
+        issue.sampleRowIndex = rowIndex;
+        addIssue(issues, "longFields", issue);
+      }
+    }
+  }
+  await attachIssueSamples(issues);
+  const parserWarning = describeCsvParserDiagnostics(indexed.diagnostics);
+  if (parserWarning) addIssue(issues, "inconsistentRows", buildIssue("复杂字段未闭合", rowCount + 1, -1, "", parserWarning, "请检查源 CSV 的引号、JSON/数组括号或 Markdown 代码块"));
+  reportProgress(file.size, true, "索引完成");
+  return { issues };
+}
+
+async function scanJsonlLineOffsets(file, reportProgress) {
+  const starts = [];
+  const ends = [];
+  const reader = file.stream().getReader();
+  let processedBytes = 0;
+  let lineStart = 0;
+  let skipLineFeed = false;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    for (let index = 0; index < value.length; index += 1) {
+      const byte = value[index];
+      const absoluteOffset = processedBytes + index;
+      if (skipLineFeed) {
+        skipLineFeed = false;
+        if (byte === 0x0a) {
+          lineStart = absoluteOffset + 1;
+          continue;
+        }
+      }
+      if (byte !== 0x0a && byte !== 0x0d) continue;
+      const end = absoluteOffset;
+      if (end > lineStart) {
+        starts.push(lineStart);
+        ends.push(end);
+      }
+      lineStart = end + 1;
+      skipLineFeed = byte === 0x0d;
+    }
+    processedBytes += value.byteLength;
+    reportProgress(processedBytes);
+  }
+  if (lineStart < file.size) {
+    starts.push(lineStart);
+    ends.push(file.size);
+  }
+  return { starts, ends };
 }
 
 function stringifyJsonlValue(value) {
@@ -93,133 +828,328 @@ function stringifyJsonlValue(value) {
   try { return JSON.stringify(value); } catch (error) { return String(value); }
 }
 
-async function parseCsvFile(file, options) {
-  const sample = new Uint8Array(await file.slice(0, 512 * 1024).arrayBuffer());
-  const encoding = chooseEncoding(sample, options.encoding);
-  delimiter = options.delimiter || detectCsvDelimiter(new TextDecoder(encoding.label).decode(sample));
-  rawHeaders = [];
-  headers = [];
-  dataKind = "CSV";
-  const issues = createIssues();
-  let currentRows = [];
-  let processedBytes = 0;
-
-  const appendRecord = async (source) => {
-    if (!rawHeaders.length) {
-      rawHeaders = source;
-      headers = normalizeHeaders(rawHeaders, rawHeaders.length);
-      const groups = new Map();
-      rawHeaders.forEach((value, index) => {
-        const key = value == null || value === "" ? `Column ${index + 1}` : String(value);
-        groups.set(key, [...(groups.get(key) || []), index]);
-      });
-      issues.duplicateColumns = [...groups.entries()].filter(([, indexes]) => indexes.length > 1).map(([columnName, columnIndexes]) => (
-        buildIssue("重复列名", 1, columnIndexes[0], columnName, `列名出现 ${columnIndexes.length} 次：${columnIndexes.map((index) => index + 1).join(", ")}`, columnName)
-      ));
-      return;
-    }
-    if (!source.some((value) => value !== "")) return;
-    const expected = rawHeaders.length;
-    if (source.length > headers.length) headers = normalizeHeaders(rawHeaders, source.length);
-    const rowNumber = rowCount + 2;
-    if (source.length !== expected) addIssue(issues, "inconsistentRows", buildIssue("列数不一致", rowNumber, -1, "", `期望 ${expected} 列，实际 ${source.length} 列`, source.join(delimiter)));
-    const emptyCount = source.filter((value) => value === "").length + Math.max(0, headers.length - source.length);
-    if (headers.length > 1 && emptyCount / headers.length >= 0.6) addIssue(issues, "sparseRows", buildIssue("空字段比例高", rowNumber, -1, "", `空字段 ${emptyCount}/${headers.length}`, source.join(delimiter)));
-    source.forEach((value, columnIndex) => {
-      if (String(value).length >= 50000) addIssue(issues, "longFields", buildIssue("超长字段", rowNumber, columnIndex, headers[columnIndex] || `Column ${columnIndex + 1}`, `${String(value).length} 字符`, value));
-    });
-    currentRows.push(source.map((value) => String(value ?? "")));
-    rowCount += 1;
-    if (currentRows.length >= LARGE_CHUNK_SIZE) {
-      await writeChunk(chunkCount, currentRows);
-      chunkCount += 1;
-      currentRows = [];
-    }
-  };
-
-  const parser = createCsvRecordParser(delimiter);
-  const reader = file.stream().getReader();
-  const decoder = new TextDecoder(encoding.label);
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    processedBytes += value.byteLength;
-    const parsedRecords = parser.push(decoder.decode(value, { stream: true }));
-    for (const parsedRecord of parsedRecords) await appendRecord(parsedRecord);
-    self.postMessage({ type: "progress", progress: Math.min(0.94, processedBytes / Math.max(1, file.size) * 0.94), stage: `流式解析 CSV · ${rowCount.toLocaleString()} 行` });
-  }
-  for (const parsedRecord of parser.push(decoder.decode())) await appendRecord(parsedRecord);
-  for (const parsedRecord of parser.finish()) await appendRecord(parsedRecord);
-  const parserWarning = describeCsvParserDiagnostics(parser.getDiagnostics());
-  if (parserWarning) {
-    addIssue(issues, "inconsistentRows", buildIssue(
-      "复杂字段未闭合",
-      rowCount + 1,
-      -1,
-      "",
-      parserWarning,
-      "请检查源 CSV 的引号、JSON/数组括号或 Markdown 代码块",
-    ));
-  }
-  if (currentRows.length) { await writeChunk(chunkCount, currentRows); chunkCount += 1; }
-  return { issues, encoding: encoding.name };
+async function readJsonlObject(rowIndex) {
+  const text = await decodeFileRange(jsonlRowStarts[rowIndex], jsonlRowEnds[rowIndex]);
+  const value = JSON.parse(text);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`第 ${rowIndex + 1} 行不是 JSON object`);
+  return value;
 }
 
-async function parseJsonlFile(file, options) {
+function parseJsonlObjectFromBuffer(rowIndex, bytes, bufferStart) {
+  const start = jsonlRowStarts[rowIndex] - bufferStart;
+  const end = jsonlRowEnds[rowIndex] - bufferStart;
+  const value = JSON.parse(sourceDecoder.decode(bytes.subarray(start, end)));
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`第 ${rowIndex + 1} 行不是 JSON object`);
+  return value;
+}
+
+// 全表扫描不需要先去重排序，直接顺序成批，省掉一次 Set + sort。
+function buildSequentialBatches() {
+  const batches = [];
+  let current = null;
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const range = getIndexedRowByteRange(rowIndex);
+    if (!current || range.end - current.start > INDEX_READ_BATCH_BYTES) {
+      current = { start: range.start, end: range.end, rows: [rowIndex] };
+      batches.push(current);
+    } else {
+      current.end = Math.max(current.end, range.end);
+      current.rows.push(rowIndex);
+    }
+  }
+  return batches;
+}
+
+function buildJsonlReadBatches() {
+  return buildSequentialBatches();
+}
+
+async function loadIndexedJsonl(file, options) {
   const sample = new Uint8Array(await file.slice(0, 512 * 1024).arrayBuffer());
   const encoding = chooseEncoding(sample, options.encoding);
-  rawHeaders = [];
-  headers = [];
-  dataKind = "JSONL";
+  setSourceEncoding(encoding.label, encoding.name);
   delimiter = "JSON Lines";
+  dataKind = "JSONL";
+  rowCount = 0;
   const issues = createIssues();
-  const keys = new Map();
-  let currentRows = [];
-  let carry = "";
-  let lineNumber = 0;
-  let processedBytes = 0;
-  const appendLine = async (line) => {
-    lineNumber += 1;
-    if (!line.trim()) return;
-    let value;
-    try { value = JSON.parse(line); } catch (error) { throw new Error(`第 ${lineNumber} 行 JSON 解析失败：${error.message}`); }
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`第 ${lineNumber} 行不是 JSON object`);
-    Object.keys(value).forEach((key) => {
-      if (!keys.has(key)) { keys.set(key, keys.size); rawHeaders.push(key); headers = normalizeHeaders(rawHeaders, rawHeaders.length); }
-    });
-    const row = Array.from({ length: keys.size }, () => "");
-    Object.entries(value).forEach(([key, cell]) => { row[keys.get(key)] = stringifyJsonlValue(cell); });
-    const emptyCount = row.filter((cell) => cell === "").length;
-    if (headers.length > 1 && emptyCount / headers.length >= 0.6) addIssue(issues, "sparseRows", buildIssue("空字段比例高", lineNumber, -1, "", `空字段 ${emptyCount}/${headers.length}`, line));
-    row.forEach((cell, columnIndex) => {
-      if (cell.length >= 50000) addIssue(issues, "longFields", buildIssue("超长字段", lineNumber, columnIndex, headers[columnIndex] || `Column ${columnIndex + 1}`, `${cell.length} 字符`, cell));
-    });
-    currentRows.push(row); rowCount += 1;
-    if (currentRows.length >= LARGE_CHUNK_SIZE) { await writeChunk(chunkCount, currentRows); chunkCount += 1; currentRows = []; }
-  };
-  const reader = file.stream().getReader();
-  const decoder = new TextDecoder(encoding.label);
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    processedBytes += value.byteLength;
-    const lines = (carry + decoder.decode(value, { stream: true })).split(/\r\n|\r|\n/);
-    carry = lines.pop() || "";
-    for (const line of lines) await appendLine(line);
-    self.postMessage({ type: "progress", progress: Math.min(0.94, processedBytes / Math.max(1, file.size) * 0.94), stage: `流式解析 JSONL · ${rowCount.toLocaleString()} 行` });
+  const reportProgress = createProgressReporter(file, "JSONL", 0.42);
+  const offsets = await scanJsonlLineOffsets(file, reportProgress);
+  jsonlRowStarts = Uint32Array.from(offsets.starts);
+  jsonlRowEnds = Uint32Array.from(offsets.ends);
+  rowCount = jsonlRowStarts.length;
+  const keyIndexes = new Map();
+  rawHeaders = [];
+  let lastRowProgressAt = 0;
+  // 列名必须扫全表才能确定，但只保留 key 集合，不缓存每行的值。
+  for (const batch of buildJsonlReadBatches()) {
+    const bytes = new Uint8Array(await sourceFile.slice(batch.start, batch.end).arrayBuffer());
+    for (const rowIndex of batch.rows) {
+      let value;
+      try {
+        value = parseJsonlObjectFromBuffer(rowIndex, bytes, batch.start);
+      } catch (error) {
+        throw new Error(`第 ${rowIndex + 1} 行 JSON 解析失败：${error.message}`);
+      }
+      for (const key of Object.keys(value)) {
+        if (!keyIndexes.has(key)) {
+          keyIndexes.set(key, keyIndexes.size);
+          rawHeaders.push(key);
+        }
+      }
+    }
+    const now = Date.now();
+    if (now - lastRowProgressAt >= INDEX_PROGRESS_INTERVAL_MS) {
+      lastRowProgressAt = now;
+      const scanned = batch.rows[batch.rows.length - 1] + 1;
+      self.postMessage({
+        type: "progress",
+        progress: 0.42 + scanned / Math.max(1, rowCount) * 0.52,
+        stage: `建立 JSONL 列索引 · ${scanned.toLocaleString()} / ${rowCount.toLocaleString()} 行`,
+      });
+    }
   }
-  carry += decoder.decode();
-  if (carry) await appendLine(carry);
-  if (currentRows.length) { await writeChunk(chunkCount, currentRows); chunkCount += 1; }
-  return { issues, encoding: encoding.name };
+  sourceColumnCount = rawHeaders.length;
+  headers = normalizeHeaders(rawHeaders, sourceColumnCount);
+  self.postMessage({ type: "progress", progress: 0.94, stage: `索引完成 JSONL · ${rowCount.toLocaleString()} 行` });
+  return { issues };
 }
 
-async function forEachRow(callback) {
-  for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
-    const rows = await readChunk(chunkIndex);
-    const start = chunkIndex * LARGE_CHUNK_SIZE;
-    for (let offset = 0; offset < rows.length; offset += 1) await callback(rows[offset], start + offset, rows, chunkIndex);
+function getCsvRowByteRange(rowIndex) {
+  const startCell = rowCellOffsets[rowIndex];
+  const endCell = rowCellOffsets[rowIndex + 1];
+  if (startCell == null || endCell == null || endCell <= startCell) return { start: 0, end: 0 };
+  return { start: cellStarts[startCell], end: cellEnds[endCell - 1] };
+}
+
+function getIndexedRowByteRange(rowIndex) {
+  if (dataKind === "JSONL") return { start: jsonlRowStarts[rowIndex], end: jsonlRowEnds[rowIndex] };
+  return getCsvRowByteRange(rowIndex);
+}
+
+function buildReadBatches(indices) {
+  const sorted = [...new Set(indices || [])].filter((index) => Number.isInteger(index) && index >= 0 && index < rowCount).sort((a, b) => a - b);
+  const batches = [];
+  let current = null;
+  for (const rowIndex of sorted) {
+    const range = getIndexedRowByteRange(rowIndex);
+    if (!current || range.end - current.start > INDEX_READ_BATCH_BYTES) {
+      current = { start: range.start, end: range.end, rows: [rowIndex] };
+      batches.push(current);
+    } else {
+      current.end = Math.max(current.end, range.end);
+      current.rows.push(rowIndex);
+    }
   }
+  return batches;
+}
+
+function decodeCsvRowFromBuffer(rowIndex, bytes, bufferStart, maxCellBytes = 0) {
+  const row = Array.from({ length: sourceColumnCount }, () => "");
+  const startCell = rowCellOffsets[rowIndex];
+  const endCell = rowCellOffsets[rowIndex + 1];
+  for (let cellIndex = startCell; cellIndex < endCell; cellIndex += 1) {
+    const columnIndex = cellIndex - startCell;
+    if (columnIndex >= sourceColumnCount) break;
+    const start = cellStarts[cellIndex] - bufferStart;
+    let end = cellEnds[cellIndex] - bufferStart;
+    const complete = !maxCellBytes || end - start <= maxCellBytes;
+    if (!complete) end = start + maxCellBytes;
+    const text = sourceDecoder.decode(bytes.subarray(start, end));
+    row[columnIndex] = normalizeDecodedCsvCell(text, cellFlags[cellIndex], complete);
+  }
+  return row;
+}
+
+function getOverrideKey(rowIndex, columnIndex) {
+  return `${rowIndex}:${columnIndex}`;
+}
+
+function resolveRowValue(rowIndex, columnIndex, sourceRow, stack = new Set()) {
+  const key = getOverrideKey(rowIndex, columnIndex);
+  if (cellOverrides.has(key)) return cellOverrides.get(key);
+  if (columnIndex < sourceColumnCount) return String(sourceRow[columnIndex] ?? "");
+  if (stack.has(columnIndex)) return "";
+  const definition = virtualColumns.get(columnIndex);
+  if (!definition) return "";
+  stack.add(columnIndex);
+  let value = "";
+  if (definition.type === "add-derived") {
+    if (definition.mode === "sequence") value = String(rowIndex + 1);
+    else if (definition.mode === "copy") value = resolveRowValue(rowIndex, Number(definition.sourceColumnIndex), sourceRow, stack);
+    else if (definition.mode === "constant") value = String(definition.constantValue ?? "");
+  } else if (definition.type === "add-concatenated") {
+    value = (definition.items || []).map((item) => {
+      const itemColumnIndex = Number(item.columnIndex);
+      const alias = item.alias || `Column ${itemColumnIndex + 1}`;
+      return `# ${alias}\n\`\`\`markdown\n${resolveRowValue(rowIndex, itemColumnIndex, sourceRow, stack)}\n\`\`\``;
+    }).join("\n\n");
+  }
+  stack.delete(columnIndex);
+  return value;
+}
+
+function materializeRow(rowIndex, sourceRow) {
+  return Array.from({ length: headers.length }, (_, columnIndex) => resolveRowValue(rowIndex, columnIndex, sourceRow));
+}
+
+async function readIndexedRows(indices, batches = null) {
+  const rowsByIndex = new Map();
+  for (const batch of batches || buildReadBatches(indices)) {
+    const bytes = new Uint8Array(await sourceFile.slice(batch.start, batch.end).arrayBuffer());
+    for (const rowIndex of batch.rows) {
+      let sourceRow;
+      if (dataKind === "JSONL") {
+        const value = parseJsonlObjectFromBuffer(rowIndex, bytes, batch.start);
+        sourceRow = rawHeaders.map((key) => stringifyJsonlValue(value[key]));
+      } else {
+        sourceRow = decodeCsvRowFromBuffer(rowIndex, bytes, batch.start);
+      }
+      rowsByIndex.set(rowIndex, materializeRow(rowIndex, sourceRow));
+    }
+  }
+  const requested = indices || (batches || []).flatMap((batch) => batch.rows);
+  return requested.filter((rowIndex) => rowsByIndex.has(rowIndex)).map((rowIndex) => ({ rowIndex, row: rowsByIndex.get(rowIndex) }));
+}
+
+function resolvePreviewValue(rowIndex, columnIndex, sourcePreview, stack = new Set()) {
+  const key = getOverrideKey(rowIndex, columnIndex);
+  if (cellOverrides.has(key)) return String(cellOverrides.get(key)).slice(0, INDEX_PREVIEW_SLICE_CHARS);
+  if (columnIndex < sourceColumnCount) return String(sourcePreview[columnIndex] ?? "");
+  if (stack.has(columnIndex)) return "";
+  const definition = virtualColumns.get(columnIndex);
+  if (!definition) return "";
+  stack.add(columnIndex);
+  let value = "";
+  if (definition.type === "add-derived") {
+    if (definition.mode === "sequence") value = String(rowIndex + 1);
+    else if (definition.mode === "copy") value = resolvePreviewValue(rowIndex, Number(definition.sourceColumnIndex), sourcePreview, stack);
+    else if (definition.mode === "constant") value = String(definition.constantValue ?? "");
+  } else if (definition.type === "add-concatenated") {
+    value = (definition.items || []).map((item) => {
+      const itemColumnIndex = Number(item.columnIndex);
+      const alias = item.alias || `Column ${itemColumnIndex + 1}`;
+      return `# ${alias}\n\`\`\`markdown\n${resolvePreviewValue(rowIndex, itemColumnIndex, sourcePreview, stack)}\n\`\`\``;
+    }).join("\n\n");
+  }
+  stack.delete(columnIndex);
+  return value.slice(0, INDEX_PREVIEW_SLICE_CHARS);
+}
+
+// 预览按需从原文件读，不再为全表常驻预览字符串——那是大文件内存的主要来源。
+// 整行较小时一次读完整行，超大行退化为逐 cell 限量读，避免为了预览拖进 100 MB 的单元格。
+async function readSourcePreviewRows(indices) {
+  const previews = new Map();
+  const inlineRows = [];
+  const hugeRows = [];
+  for (const rowIndex of indices) {
+    const range = getIndexedRowByteRange(rowIndex);
+    if (range.end - range.start <= INDEX_PREVIEW_ROW_INLINE_MAX_BYTES) inlineRows.push(rowIndex);
+    else hugeRows.push(rowIndex);
+  }
+
+  for (const batch of buildReadBatches(inlineRows)) {
+    const bytes = new Uint8Array(await sourceFile.slice(batch.start, batch.end).arrayBuffer());
+    for (const rowIndex of batch.rows) {
+      if (dataKind === "JSONL") {
+        const value = parseJsonlObjectFromBuffer(rowIndex, bytes, batch.start);
+        previews.set(rowIndex, rawHeaders.map((key) => stringifyJsonlValue(value[key])));
+      } else {
+        previews.set(rowIndex, decodeCsvRowFromBuffer(rowIndex, bytes, batch.start));
+      }
+    }
+  }
+
+  for (const rowIndex of hugeRows) {
+    if (dataKind === "JSONL") {
+      const value = await readJsonlObject(rowIndex);
+      previews.set(rowIndex, rawHeaders.map((key) => stringifyJsonlValue(value[key])));
+      continue;
+    }
+    const startCell = rowCellOffsets[rowIndex];
+    const endCell = rowCellOffsets[rowIndex + 1];
+    const row = Array.from({ length: sourceColumnCount }, () => "");
+    for (let cellIndex = startCell; cellIndex < endCell; cellIndex += 1) {
+      const columnIndex = cellIndex - startCell;
+      if (columnIndex >= sourceColumnCount) break;
+      const start = cellStarts[cellIndex];
+      const complete = cellEnds[cellIndex] - start <= INDEX_PREVIEW_SOURCE_BYTES;
+      const end = complete ? cellEnds[cellIndex] : start + INDEX_PREVIEW_SOURCE_BYTES;
+      const text = await decodeFileRange(start, end);
+      row[columnIndex] = normalizeDecodedCsvCell(text, cellFlags[cellIndex], complete);
+    }
+    previews.set(rowIndex, row);
+  }
+
+  return previews;
+}
+
+async function getRowPreviews(indices) {
+  const wanted = (indices || []).filter((rowIndex) => Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < rowCount);
+  const sourcePreviews = await readSourcePreviewRows(wanted);
+  return wanted.map((rowIndex) => {
+    const sourceRow = sourcePreviews.get(rowIndex) || [];
+    const sourceLengths = Array.from(
+      { length: sourceColumnCount },
+      (_, columnIndex) => getCellByteLengthForRow(rowIndex, columnIndex),
+    );
+    const truncated = sourceRow.map((value) => String(value ?? "").slice(0, INDEX_PREVIEW_SLICE_CHARS));
+    return {
+      rowIndex,
+      row: Array.from({ length: headers.length }, (_, columnIndex) => resolvePreviewValue(rowIndex, columnIndex, truncated)),
+      lengths: Array.from({ length: headers.length }, (_, columnIndex) => {
+        const override = cellOverrides.get(getOverrideKey(rowIndex, columnIndex));
+        if (override != null) return String(override).length;
+        if (columnIndex < sourceColumnCount) return sourceLengths[columnIndex] || 0;
+        return resolvePreviewValue(rowIndex, columnIndex, truncated).length;
+      }),
+    };
+  });
+}
+
+// 返回字节长度：主线程只拿它估算缓存占用，不用于展示。
+function getCellByteLengthForRow(rowIndex, columnIndex) {
+  if (dataKind === "JSONL") return 0;
+  const startCell = rowCellOffsets[rowIndex];
+  const endCell = rowCellOffsets[rowIndex + 1];
+  const cellIndex = startCell + columnIndex;
+  if (cellIndex >= endCell) return 0;
+  return getCellByteLength(cellIndex);
+}
+
+async function getCell(rowIndex, columnIndex) {
+  if (!Number.isInteger(rowIndex) || !Number.isInteger(columnIndex) || rowIndex < 0 || rowIndex >= rowCount) return null;
+  const overrideKey = getOverrideKey(rowIndex, columnIndex);
+  if (cellOverrides.has(overrideKey)) {
+    return { rowIndex, columnIndex, value: String(cellOverrides.get(overrideKey) ?? "") };
+  }
+  if (dataKind === "CSV" && columnIndex < sourceColumnCount) {
+    const startCell = rowCellOffsets[rowIndex];
+    const endCell = rowCellOffsets[rowIndex + 1];
+    const cellIndex = startCell + columnIndex;
+    if (cellIndex >= endCell) return { rowIndex, columnIndex, value: "" };
+    const text = await decodeFileRange(cellStarts[cellIndex], cellEnds[cellIndex]);
+    return { rowIndex, columnIndex, value: normalizeDecodedCsvCell(text, cellFlags[cellIndex], true) };
+  }
+  const rows = await readIndexedRows([rowIndex]);
+  return { rowIndex, columnIndex, value: String(rows[0]?.row?.[columnIndex] ?? "") };
+}
+
+// scope 决定用哪个 token 判活："query" 跟随最新查询，"scan" 跟随最新的唯一值/列画像请求。
+// 两者都必须可取消，否则一次列筛选就会把整表扫描钉死在队列里。
+async function forEachIndexedRow(callback, token = null, scope = "query") {
+  const batches = buildSequentialBatches();
+  const isStale = () => (scope === "scan" ? token !== latestScanToken : token !== latestQueryToken);
+  let processed = 0;
+  for (const batch of batches) {
+    if (token != null && isStale()) return false;
+    const rows = await readIndexedRows(null, [batch]);
+    for (const item of rows) await callback(item.row, item.rowIndex);
+    processed += batch.rows.length;
+    if (token != null) {
+      self.postMessage({ type: "operation-progress", token, progress: processed / Math.max(1, rowCount), stage: `扫描长文本 · ${processed.toLocaleString()} / ${rowCount.toLocaleString()} 行` });
+    }
+  }
+  return true;
 }
 
 function rowMatches(row, request, needle) {
@@ -228,102 +1158,142 @@ function rowMatches(row, request, needle) {
   return row.some((cell) => normalizeForSearch(cell || "", request.caseSensitive).includes(needle));
 }
 
-async function getDuplicateValues(columnIndex) {
+function fingerprintValue(value) {
+  const text = String(value ?? "");
+  let first = 2166136261;
+  let second = 5381;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    first = Math.imul(first ^ code, 16777619);
+    second = Math.imul(second, 33) ^ code;
+  }
+  return `${text.length}:${first >>> 0}:${second >>> 0}`;
+}
+
+async function getDuplicateValues(columnIndex, token = null) {
   if (duplicateValueCache.has(columnIndex)) return duplicateValueCache.get(columnIndex);
   const counts = new Map();
-  await forEachRow((row) => { const value = String(row[columnIndex] ?? ""); if (value.trim()) counts.set(value, (counts.get(value) || 0) + 1); });
+  await forEachIndexedRow((row) => {
+    const value = String(row[columnIndex] ?? "");
+    if (value.trim()) {
+      const fingerprint = fingerprintValue(value);
+      counts.set(fingerprint, (counts.get(fingerprint) || 0) + 1);
+    }
+  }, token);
   const values = new Set([...counts].filter(([, count]) => count > 1).map(([value]) => value));
   duplicateValueCache.set(columnIndex, values);
   return values;
 }
 
-async function runQuery(request) {
+function canRunIndexOnlyQuery(request) {
+  return !request.query && !(request.filters || []).length && !(request.duplicateColumns || []).length && !(request.sort?.column >= 0 && request.sort?.direction !== "none");
+}
+
+function buildIndexOnlyQueryResult(request) {
+  const hiddenRows = new Set(request.hiddenRows || []);
+  const view = [];
+  for (let index = 0; index < rowCount; index += 1) if (!hiddenRows.has(index)) view.push(index);
+  const windowed = applyRowWindow(view, request.rowWindow);
+  return { viewIndices: Uint32Array.from(windowed), matchedRows: new Uint32Array() };
+}
+
+async function runQuery(request, token) {
+  if (canRunIndexOnlyQuery(request)) return buildIndexOnlyQueryResult(request);
   const needle = request.query ? normalizeForSearch(String(request.query), request.caseSensitive) : "";
   const hiddenRows = new Set(request.hiddenRows || []);
   const filters = (request.filters || []).map((filter) => ({ ...filter, valueSet: new Set(filter.values || []) }));
   const duplicateFilters = [];
-  for (const columnIndex of new Set(request.duplicateColumns || [])) duplicateFilters.push({ columnIndex: Number(columnIndex), values: await getDuplicateValues(Number(columnIndex)) });
+  for (const columnIndex of new Set(request.duplicateColumns || [])) duplicateFilters.push({ columnIndex: Number(columnIndex), values: await getDuplicateValues(Number(columnIndex), token) });
   const view = [];
   const matches = [];
-  await forEachRow((row, index) => {
+  const sortValues = request.sort?.column >= 0 && request.sort?.direction !== "none" ? new Map() : null;
+  const completed = await forEachIndexedRow((row, index) => {
     if (hiddenRows.has(index) || !rowPassesColumnFilters(row, filters)) return;
-    if (duplicateFilters.some((filter) => !filter.values.has(String(row[filter.columnIndex] ?? "")))) return;
+    if (duplicateFilters.some((filter) => !filter.values.has(fingerprintValue(row[filter.columnIndex] ?? "")))) return;
     const hit = needle ? rowMatches(row, request, needle) : false;
     if (hit) matches.push(index);
     if (!needle || !request.matchedOnly || hit) view.push(index);
-  });
-  if (request.sort?.column >= 0 && request.sort?.direction !== "none") {
-    const values = new Map();
-    await forEachRow((row, index) => { values.set(index, row[request.sort.column] ?? ""); });
+    if (sortValues) sortValues.set(index, row[request.sort.column] ?? "");
+  }, token);
+  if (!completed || token !== latestQueryToken) return null;
+  if (sortValues) {
     const direction = request.sort.direction === "asc" ? 1 : -1;
-    view.sort((a, b) => compareCells(values.get(a), values.get(b)) * direction);
+    view.sort((a, b) => compareCells(sortValues.get(a), sortValues.get(b)) * direction);
   }
   const windowed = applyRowWindow(view, request.rowWindow);
-  lastViewIndices = Uint32Array.from(windowed);
-  return { viewIndices: lastViewIndices, matchedRows: Uint32Array.from(matches) };
-}
-
-async function getRows(indices) {
-  const grouped = new Map();
-  for (const index of indices || []) {
-    if (!Number.isInteger(index) || index < 0 || index >= rowCount) continue;
-    const chunkIndex = Math.floor(index / LARGE_CHUNK_SIZE);
-    grouped.set(chunkIndex, [...(grouped.get(chunkIndex) || []), index]);
-  }
-  const rows = [];
-  for (const [chunkIndex, rowIndices] of grouped) {
-    const chunk = await readChunk(chunkIndex);
-    rowIndices.forEach((rowIndex) => rows.push({ rowIndex, row: toRow(chunk[rowIndex % LARGE_CHUNK_SIZE] || []) }));
-  }
-  return rows;
+  return { viewIndices: Uint32Array.from(windowed), matchedRows: Uint32Array.from(matches) };
 }
 
 async function patchCells(changes) {
-  const dirty = new Map();
   for (const change of changes || []) {
     if (!Number.isInteger(change.rowIndex) || !Number.isInteger(change.columnIndex) || change.rowIndex < 0 || change.rowIndex >= rowCount) continue;
-    const chunkIndex = Math.floor(change.rowIndex / LARGE_CHUNK_SIZE);
-    const rows = dirty.get(chunkIndex) || await readChunk(chunkIndex);
-    const row = rows[change.rowIndex % LARGE_CHUNK_SIZE] || [];
-    row[change.columnIndex] = String(change.value ?? "");
-    dirty.set(chunkIndex, rows);
+    cellOverrides.set(getOverrideKey(change.rowIndex, change.columnIndex), String(change.value ?? ""));
     duplicateValueCache.delete(change.columnIndex);
   }
-  for (const [chunkIndex, rows] of dirty) await writeChunk(chunkIndex, rows);
+}
+
+function reindexVirtualColumnsAfterDelete(removedColumnIndex) {
+  const next = new Map();
+  for (const [columnIndex, definition] of virtualColumns) {
+    if (columnIndex === removedColumnIndex) continue;
+    const nextDefinition = { ...definition };
+    if (Number(nextDefinition.sourceColumnIndex) > removedColumnIndex) nextDefinition.sourceColumnIndex -= 1;
+    if (Array.isArray(nextDefinition.items)) {
+      nextDefinition.items = nextDefinition.items.map((item) => ({
+        ...item,
+        columnIndex: Number(item.columnIndex) > removedColumnIndex ? Number(item.columnIndex) - 1 : Number(item.columnIndex),
+      }));
+    }
+    next.set(columnIndex > removedColumnIndex ? columnIndex - 1 : columnIndex, nextDefinition);
+  }
+  virtualColumns = next;
+  const nextOverrides = new Map();
+  for (const [key, value] of cellOverrides) {
+    const [rowIndex, columnIndex] = key.split(":").map(Number);
+    if (columnIndex === removedColumnIndex) continue;
+    nextOverrides.set(getOverrideKey(rowIndex, columnIndex > removedColumnIndex ? columnIndex - 1 : columnIndex), value);
+  }
+  cellOverrides = nextOverrides;
 }
 
 async function transformColumns(operation) {
   const columnIndex = Number(operation.columnIndex);
-  for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
-    const rows = await readChunk(chunkIndex);
-    rows.forEach((row, offset) => {
-      if (operation.type === "add-derived") {
-        if (operation.mode === "sequence") row[columnIndex] = String(chunkIndex * LARGE_CHUNK_SIZE + offset + 1);
-        else if (operation.mode === "copy") row[columnIndex] = String(row[operation.sourceColumnIndex] ?? "");
-        else if (operation.mode === "constant") row[columnIndex] = String(operation.constantValue ?? "");
-        else row[columnIndex] = "";
-      } else if (operation.type === "add-concatenated") {
-        row[columnIndex] = (operation.items || []).map((item) => {
-          const alias = item.alias || `Column ${Number(item.columnIndex) + 1}`;
-          return `# ${alias}\n\`\`\`markdown\n${String(row[item.columnIndex] ?? "")}\n\`\`\``;
-        }).join("\n\n");
-      } else if (operation.type === "delete-column") row.splice(columnIndex, 1);
-    });
-    await writeChunk(chunkIndex, rows);
-  }
-  if (Array.isArray(operation.headers)) headers = operation.headers;
+  if (operation.type === "delete-column") reindexVirtualColumnsAfterDelete(columnIndex);
+  else virtualColumns.set(columnIndex, { ...operation });
+  if (Array.isArray(operation.headers)) headers = [...operation.headers];
   duplicateValueCache = new Map();
 }
 
-async function computeUniqueValues(columnIndex) {
+async function computeUniqueValues(columnIndex, token) {
   const counts = new Map();
-  await forEachRow((row) => { const value = String(row[columnIndex] ?? ""); counts.set(value, (counts.get(value) || 0) + 1); });
-  return [...counts.entries()].map(([value, count]) => ({ value, count })).sort((a, b) => compareCells(a.value, b.value));
+  let truncated = false;
+  const completed = await forEachIndexedRow((row) => {
+    const value = String(row[columnIndex] ?? "");
+    if (value.length > INDEX_UNIQUE_VALUE_MAX_CHARS) {
+      truncated = true;
+      return;
+    }
+    if (!counts.has(value) && counts.size >= INDEX_UNIQUE_VALUE_LIMIT) {
+      truncated = true;
+      return;
+    }
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }, token, "scan");
+  if (!completed) return null;
+  return {
+    values: [...counts.entries()].map(([value, count]) => ({ value, count })).sort((a, b) => compareCells(a.value, b.value)),
+    truncated,
+  };
 }
 
-async function computeColumnProfile(columnIndex) {
+async function computeColumnProfile(columnIndex, token) {
   const values = new Map();
-  await forEachRow((row, index) => values.set(index, row[columnIndex] ?? ""));
+  const completed = await forEachIndexedRow(
+    (row, index) => values.set(index, String(row[columnIndex] ?? "").slice(0, INDEX_UNIQUE_VALUE_MAX_CHARS)),
+    token,
+    "scan",
+  );
+  if (!completed) return null;
   return buildColumnProfile(rowCount, (index) => values.get(index) ?? "");
 }
 
@@ -332,25 +1302,38 @@ async function handleMessage(event) {
   try {
     if (message.kind === "load-large-file") {
       const startedAt = Date.now();
-      await openStorage(message.storeName);
+      sourceFile = message.file;
+      virtualColumns = new Map();
+      cellOverrides = new Map();
+      duplicateValueCache = new Map();
       const parsed = message.fileKind === "JSONL"
-        ? await parseJsonlFile(message.file, message)
-        : await parseCsvFile(message.file, message);
+        ? await loadIndexedJsonl(sourceFile, message)
+        : await loadIndexedCsv(sourceFile, message);
       self.postMessage({ type: "loaded", result: {
         headers,
         issues: parsed.issues,
         rowCount,
-        file: { name: message.file.name, size: message.file.size, lastModified: message.file.lastModified, encoding: parsed.encoding, delimiter, parseMs: Date.now() - startedAt, kind: dataKind },
+        indexed: true,
+        file: { name: sourceFile.name, size: sourceFile.size, lastModified: sourceFile.lastModified, encoding: sourceEncodingName, delimiter, parseMs: Date.now() - startedAt, kind: dataKind },
       } });
       return;
     }
     if (message.kind === "query") {
-      const result = await runQuery(message.request || {});
+      const result = await runQuery(message.request || {}, message.token);
+      if (!result) return;
       self.postMessage({ type: "query-complete", token: message.token, result }, [result.viewIndices.buffer, result.matchedRows.buffer]);
       return;
     }
+    if (message.kind === "get-previews") {
+      self.postMessage({ type: "previews", token: message.token, rows: await getRowPreviews(message.indices) });
+      return;
+    }
+    if (message.kind === "get-cell") {
+      self.postMessage({ type: "cell", token: message.token, cell: await getCell(message.rowIndex, message.columnIndex) });
+      return;
+    }
     if (message.kind === "get-rows") {
-      self.postMessage({ type: "rows", token: message.token, rows: await getRows(message.indices) });
+      self.postMessage({ type: "rows", token: message.token, rows: await readIndexedRows(message.indices) });
       return;
     }
     if (message.kind === "patch-cells") {
@@ -364,18 +1347,30 @@ async function handleMessage(event) {
       return;
     }
     if (message.kind === "unique-values") {
-      self.postMessage({ type: "unique-values-complete", token: message.token, columnIndex: message.columnIndex, values: await computeUniqueValues(message.columnIndex) });
+      const result = await computeUniqueValues(message.columnIndex, message.token);
+      if (!result) return;
+      self.postMessage({ type: "unique-values-complete", token: message.token, columnIndex: message.columnIndex, ...result });
       return;
     }
     if (message.kind === "column-profile") {
-      self.postMessage({ type: "column-profile-complete", token: message.token, columnIndex: message.columnIndex, profile: await computeColumnProfile(message.columnIndex) });
+      const profile = await computeColumnProfile(message.columnIndex, message.token);
+      if (!profile) return;
+      self.postMessage({ type: "column-profile-complete", token: message.token, columnIndex: message.columnIndex, profile });
     }
   } catch (error) {
     self.postMessage({ type: "error", token: message.token, message: error?.message || String(error) });
   }
 }
 
+// 视口读取只依赖不可变的偏移索引和 overrides，不需要排在长扫描后面等着；
+// 否则打开一次列筛选就会把滚动冻结到全表扫描结束。
+const IMMEDIATE_MESSAGE_KINDS = new Set(["get-previews", "get-cell", "get-rows"]);
+
 self.onmessage = (event) => {
+  const kind = event.data?.kind;
+  if (kind === "query") latestQueryToken = event.data.token;
+  if (kind === "unique-values" || kind === "column-profile") latestScanToken = event.data.token;
+  if (IMMEDIATE_MESSAGE_KINDS.has(kind) && sourceFile) return handleMessage(event);
   operationQueue = operationQueue.then(() => handleMessage(event));
   return operationQueue;
 };

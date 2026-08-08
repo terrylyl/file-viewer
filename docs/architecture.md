@@ -13,6 +13,7 @@ Browser
 │  ├─ CSS
 │  ├─ <script id="csv-worker-source" type="text/plain">
 │  ├─ <script id="query-worker-source" type="text/plain">
+│  ├─ <script id="large-data-worker-source" type="text/plain">
 │  ├─ <script id="excel-worker-source" type="text/plain">
 │  └─ main application script
 └─ Blob Workers
@@ -37,7 +38,7 @@ Local serving is done by `scripts/serve.mjs`; static file access is enough for n
 - `src/app/export.js`: row-window controls and filtered CSV/XLSX export orchestration.
 - `src/app/main.js`: remaining workspace commands, event wiring, and application startup.
 - `src/shared/*.js`: pure helpers reused by the main thread and Worker sources.
-- `src/workers/*.js`: CSV/JSONL parsing, query/filtering/sorting, OPFS-backed large-text data, and Excel parsing Worker logic.
+- `src/workers/*.js`: CSV/JSONL parsing, query/filtering/sorting, original-file offset-indexed large-text data, and Excel parsing Worker logic.
 - `vendor/xlsx.full.min.js`: reviewed, pinned SheetJS build input; it is integrity-checked before being inlined into the generated Excel Worker.
 - `src/styles.css`: application styling.
 - `index.html`: generated single-file distribution artifact.
@@ -46,8 +47,8 @@ Local serving is done by `scripts/serve.mjs`; static file access is enough for n
 - `tests/csv-worker-core.test.mjs`: extracts `csv-worker-source` from `index.html` and tests parser behavior.
 - `tests/query-worker-filter.test.mjs`: validates query Worker filtering behavior.
 - `tests/shared-core.test.mjs`: validates shared pure helpers directly.
+- `tests/large-data-worker.test.mjs`: indexing, encoding detection, and on-demand read behavior for the large-file Worker.
 - `tests/html-contract.test.mjs`: contract tests for required DOM ids, function hooks, Worker scripts, and high-risk behavior guards.
-- `docs/superpowers/*`: historical design and implementation planning notes for specific features.
 
 ## Main Layers
 
@@ -109,12 +110,14 @@ File selected or dropped
 For CSV/TSV/TXT/JSONL files at or above 24 MiB, `parseLargeTextFile(...)` takes a separate path:
 
 ```text
-File.stream() → large-data Worker → OPFS chunk files → query / row-page messages
-                                               ↓
-                                  main-thread viewport row cache
+File.stream() → large-data Worker → byte offset index + bounded previews
+                         │                         │
+                         └─ File.slice(...) ──────┴─→ cell / row / query messages
+                                                        ↓
+                                           main-thread byte-bounded caches
 ```
 
-The large-data Worker is the canonical row owner. `state.rows` remains a length-compatible facade for UI compatibility, while `getDataRow(...)`, `requestLargeRows(...)`, and `prefetchLargeRows(...)` keep the visible DOM bounded. The current product cap is 256 MiB and the supported target is current desktop Chrome/Edge.
+The original browser `File` remains the canonical byte source for the page lifetime; the application does not duplicate it into OPFS. The Worker keeps only compact cell/line byte offsets in growable typed arrays — previews are decoded from the file on demand, because a resident preview string per cell made Worker memory scale with cell count (roughly 119 bytes per cell, which put the advertised 500 MiB cap out of reach for narrow, many-row files). Retained index memory is now about 18 bytes per cell. `state.rows` remains a length-compatible facade for UI compatibility, while `getDisplayRow(...)`, `requestLargeCell(...)`, and `requestLargeRows(...)` keep full text out of the main thread until an explicit operation needs it. The current product cap is 500 MiB and the supported target is current desktop Chrome/Edge. Refresh recovery is intentionally not provided because the original `File` reference is page-lifetime state.
 
 The Excel Worker contains the verified SheetJS source before its own handler code. It never imports runtime code or falls back to the main thread. Oversized or unsafe XLSX failures may offer the XLSX-to-CSV conversion path.
 
@@ -179,8 +182,8 @@ Important `state` groups:
 | Selection | `selectionAnchor`, `selectionRange`, `selectionDrag` | Spreadsheet-style cell, row, column, and all-table selection. |
 | Rendering | `renderQueued`, `headerDirty`, `cellVersions`, `cellRenderCache` | Render scheduling and visible cell node caching. |
 | Workers | `worker`, `queryWorker`, `queryToken`, `queryRowsVersion`, `queryWorkerReadyVersion`, `queryWorkerDirty` | CSV/JSONL parse worker and query worker lifecycle. |
-| Large text | `largeDataWorker`, `largeData` | OPFS-backed rows, bounded row cache, remote row requests, and large-data mutations. |
-| Modal/detail | `detailVisibleChars`, `modalVisibleChars`, `modalCell`, `modalSplitResize`, `modalResize` | Large-cell viewing and split/resize state. |
+| Large text | `largeDataWorker`, `largeData` | Original-file byte offsets, byte-bounded preview/cell/row caches, remote reads, and edit overlays. |
+| Modal/detail | `detailVisibleChars`, `detailVisibleStart`, `modalVisibleChars`, `modalVisibleStart`, `modalCell`, `modalSplitResize`, `modalResize` | Paged large-cell viewing and split/resize state. |
 
 ## Workers
 
@@ -188,8 +191,18 @@ Important `state` groups:
 
 `csv-worker-source` owns:
 
-- CSV delimiter detection.
+- CSV delimiter detection. Candidate delimiters are scored on field-count consistency **and** on whether data records reproduce the header's column count, so a `|`-separated list living inside one column of a comma file does not win.
 - CSV state-machine parsing. Standard CSV quoting remains the primary rule; the parser also conservatively retains unquoted JSON object/array fields, backslash-escaped delimiters, and fenced Markdown blocks so their commas/newlines do not become table boundaries.
+
+The tolerant extensions are guarded, because an unterminated one used to swallow the rest of the file:
+
+- A `{` or `[` only opens a structured field when the next character actually looks like JSON. Inside a quoted field the parser looks one character further so a field's own closing quote (`"{"`) is not mistaken for the start of a JSON string.
+- Structured fields and code fences run under `CSV_TOLERANCE_MAX_CHARS`. Exceeding it rolls the parser back to the start of the field and replays the buffered text with tolerance disabled.
+- A code fence still open at EOF is rolled back the same way; an unclosed JSON bracket at EOF is kept as-is so the import warning still surfaces a genuinely truncated source file.
+- Inside quotes, `\"` is only an escape when another character follows it; `"C:\dir\",next` closes at its own quote.
+- `parseCsvText` additionally splits backslash-escaped delimiters back apart when a record came out shorter than the header.
+
+`escapeCsv` mirrors these rules: any value containing a backslash or backtick, or starting with `{`/`[`, is quoted on export, so the app can always re-read what it wrote. `escapeSpreadsheetFormula` leaves plain numbers alone rather than turning `-5` into `'-5`.
 - JSONL object expansion.
 - Text decoding with UTF-8 and GB18030/GBK fallback.
 - Parser issue detection during CSV/JSONL import, including unclosed quotes, structured fields, or Markdown fences.
@@ -228,9 +241,18 @@ Staleness guards:
 
 ### Large Data Worker
 
-`large-data-worker-source` is selected only for CSV/TSV/TXT/JSONL files of at least 24 MiB. It streams the `File`, stores JSON row chunks in OPFS, and services `query`, `get-rows`, `patch-cells`, `transform-columns`, unique-value and profile requests. It intentionally does not post a complete row array to the main thread. It uses the same stateful CSV parser as the normal Worker, including across decoded stream chunk boundaries.
+`large-data-worker-source` is selected only for CSV/TSV/TXT/JSONL files of at least 24 MiB. It scans `File.stream()` as `Uint8Array` chunks and records each CSV cell (or JSONL line) as byte offsets. ASCII delimiters can be recognized before decoding for UTF-8 and GB18030/GBK input. The CSV scanner preserves the normal parser's tolerant handling of quoted fields, doubled quotes, backslash escapes, unquoted JSON/arrays, Markdown fences, CRLF, and state split across stream chunks — including the JSON lookahead gate, the tolerance budget, and the rollback described above.
 
-CSV export obtains small row pages through this Worker and writes Blob parts incrementally. XLSX export remains available, but SheetJS necessarily materializes the export workbook; callers should prefer CSV for the lowest memory use.
+Two encoding hazards are handled here specifically, because this path parses bytes rather than decoded text:
+
+- The 512 KiB detection sample is trimmed back to a UTF-8 character boundary before the `fatal: true` probe. Without it, a sample that cut a multi-byte character mid-sequence pushed ordinary UTF-8 CJK files onto the GB18030 branch and garbled the whole table. `TextDecoder("gb18030")` never throws, so that branch is validated by checking for replacement characters instead of by exception.
+- Under GB18030/GBK the second byte of a character falls in `0x40-0xFE` and overlaps ASCII `\ [ { |` and backtick. The scanner skips whole characters after a `0x81-0xFE` lead byte so a Chinese character cannot be read as an escape or a structure opener.
+
+The Worker services separate `get-previews`, `get-cell`, and `get-rows` requests. Exact text is decoded from `File.slice(start, end)` only when needed; previews read whole rows in one slice when the row is small and fall back to per-cell bounded reads for very large rows. `get-previews` returns one character more than `PREVIEW_LIMIT` so the main thread's `summarize()` can tell a truncated cell from one that merely fills the limit. Edits and derived columns are overlays over the immutable source index. Search/filter/sort operations decode bounded row batches, publish progress, and use query tokens to discard stale work; unique-value, column-profile, and duplicate-value scans carry their own `latestScanToken` so a newer request cancels an older one. Read requests bypass the serial operation queue, so a long full-table scan cannot freeze viewport scrolling. The main thread warns after 15 seconds without load progress and fails the load after 45 seconds so a silently terminated Worker does not leave the UI waiting forever.
+
+The main thread limits preview, full-cell, and full-row caches by estimated bytes rather than entry count. Detail and modal views render one text page at a time so a very large cell is not appended to one ever-growing DOM node.
+
+Large CSV export requests 10 rows at a time and writes them directly through the File System Access writable stream. Browsers without that API may use the Blob fallback only below the expensive-operation guard; larger exports fail explicitly instead of risking an out-of-memory tab. XLSX necessarily materializes the workbook and is therefore disabled for large sources above that guard.
 
 ### Excel Worker
 
@@ -361,7 +383,7 @@ Export uses current `viewIndices` and visible columns. CSV export is chunked thr
 
 ### Edit Recovery And Leave Protection
 
-`v2.3.5` treats changed or currently edited cells as recoverable local changes. The app uses `overscroll-behavior-x: contain` on the page and horizontal table regions to reduce touchpad overscroll navigation. When an edit exists, a `beforeunload` listener is attached; it is removed again once no cell changes remain.
+`v2.3.6` treats changed or currently edited cells as recoverable local changes. The app uses `overscroll-behavior-x: contain` on the page and horizontal table regions to reduce touchpad overscroll navigation. When an edit exists, a `beforeunload` listener is attached; it is removed again once no cell changes remain.
 
 Recovery drafts contain only the changed cell coordinates and values, not the complete source file. They are written immediately to `sessionStorage` and best-effort to IndexedDB. The draft key combines file kind, name, size, modification time, and sheet/delimiter so a matching draft can be offered after the same file is loaded again. Do not broaden this into complete-file persistence without revisiting the local-data privacy statement and capacity limits.
 
@@ -420,13 +442,13 @@ src/
 ├─ workers/
 │  ├─ csv-worker.js
 │  ├─ query-worker.js
+│  ├─ large-data-worker.js
 │  └─ excel-worker.js
 └─ shared/
    ├─ csv-utils.js
    ├─ column-profile.js
    ├─ filters.js
    ├─ issues.js
-   ├─ row-chunks.js
    └─ excel-utils.js
 ```
 

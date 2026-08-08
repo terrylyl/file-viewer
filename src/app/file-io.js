@@ -408,6 +408,33 @@ async function saveBinaryFile(filename, buffer, mime) {
   downloadBinaryFile(filename, buffer, mime);
 }
 
+async function openTextFileWritable(filename) {
+  if (!window.showSaveFilePicker) return { writable: null, cancelled: false };
+  const options = {
+    suggestedName: filename,
+    types: [
+      {
+        description: "CSV file",
+        accept: { "text/csv": [".csv"] },
+      },
+    ],
+  };
+  if (state.sourceFileHandle) options.startIn = state.sourceFileHandle;
+  try {
+    const handle = await window.showSaveFilePicker(options);
+    return { writable: await handle.createWritable(), cancelled: false };
+  } catch (error) {
+    if (error?.name === "AbortError") return { writable: null, cancelled: true };
+    try {
+      const handle = await window.showSaveFilePicker({ suggestedName: filename });
+      return { writable: await handle.createWritable(), cancelled: false };
+    } catch (fallbackError) {
+      if (fallbackError?.name === "AbortError") return { writable: null, cancelled: true };
+      throw fallbackError;
+    }
+  }
+}
+
 async function saveTextFile(filename, content, mime = "text/csv;charset=utf-8") {
   const parts = normalizeTextParts(content);
   if (window.showSaveFilePicker) {

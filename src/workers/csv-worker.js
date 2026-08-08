@@ -108,6 +108,30 @@ function repairFormulaRecord(record, expectedColumns, delimiter) {
   return changed && repaired.length === expectedColumns ? repaired : record;
 }
 
+// 未加引号的 `\` + 分隔符会被解析器当成转义，Windows 路径 `C:\dir\,next` 因此并列。
+// 只有当这一行确实比表头少列时才拆回来，`alpha\, beta` 这类列数正常的行不受影响。
+function repairBackslashRecord(record, expectedColumns, delimiter) {
+  if (!expectedColumns || record.length >= expectedColumns) return record;
+  const escaped = `\\${delimiter}`;
+  let missing = expectedColumns - record.length;
+  const repaired = [];
+
+  for (const cell of record) {
+    const value = cell == null ? "" : String(cell);
+    if (missing <= 0 || !value.includes(escaped)) {
+      repaired.push(value);
+      continue;
+    }
+    const pieces = value.split(escaped);
+    const takes = Math.min(missing, pieces.length - 1);
+    for (let index = 0; index < takes; index += 1) repaired.push(`${pieces[index]}\\`);
+    repaired.push(pieces.slice(takes).join(escaped));
+    missing -= takes;
+  }
+
+  return repaired.length === expectedColumns ? repaired : record;
+}
+
 function parseCsvText(text, options = {}) {
   const delimiter = options.delimiter || detectDelimiter(text);
   const previewLimit = options.previewLimit || DEFAULT_PREVIEW_LIMIT;
@@ -130,7 +154,14 @@ function parseCsvText(text, options = {}) {
   const rawHeaders = nonEmptyRecords[0] || [];
   const expectedColumns = rawHeaders.length;
   const recordsForAnalysis = expectedColumns
-    ? [rawHeaders, ...nonEmptyRecords.slice(1).map((row) => repairFormulaRecord(row, expectedColumns, delimiter))]
+    ? [
+      rawHeaders,
+      ...nonEmptyRecords.slice(1).map((row) => repairBackslashRecord(
+        repairFormulaRecord(row, expectedColumns, delimiter),
+        expectedColumns,
+        delimiter,
+      )),
+    ]
     : nonEmptyRecords;
   const maxColumns = getMaxRecordColumns(recordsForAnalysis, expectedColumns);
   const headers = normalizeHeaders(rawHeaders, maxColumns);
@@ -354,6 +385,8 @@ self.__CSV_CORE__ = {
   parseCsvText,
   parseJsonlText,
   decodeBuffer,
+  // 导出转义和解析必须成对验证：导出的 CSV 要能被同一个解析器原样读回来。
+  escapeCsv,
 };
 
 self.onmessage = (event) => {

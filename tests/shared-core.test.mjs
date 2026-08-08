@@ -25,6 +25,26 @@ test("shared CSV export escapes spreadsheet formulas and CSV syntax", () => {
   assert.equal(core.escapeCsv("safe"), "safe");
 });
 
+test("shared CSV export keeps numbers numeric instead of quoting them as text", () => {
+  const core = loadSharedCore("../src/shared/csv-utils.js");
+
+  for (const value of ["-5", "-0.25", "+1.5e3", "+42", "0"]) {
+    assert.equal(core.escapeCsv(value), value, `${value} is a number, not a formula`);
+  }
+  // 真正像公式的内容仍然要转义
+  assert.equal(core.escapeCsv("-1+2"), "'-1+2");
+  assert.equal(core.escapeCsv("+86 138"), "'+86 138");
+});
+
+test("shared CSV export quotes everything the tolerant parser would reinterpret", () => {
+  const core = loadSharedCore("../src/shared/csv-utils.js");
+
+  assert.equal(core.escapeCsv("C:\\data\\"), '"C:\\data\\"');
+  assert.equal(core.escapeCsv("[draft"), '"[draft"');
+  assert.equal(core.escapeCsv("  {note"), '"  {note"');
+  assert.equal(core.escapeCsv("```"), '"```"');
+});
+
 test("shared filters evaluate values consistently for main thread and worker callers", () => {
   const core = loadSharedCore("../src/shared/filters.js");
   const filters = [

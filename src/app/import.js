@@ -146,26 +146,68 @@ function cancelActiveLoad() {
 }
 
 async function parseLargeTextFile(file, fileKind) {
-  if (file.size > LARGE_TEXT_FILE_MAX_BYTES) {
-    throw new Error(`大文件模式当前上限为 ${formatBytes(LARGE_TEXT_FILE_MAX_BYTES)}；请先拆分文件后重试`);
-  }
   const loadToken = beginLoad();
+  if (file.size > LARGE_TEXT_FILE_MAX_BYTES) {
+    const message = `大文件模式当前上限为 ${formatBytes(LARGE_TEXT_FILE_MAX_BYTES)}；请先拆分文件后重试`;
+    setProgress(0, `大文件解析失败：${message}`);
+    els.emptyState.style.display = "grid";
+    els.emptyState.querySelector("strong").textContent = "文件超过读取上限";
+    els.emptyState.querySelector("span").textContent = message;
+    return;
+  }
   resetExcelWorkbook();
   setProgress(0.01, "准备大文件读取");
   els.cancelLoadButton.hidden = false;
   els.emptyState.style.display = "grid";
   els.emptyState.querySelector("strong").textContent = "正在流式解析大文件";
-  els.emptyState.querySelector("span").textContent = `${file.name} · 将保留在本机浏览器临时存储中`;
-  const worker = createLargeDataWorker();
+  els.emptyState.querySelector("span").textContent = `${file.name} · 正在建立原文件偏移索引，不会复制完整文件`;
+  let worker = null;
+  let lastActivityAt = Date.now();
+  const clearLoadWatchdog = () => {
+    if (state.largeLoadWatchdog) window.clearInterval(state.largeLoadWatchdog);
+    state.largeLoadWatchdog = 0;
+  };
+  const failLargeLoad = (message) => {
+    if (!isCurrentLoad(loadToken)) return;
+    clearLoadWatchdog();
+    els.cancelLoadButton.hidden = true;
+    state.worker = null;
+    worker?.terminate();
+    setProgress(0, `大文件解析失败：${message}`);
+    els.emptyState.querySelector("strong").textContent = "大文件解析失败";
+    els.emptyState.querySelector("span").textContent = message;
+  };
+  try {
+    worker = createLargeDataWorker();
+  } catch (error) {
+    failLargeLoad(error.message || "当前浏览器无法启动大文件 Worker");
+    return;
+  }
   state.worker = worker;
+  state.largeLoadWatchdog = window.setInterval(() => {
+    if (!isCurrentLoad(loadToken)) {
+      clearLoadWatchdog();
+      return;
+    }
+    const stalledFor = Date.now() - lastActivityAt;
+    if (stalledFor >= LARGE_LOAD_STALL_FAILURE_MS) {
+      failLargeLoad("超过 45 秒未收到读取进度，Worker 可能已因内存不足而停止");
+      return;
+    }
+    if (stalledFor >= LARGE_LOAD_STALL_NOTICE_MS) {
+      els.emptyState.querySelector("span").textContent = `${file.name} · 后台仍在处理超大单元格，可继续等待或取消读取`;
+    }
+  }, 3000);
   worker.onmessage = (event) => {
     if (!isCurrentLoad(loadToken)) return;
     const message = event.data || {};
+    lastActivityAt = Date.now();
     if (message.type === "progress") {
       setProgress(message.progress, message.stage);
       return;
     }
     if (message.type === "loaded") {
+      clearLoadWatchdog();
       els.cancelLoadButton.hidden = true;
       state.worker = null;
       setDataset({ ...message.result, largeWorker: worker, rowCount: message.result.rowCount });
@@ -173,15 +215,14 @@ async function parseLargeTextFile(file, fileKind) {
       return;
     }
     if (message.type === "error") {
-      els.cancelLoadButton.hidden = true;
-      state.worker = null;
-      worker.terminate();
-      setProgress(0, `大文件解析失败：${message.message}`);
-      els.emptyState.querySelector("strong").textContent = "大文件解析失败";
-      els.emptyState.querySelector("span").textContent = message.message;
+      failLargeLoad(message.message || "未知错误");
     }
   };
-  const storeName = "table-viewer-large-active";
+  worker.onerror = (event) => {
+    event.preventDefault?.();
+    failLargeLoad(event.message || "大文件 Worker 意外退出，可能是浏览器内存不足或文件读取失败");
+  };
+  worker.onmessageerror = () => failLargeLoad("大文件 Worker 返回的数据无法读取");
   worker.postMessage({
     kind: "load-large-file",
     file,
@@ -189,7 +230,6 @@ async function parseLargeTextFile(file, fileKind) {
     encoding: els.encodingSelect.value,
     previewLimit: PREVIEW_LIMIT,
     longFieldThreshold: 50000,
-    storeName,
   });
 }
 

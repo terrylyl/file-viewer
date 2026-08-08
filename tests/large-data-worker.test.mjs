@@ -3,39 +3,6 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import vm from "node:vm";
 
-function createMemoryOpfs() {
-  const directories = new Map();
-  return {
-    async getDirectory() {
-      return {
-        async removeEntry(name) {
-          directories.delete(name);
-        },
-        async getDirectoryHandle(name) {
-          if (!directories.has(name)) directories.set(name, new Map());
-          const files = directories.get(name);
-          return {
-            async getFileHandle(filename) {
-              return {
-                async createWritable() {
-                  let content = "";
-                  return {
-                    async write(value) { content = String(value); },
-                    async close() { files.set(filename, content); },
-                  };
-                },
-                async getFile() {
-                  return { async text() { return files.get(filename) || ""; } };
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  };
-}
-
 function createFile(text, name = "large.csv") {
   const blob = new Blob([text], { type: "text/csv" });
   Object.defineProperties(blob, {
@@ -45,13 +12,15 @@ function createFile(text, name = "large.csv") {
   return blob;
 }
 
-function createChunkedFile(text, chunkSizes, name = "large.csv") {
-  const bytes = new TextEncoder().encode(text);
+function createByteFile(bytes, chunkSizes = [bytes.byteLength], name = "large.csv") {
+  const sliceRanges = [];
   return {
     name,
     size: bytes.byteLength,
     lastModified: 0,
+    sliceRanges,
     slice(start, end) {
+      sliceRanges.push([start, end]);
       return new Blob([bytes.slice(start, end)]);
     },
     stream() {
@@ -73,6 +42,10 @@ function createChunkedFile(text, chunkSizes, name = "large.csv") {
   };
 }
 
+function createChunkedFile(text, chunkSizes, name = "large.csv") {
+  return createByteFile(new TextEncoder().encode(text), chunkSizes, name);
+}
+
 function loadLargeWorker() {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const match = html.match(/<script id="large-data-worker-source" type="text\/plain">([\s\S]*?)<\/script>/);
@@ -83,7 +56,6 @@ function loadLargeWorker() {
     TextDecoder,
     Uint8Array,
     Uint32Array,
-    navigator: { storage: createMemoryOpfs() },
     self: { postMessage(message) { messages.push(message); } },
   };
   vm.createContext(context);
@@ -91,18 +63,27 @@ function loadLargeWorker() {
   return { context, messages };
 }
 
-test("large data worker streams CSV into OPFS and queries it without main-thread rows", async () => {
+function plain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+test("large data worker indexes the original File without OPFS and reads rows on demand", async () => {
   const { context, messages } = loadLargeWorker();
   await context.self.onmessage({ data: {
     kind: "load-large-file",
     file: createFile('id,name,notes\n1,Alice,"first row"\n2,Bob,"contains target"\n3,Carol,last'),
     fileKind: "CSV",
     encoding: "auto",
-    storeName: "test-store",
   } });
   const loaded = messages.find((message) => message.type === "loaded");
-  assert.deepEqual(JSON.parse(JSON.stringify(loaded.result.headers)), ["id", "name", "notes"]);
+  assert.deepEqual(plain(loaded.result.headers), ["id", "name", "notes"]);
   assert.equal(loaded.result.rowCount, 3);
+  assert.equal(loaded.result.indexed, true);
+  assert.equal("rows" in loaded.result, false);
+
+  await context.self.onmessage({ data: { kind: "get-previews", token: 0, indices: [0] } });
+  const firstPreview = messages.find((message) => message.type === "previews");
+  assert.equal(firstPreview.rows[0].row[2], "first row");
 
   await context.self.onmessage({ data: {
     kind: "query",
@@ -114,15 +95,16 @@ test("large data worker streams CSV into OPFS and queries it without main-thread
 
   await context.self.onmessage({ data: { kind: "get-rows", token: 2, indices: [1] } });
   const rows = messages.find((message) => message.type === "rows");
-  assert.deepEqual(JSON.parse(JSON.stringify(rows.rows)), [{ rowIndex: 1, row: ["2", "Bob", "contains target"] }]);
+  assert.deepEqual(plain(rows.rows), [{ rowIndex: 1, row: ["2", "Bob", "contains target"] }]);
 
   await context.self.onmessage({ data: { kind: "patch-cells", token: 3, changes: [{ rowIndex: 1, columnIndex: 1, value: "Bobby" }] } });
-  await context.self.onmessage({ data: { kind: "get-rows", token: 4, indices: [1] } });
-  const updated = messages.filter((message) => message.type === "rows").at(-1);
-  assert.equal(updated.rows[0].row[1], "Bobby");
+  await context.self.onmessage({ data: { kind: "get-cell", token: 4, rowIndex: 1, columnIndex: 1 } });
+  assert.equal(messages.find((message) => message.type === "cell")?.cell.value, "Bobby");
+  await context.self.onmessage({ data: { kind: "get-previews", token: 5, indices: [1] } });
+  assert.equal(messages.filter((message) => message.type === "previews").at(-1)?.rows[0].row[1], "Bobby");
 });
 
-test("large data worker uses the same tolerant parser across stream chunk boundaries", async () => {
+test("large data worker uses the tolerant CSV parser across stream chunk boundaries", async () => {
   const { context, messages } = loadLargeWorker();
   const text = [
     "id,name,payload,notes",
@@ -136,18 +118,178 @@ test("large data worker uses the same tolerant parser across stream chunk bounda
     file: createChunkedFile(text, [7, 11, 3, 19]),
     fileKind: "CSV",
     encoding: "auto",
-    storeName: "tolerant-parser-store",
   } });
 
   const loaded = messages.find((message) => message.type === "loaded");
-  assert.deepEqual(JSON.parse(JSON.stringify(loaded.result.headers)), ["id", "name", "payload", "notes"]);
+  assert.deepEqual(plain(loaded.result.headers), ["id", "name", "payload", "notes"]);
   assert.equal(loaded.result.rowCount, 2);
   assert.equal(loaded.result.issues.inconsistentRows.length, 0);
 
   await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1] } });
   const rows = messages.find((message) => message.type === "rows");
-  assert.deepEqual(JSON.parse(JSON.stringify(rows.rows)), [
+  assert.deepEqual(plain(rows.rows), [
     { rowIndex: 0, row: ["1", "Alice", '{"tags":["a","b"],"ok":true}', '```json\r\n{"text":"one, two","items":[1,2]}\r\n```'] },
     { rowIndex: 1, row: ["2", "Bob", '{"tags":["c","d"],"ok":false}', "after"] },
+  ]);
+});
+
+test("large data worker returns bounded previews and an exact full cell", async () => {
+  const { context, messages } = loadLargeWorker();
+  const fullValue = `prefix,"quoted"\n${"x".repeat(900)}`;
+  const csvValue = fullValue.replaceAll('"', '""');
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(`id,text\r\n1,"${csvValue}"`, [1, 2, 5, 13]),
+    fileKind: "CSV",
+    encoding: "auto",
+  } });
+
+  await context.self.onmessage({ data: { kind: "get-previews", token: 1, indices: [0] } });
+  const preview = messages.find((message) => message.type === "previews").rows[0];
+  // 比 PREVIEW_LIMIT 多一个字符，主线程 summarize() 才能识别出这个 cell 被截断了
+  assert.equal(preview.row[1].length, 501);
+  assert.equal(preview.row[1], fullValue.slice(0, 501));
+
+  await context.self.onmessage({ data: { kind: "get-cell", token: 2, rowIndex: 0, columnIndex: 1 } });
+  const cell = messages.find((message) => message.type === "cell").cell;
+  assert.equal(cell.value, fullValue);
+});
+
+test("large data worker reads only the requested CSV cell byte range", async () => {
+  const { context, messages } = loadLargeWorker();
+  const left = "a".repeat(1000);
+  const right = "b".repeat(1200);
+  const file = createChunkedFile(`id,left,right\n1,${left},${right}`, [17, 31]);
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file,
+    fileKind: "CSV",
+    encoding: "auto",
+  } });
+  file.sliceRanges.length = 0;
+
+  await context.self.onmessage({ data: { kind: "get-cell", token: 1, rowIndex: 0, columnIndex: 2 } });
+  assert.equal(messages.find((message) => message.type === "cell").cell.value, right);
+  assert.deepEqual(file.sliceRanges, [[file.size - right.length, file.size]]);
+});
+
+test("large data worker decodes indexed GB18030 cells from exact byte ranges", async () => {
+  const { context, messages } = loadLargeWorker();
+  const ascii = new TextEncoder();
+  const bytes = new Uint8Array([
+    ...ascii.encode("id,"), 0xb1, 0xb8, 0xd7, 0xa2, ...ascii.encode("\r\n1,"), 0xd6, 0xd0, 0xce, 0xc4,
+  ]);
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createByteFile(bytes, [4, 1, 3]),
+    fileKind: "CSV",
+    encoding: "gb18030",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.deepEqual(plain(loaded.result.headers), ["id", "备注"]);
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0] } });
+  assert.deepEqual(plain(messages.find((message) => message.type === "rows").rows[0].row), ["1", "中文"]);
+});
+
+test("large data worker keeps UTF-8 when the sample boundary splits a character", async () => {
+  const { context, messages } = loadLargeWorker();
+  // 采样上限是 512 KiB，构造一个让边界正好落在三字节汉字中间的文件
+  const head = new TextEncoder().encode("id,txt\n1,");
+  const body = new TextEncoder().encode(`${"中".repeat(400000)}\n`);
+  const bytes = new Uint8Array(head.length + body.length);
+  bytes.set(head, 0);
+  bytes.set(body, head.length);
+  assert.equal((bytes[512 * 1024 - 1] & 0xc0) === 0x80, true, "boundary should land inside a character");
+
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createByteFile(bytes, [1 << 16]),
+    fileKind: "CSV",
+    encoding: "auto",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.file.encoding, "UTF-8");
+  assert.deepEqual(plain(loaded.result.headers), ["id", "txt"]);
+});
+
+test("large data worker treats GB18030 trailing bytes as text, not as escapes", async () => {
+  const { context, messages } = loadLargeWorker();
+  const ascii = new TextEncoder();
+  // 0x81 0x5C 是一个合法 GBK 汉字，次字节正好是 ASCII 的反斜杠
+  const bytes = new Uint8Array([
+    ...ascii.encode("id,name,tail\n1,"),
+    0x81, 0x5c,
+    ...ascii.encode(",x\n2,ok,y\n"),
+  ]);
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createByteFile(bytes, [bytes.length]),
+    fileKind: "CSV",
+    encoding: "gb18030",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.rowCount, 2);
+  assert.equal(loaded.result.issues.inconsistentRows.length, 0);
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0] } });
+  const row = plain(messages.find((message) => message.type === "rows").rows[0].row);
+  assert.equal(row.length, 3, "the trailing byte must not swallow the delimiter");
+  assert.equal(row[2], "x");
+});
+
+test("large data worker does not let a stray bracket collapse the whole file", async () => {
+  const { context, messages } = loadLargeWorker();
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile("name,note\nalice,[TODO\nbob,ok\ncarol,fine\n", [6, 13, 4]),
+    fileKind: "CSV",
+    encoding: "auto",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.rowCount, 3);
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1, 2] } });
+  assert.deepEqual(plain(messages.find((message) => message.type === "rows").rows), [
+    { rowIndex: 0, row: ["alice", "[TODO"] },
+    { rowIndex: 1, row: ["bob", "ok"] },
+    { rowIndex: 2, row: ["carol", "fine"] },
+  ]);
+});
+
+test("large data worker splits a backslash-terminated cell back into its columns", async () => {
+  const { context, messages } = loadLargeWorker();
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile("path,next\nC:\\data\\,2024\nb,3\n", [5, 9, 3]),
+    fileKind: "CSV",
+    encoding: "auto",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.rowCount, 2);
+  assert.equal(loaded.result.issues.inconsistentRows.length, 0);
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0] } });
+  assert.deepEqual(plain(messages.find((message) => message.type === "rows").rows[0].row), ["C:\\data\\", "2024"]);
+});
+
+test("large data worker handles JSONL CRLF split across stream chunks", async () => {
+  const { context, messages } = loadLargeWorker();
+  const text = '{"id":1,"text":"first"}\r\n{"id":2,"text":"second"}\r\n';
+  const firstCr = text.indexOf("\r") + 1;
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(text, [firstCr, 1, 7], "large.jsonl"),
+    fileKind: "JSONL",
+    encoding: "auto",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.rowCount, 2);
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1] } });
+  assert.deepEqual(plain(messages.find((message) => message.type === "rows").rows), [
+    { rowIndex: 0, row: ["1", "first"] },
+    { rowIndex: 1, row: ["2", "second"] },
   ]);
 });

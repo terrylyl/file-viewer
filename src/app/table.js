@@ -329,8 +329,14 @@ function renderCellDisplayContent(container, value, query, meta, options = {}) {
 }
 
 function getVisibleRowPosition(rowIndex) {
-  if (isLargeDataMode()) return state.viewIndices.indexOf(rowIndex);
-  return state.rowPositionMap.get(rowIndex) ?? -1;
+  if (!isLargeDataMode()) return state.rowPositionMap.get(rowIndex) ?? -1;
+  // 视口渲染会把已知的 rowPosition 直接传下去；这里只服务选区端点之类的零散查询，
+  // 记忆结果避免每次渲染都在几百万行的 viewIndices 上重新 indexOf。
+  const cached = state.largeRowPositionMemo.get(rowIndex);
+  if (cached !== undefined) return cached;
+  const position = state.viewIndices.indexOf(rowIndex);
+  state.largeRowPositionMemo.set(rowIndex, position);
+  return position;
 }
 
 function isRowInCurrentView(rowIndex) {
@@ -390,11 +396,12 @@ function getSelectionEndpoints(range = state.selectionRange) {
   };
 }
 
-function isCellInSelection(rowIndex, columnIndex) {
-  const endpoints = getSelectionEndpoints();
+// 渲染循环里 endpoints 与 rowPosition/columnPosition 都是已知的，务必传进来：
+// 否则每个 cell 都会重算一次选区端点，大文件模式下退化成 O(可见 cell 数 × 视图行数)。
+function isCellInSelection(rowIndex, columnIndex, endpoints = getSelectionEndpoints(), knownRowPosition = null, knownColumnPosition = null) {
   if (!endpoints) return false;
-  const rowPosition = getVisibleRowPosition(rowIndex);
-  const columnPosition = getVisibleColumnPosition(columnIndex);
+  const rowPosition = knownRowPosition == null ? getVisibleRowPosition(rowIndex) : knownRowPosition;
+  const columnPosition = knownColumnPosition == null ? getVisibleColumnPosition(columnIndex) : knownColumnPosition;
   return (
     rowPosition >= endpoints.startRowPosition &&
     rowPosition <= endpoints.endRowPosition &&
@@ -403,10 +410,9 @@ function isCellInSelection(rowIndex, columnIndex) {
   );
 }
 
-function isRowInSelection(rowIndex) {
-  const endpoints = getSelectionEndpoints();
+function isRowInSelection(rowIndex, endpoints = getSelectionEndpoints(), knownRowPosition = null) {
   if (!endpoints) return false;
-  const rowPosition = getVisibleRowPosition(rowIndex);
+  const rowPosition = knownRowPosition == null ? getVisibleRowPosition(rowIndex) : knownRowPosition;
   return rowPosition >= endpoints.startRowPosition && rowPosition <= endpoints.endRowPosition;
 }
 
@@ -431,6 +437,7 @@ function setFocusedCell(rowIndex, columnIndex) {
   state.selected = { rowIndex, columnIndex };
   if (state.detailMode === "profile") state.profileColumnIndex = columnIndex;
   state.detailVisibleChars = DETAIL_CHUNK;
+  state.detailVisibleStart = 0;
   return true;
 }
 
@@ -808,6 +815,7 @@ function renderRows() {
   const end = Math.min(totalRows, Math.ceil((Math.max(0, scrollTop - headerHeight) + viewportHeight) / rowHeight) + 10);
   const visibleColumns = getVisibleColumnIndexes();
   const totalWidth = getTotalWidth();
+  const selectionEndpoints = getSelectionEndpoints();
   const missingRows = [];
   els.gridViewport.setAttribute("aria-rowcount", String(totalRows + 1));
   els.gridViewport.setAttribute("aria-colcount", String(visibleColumns.length + 1));
@@ -818,7 +826,7 @@ function renderRows() {
 
   for (let virtualIndex = start; virtualIndex < end; virtualIndex += 1) {
     const rowIndex = state.viewIndices[virtualIndex];
-    const row = getDataRow(rowIndex);
+    const row = getDisplayRow(rowIndex);
     if (!row && isLargeDataMode()) missingRows.push(rowIndex);
     const hit = isMatchedRow(rowIndex);
     const rowEl = document.createElement("div");
@@ -832,7 +840,7 @@ function renderRows() {
     const rowNumber = document.createElement("div");
     rowNumber.className = "row-number";
     rowNumber.setAttribute("role", "rowheader");
-    if (isRowInSelection(rowIndex)) rowNumber.classList.add("selected-row");
+    if (isRowInSelection(rowIndex, selectionEndpoints, virtualIndex)) rowNumber.classList.add("selected-row");
     rowNumber.textContent = String(rowIndex + 2);
     rowNumber.addEventListener("mousedown", (event) =>
       startSelectionDrag("row", rowIndex, state.selected?.columnIndex ?? visibleColumns[0] ?? 0, event),
@@ -853,7 +861,7 @@ function renderRows() {
       if (state.editedCells.has(getCellKey(rowIndex, col))) cell.classList.add("edited-cell");
       const manualHighlightClass = getManualHighlightClass(rowIndex, col);
       if (manualHighlightClass) cell.classList.add(manualHighlightClass);
-      if (isCellInSelection(rowIndex, col)) {
+      if (isCellInSelection(rowIndex, col, selectionEndpoints, virtualIndex, visibleColumnIndex)) {
         cell.classList.add("range-selected");
       }
       if (state.selected && state.selected.rowIndex === rowIndex && state.selected.columnIndex === col) {
@@ -891,7 +899,7 @@ function renderRows() {
 
     els.rowLayer.appendChild(rowEl);
   }
-  if (missingRows.length) prefetchLargeRows(missingRows);
+  if (missingRows.length) prefetchLargePreviews(missingRows);
 }
 
 function dragColumn(fromColumn, toColumn) {
