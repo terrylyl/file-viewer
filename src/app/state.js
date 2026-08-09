@@ -558,13 +558,15 @@ function requestLargePreviews(rowIndices) {
   if (!isLargeDataMode()) return Promise.resolve([]);
   const indices = [...new Set(rowIndices || [])].filter((rowIndex) =>
     Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < state.rows.length &&
-      !state.largeData.previewCache.has(rowIndex) && !state.largeData.rowCache.has(rowIndex),
+      !state.largeData.previewCache.has(rowIndex) && !state.largeData.rowCache.has(rowIndex) &&
+      !state.largeData.pendingPreviewRows.has(rowIndex),
   );
   if (!indices.length) return Promise.resolve([]);
   const token = state.largeData.nextPreviewToken + 1;
   state.largeData.nextPreviewToken = token;
+  indices.forEach((rowIndex) => state.largeData.pendingPreviewRows.add(rowIndex));
   return new Promise((resolve, reject) => {
-    state.largeData.pendingPreviews.set(token, { resolve, reject });
+    state.largeData.pendingPreviews.set(token, { resolve, reject, indices });
     state.largeDataWorker.postMessage({ kind: "get-previews", token, indices, previewChars: PREVIEW_LIMIT });
   });
 }
@@ -573,7 +575,7 @@ function prefetchLargePreviews(rowIndices) {
   if (!isLargeDataMode()) return;
   requestLargePreviews(rowIndices).then((rows) => {
     if (!rows.length) return;
-    renderGrid();
+    renderRowsOnly();
   }).catch((error) => {
     els.leftStatus.textContent = `读取大文件预览失败：${error.message}`;
   });
@@ -688,6 +690,7 @@ function initializeLargeDataWorker(worker, result) {
     cellCacheBytes: 0,
     pendingRows: new Map(),
     pendingPreviews: new Map(),
+    pendingPreviewRows: new Set(),
     pendingCells: new Map(),
     pendingCellKeys: new Map(),
     editedValues: new Map(),
@@ -720,6 +723,7 @@ function initializeLargeDataWorker(worker, result) {
     if (message.type === "previews") {
       const pending = state.largeData.pendingPreviews.get(message.token);
       state.largeData.pendingPreviews.delete(message.token);
+      pending?.indices.forEach((rowIndex) => state.largeData.pendingPreviewRows.delete(rowIndex));
       (message.rows || []).forEach(cacheLargePreview);
       if (pending) pending.resolve(message.rows || []);
       return;
@@ -769,6 +773,7 @@ function initializeLargeDataWorker(worker, result) {
       if (rowPending) rowPending.reject(new Error(message.message));
       const previewPending = state.largeData.pendingPreviews.get(message.token);
       state.largeData.pendingPreviews.delete(message.token);
+      previewPending?.indices.forEach((rowIndex) => state.largeData.pendingPreviewRows.delete(rowIndex));
       if (previewPending) previewPending.reject(new Error(message.message));
       const cellPending = state.largeData.pendingCells.get(message.token);
       state.largeData.pendingCells.delete(message.token);
@@ -789,6 +794,7 @@ function initializeLargeDataWorker(worker, result) {
     for (const pending of state.largeData.pendingMutations.values()) pending.reject(error);
     state.largeData.pendingRows.clear();
     state.largeData.pendingPreviews.clear();
+    state.largeData.pendingPreviewRows.clear();
     state.largeData.pendingCells.clear();
     state.largeData.pendingCellKeys.clear();
     state.largeData.pendingMutations.clear();

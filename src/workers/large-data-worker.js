@@ -4,6 +4,7 @@ const INDEX_PREVIEW_CHARS = 500;
 const INDEX_PREVIEW_SLICE_CHARS = INDEX_PREVIEW_CHARS + 1;
 // 一整行小于这个字节数时整行读一次，避免逐 cell slice；超过的行按 cell 限量读。
 const INDEX_PREVIEW_ROW_INLINE_MAX_BYTES = 64 * 1024;
+const INDEX_PREVIEW_READ_CONCURRENCY = 16;
 const INDEX_READ_BATCH_BYTES = 8 * 1024 * 1024;
 const INDEX_PROGRESS_INTERVAL_MS = 150;
 const INDEX_UNIQUE_VALUE_LIMIT = 2000;
@@ -1256,6 +1257,7 @@ async function readSourcePreviewRows(indices) {
     }
   }
 
+  const cellPreviewReads = [];
   for (const rowIndex of hugeRows) {
     if (dataKind === "JSONL") {
       const value = await readJsonlObject(rowIndex);
@@ -1271,11 +1273,30 @@ async function readSourcePreviewRows(indices) {
       const start = cellStarts[cellIndex];
       const complete = cellEnds[cellIndex] - start <= INDEX_PREVIEW_SOURCE_BYTES;
       const end = complete ? cellEnds[cellIndex] : start + INDEX_PREVIEW_SOURCE_BYTES;
-      const text = await decodeFileRange(start, end);
-      row[columnIndex] = normalizeDecodedCsvCell(text, cellFlags[cellIndex], complete);
+      cellPreviewReads.push({ row, columnIndex, cellIndex, start, end, complete });
     }
     previews.set(rowIndex, row);
   }
+
+  // 超长行不能整行读入，但逐 cell 串行 slice 会让一屏预览等待数百次 I/O。
+  // 每次只读取至多 4 KiB，以固定并发数执行，峰值内存仍与文件大小脱钩。
+  let nextCellPreview = 0;
+  const readers = Array.from(
+    { length: Math.min(INDEX_PREVIEW_READ_CONCURRENCY, cellPreviewReads.length) },
+    async () => {
+      while (nextCellPreview < cellPreviewReads.length) {
+        const request = cellPreviewReads[nextCellPreview];
+        nextCellPreview += 1;
+        const text = await decodeFileRange(request.start, request.end);
+        request.row[request.columnIndex] = normalizeDecodedCsvCell(
+          text,
+          cellFlags[request.cellIndex],
+          request.complete,
+        );
+      }
+    },
+  );
+  await Promise.all(readers);
 
   return previews;
 }

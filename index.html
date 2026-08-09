@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-Ila0ctpZFYlFU0I50dYBY0KyE061xUhWPZQJjbAI+fU='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-IiSGiVhHM76FUW5HslyD4soAC42oBT+E37teOyi3FZg='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -6593,6 +6593,7 @@ const INDEX_PREVIEW_CHARS = 500;
 const INDEX_PREVIEW_SLICE_CHARS = INDEX_PREVIEW_CHARS + 1;
 // 一整行小于这个字节数时整行读一次，避免逐 cell slice；超过的行按 cell 限量读。
 const INDEX_PREVIEW_ROW_INLINE_MAX_BYTES = 64 * 1024;
+const INDEX_PREVIEW_READ_CONCURRENCY = 16;
 const INDEX_READ_BATCH_BYTES = 8 * 1024 * 1024;
 const INDEX_PROGRESS_INTERVAL_MS = 150;
 const INDEX_UNIQUE_VALUE_LIMIT = 2000;
@@ -7845,6 +7846,7 @@ async function readSourcePreviewRows(indices) {
     }
   }
 
+  const cellPreviewReads = [];
   for (const rowIndex of hugeRows) {
     if (dataKind === "JSONL") {
       const value = await readJsonlObject(rowIndex);
@@ -7860,11 +7862,30 @@ async function readSourcePreviewRows(indices) {
       const start = cellStarts[cellIndex];
       const complete = cellEnds[cellIndex] - start <= INDEX_PREVIEW_SOURCE_BYTES;
       const end = complete ? cellEnds[cellIndex] : start + INDEX_PREVIEW_SOURCE_BYTES;
-      const text = await decodeFileRange(start, end);
-      row[columnIndex] = normalizeDecodedCsvCell(text, cellFlags[cellIndex], complete);
+      cellPreviewReads.push({ row, columnIndex, cellIndex, start, end, complete });
     }
     previews.set(rowIndex, row);
   }
+
+  // 超长行不能整行读入，但逐 cell 串行 slice 会让一屏预览等待数百次 I/O。
+  // 每次只读取至多 4 KiB，以固定并发数执行，峰值内存仍与文件大小脱钩。
+  let nextCellPreview = 0;
+  const readers = Array.from(
+    { length: Math.min(INDEX_PREVIEW_READ_CONCURRENCY, cellPreviewReads.length) },
+    async () => {
+      while (nextCellPreview < cellPreviewReads.length) {
+        const request = cellPreviewReads[nextCellPreview];
+        nextCellPreview += 1;
+        const text = await decodeFileRange(request.start, request.end);
+        request.row[request.columnIndex] = normalizeDecodedCsvCell(
+          text,
+          cellFlags[request.cellIndex],
+          request.complete,
+        );
+      }
+    },
+  );
+  await Promise.all(readers);
 
   return previews;
 }
@@ -10388,13 +10409,15 @@ self.onmessage = (event) => {
         if (!isLargeDataMode()) return Promise.resolve([]);
         const indices = [...new Set(rowIndices || [])].filter((rowIndex) =>
           Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < state.rows.length &&
-            !state.largeData.previewCache.has(rowIndex) && !state.largeData.rowCache.has(rowIndex),
+            !state.largeData.previewCache.has(rowIndex) && !state.largeData.rowCache.has(rowIndex) &&
+            !state.largeData.pendingPreviewRows.has(rowIndex),
         );
         if (!indices.length) return Promise.resolve([]);
         const token = state.largeData.nextPreviewToken + 1;
         state.largeData.nextPreviewToken = token;
+        indices.forEach((rowIndex) => state.largeData.pendingPreviewRows.add(rowIndex));
         return new Promise((resolve, reject) => {
-          state.largeData.pendingPreviews.set(token, { resolve, reject });
+          state.largeData.pendingPreviews.set(token, { resolve, reject, indices });
           state.largeDataWorker.postMessage({ kind: "get-previews", token, indices, previewChars: PREVIEW_LIMIT });
         });
       }
@@ -10403,7 +10426,7 @@ self.onmessage = (event) => {
         if (!isLargeDataMode()) return;
         requestLargePreviews(rowIndices).then((rows) => {
           if (!rows.length) return;
-          renderGrid();
+          renderRowsOnly();
         }).catch((error) => {
           els.leftStatus.textContent = `读取大文件预览失败：${error.message}`;
         });
@@ -10518,6 +10541,7 @@ self.onmessage = (event) => {
           cellCacheBytes: 0,
           pendingRows: new Map(),
           pendingPreviews: new Map(),
+          pendingPreviewRows: new Set(),
           pendingCells: new Map(),
           pendingCellKeys: new Map(),
           editedValues: new Map(),
@@ -10550,6 +10574,7 @@ self.onmessage = (event) => {
           if (message.type === "previews") {
             const pending = state.largeData.pendingPreviews.get(message.token);
             state.largeData.pendingPreviews.delete(message.token);
+            pending?.indices.forEach((rowIndex) => state.largeData.pendingPreviewRows.delete(rowIndex));
             (message.rows || []).forEach(cacheLargePreview);
             if (pending) pending.resolve(message.rows || []);
             return;
@@ -10599,6 +10624,7 @@ self.onmessage = (event) => {
             if (rowPending) rowPending.reject(new Error(message.message));
             const previewPending = state.largeData.pendingPreviews.get(message.token);
             state.largeData.pendingPreviews.delete(message.token);
+            previewPending?.indices.forEach((rowIndex) => state.largeData.pendingPreviewRows.delete(rowIndex));
             if (previewPending) previewPending.reject(new Error(message.message));
             const cellPending = state.largeData.pendingCells.get(message.token);
             state.largeData.pendingCells.delete(message.token);
@@ -10619,6 +10645,7 @@ self.onmessage = (event) => {
           for (const pending of state.largeData.pendingMutations.values()) pending.reject(error);
           state.largeData.pendingRows.clear();
           state.largeData.pendingPreviews.clear();
+          state.largeData.pendingPreviewRows.clear();
           state.largeData.pendingCells.clear();
           state.largeData.pendingCellKeys.clear();
           state.largeData.pendingMutations.clear();

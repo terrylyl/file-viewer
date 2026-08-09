@@ -10,8 +10,8 @@ const releaseScript = readFileSync(new URL("../scripts/create-release.mjs", impo
 const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const sbom = JSON.parse(readFileSync(new URL("../sbom.cdx.json", import.meta.url), "utf8"));
 
-test("app package version is 2.3.8", () => {
-  assert.equal(packageJson.version, "2.3.8");
+test("app package version is 2.3.9", () => {
+  assert.equal(packageJson.version, "2.3.9");
 });
 
 test("release governance artifacts stay aligned with the baseline", () => {
@@ -615,6 +615,13 @@ test("visible cell rendering uses a bounded cache", () => {
   assert.match(html, /touchCellVersion\(rowIndex,\s*columnIndex\)/, "cell edits should advance render versions");
   assert.match(html, /renderOptions\.cacheKey = getCellRenderCacheKey\(/, "row rendering should provide cache keys");
   assert.match(html, /appendCachedCellRender\(container,\s*options\.cacheKey,\s*meta\)/, "cell renderer should use cached nodes");
+});
+
+test("large-file viewport previews are deduplicated and repaint rows only", () => {
+  assert.match(html, /pendingPreviewRows:\s*new Set\(\)/, "missing in-flight preview row tracking");
+  assert.match(html, /!state\.largeData\.pendingPreviewRows\.has\(rowIndex\)/, "duplicate preview rows should be skipped");
+  assert.match(html, /pending\?\.indices\.forEach\(\(rowIndex\)\s*=>\s*state\.largeData\.pendingPreviewRows\.delete\(rowIndex\)\)/, "completed preview rows should leave the pending set");
+  assert.match(html, /requestLargePreviews\(rowIndices\)\.then\(\(rows\)\s*=>\s*\{[\s\S]*?renderRowsOnly\(\)/, "preview completion should repaint rows without rebuilding the header");
 });
 
 test("Excel parsing and export stay inside the dedicated worker", () => {

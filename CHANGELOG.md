@@ -4,8 +4,11 @@ All notable user-facing changes are documented here.
 
 ## [Unreleased]
 
+## [2.3.9] - 2026-08-09
+
 ### Fixed
 
+- 修复大文件中每个 cell 都很长时，滚动后的表格区域长时间显示空白、但点击 cell 后详情仍能读到内容。超长行预览改为固定并发数读取 cell 前缀，主线程同时去重正在读取的行，避免快速滚动重复排队。
 - 修复标题行、导出说明、`#` 注释行占着表头位置，导致列名变成 `月度报表`、`Column 2`…，真表头降级成第一行数据。表头改从第一条不是单格行的记录取，最多跳 3 行；被跳过的标题行仍按原顺序保留为数据行，不丢内容，并给出「表头不在首行」提示。表头比数据行窄（行尾多一个分隔符）是合法的，不会被当成标题行跳过。
 - 修复标题行、导出说明、`#` 注释行排在表头之前时，`;`、`|`、Tab 分隔的文件整表塌成一列。分隔符探测不再要求候选必须切开第一条记录：其它候选也切不开的行按前言免费跳过，最多跳 3 行；其它候选能切开的行仍可跳，但要付代价，`a|b|c|d|e` 这类标签列因此无法靠跳表头反超真分隔符。
 - 修复文件开头的空行或 `,,` 占位行顶替表头，导致列名全变成 `Column 1`、真表头降级成第一行数据，另存后这一改写还会写进文件。普通与大文件两条路径统一跳过表头之前的全空记录。
@@ -25,6 +28,8 @@ All notable user-facing changes are documented here.
 ### Known Issues
 
 - 前言行超过 3 行时，分隔符探测与表头行识别都会放弃，整表塌成一列并给出「分隔符可能判断有误」告警。
+
+## [2.3.8] - 2026-08-09
 
 ### Fixed
 
@@ -114,3 +119,4 @@ All notable user-facing changes are documented here.
 [2.3.6]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.6
 [2.3.7]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.7
 [2.3.8]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.8
+[2.3.9]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.9

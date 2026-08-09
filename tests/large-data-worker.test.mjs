@@ -449,6 +449,50 @@ test("large data worker returns bounded previews and an exact full cell", async 
   assert.equal(cell.value, fullValue);
 });
 
+test("large data worker reads huge-row cell previews with bounded concurrency", async () => {
+  const { context, messages } = loadLargeWorker();
+  const columnCount = 20;
+  const headers = Array.from({ length: columnCount }, (_, index) => `c${index + 1}`);
+  const values = Array.from({ length: columnCount }, (_, index) => String(index).repeat(6000));
+  const file = createChunkedFile(`${headers.join(",")}\n${values.join(",")}`, [8192]);
+  const originalSlice = file.slice.bind(file);
+  let trackPreviewReads = false;
+  let activeReads = 0;
+  let maxActiveReads = 0;
+  file.slice = (start, end) => {
+    const blob = originalSlice(start, end);
+    if (!trackPreviewReads) return blob;
+    return {
+      async arrayBuffer() {
+        activeReads += 1;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return await blob.arrayBuffer();
+        } finally {
+          activeReads -= 1;
+        }
+      },
+    };
+  };
+
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file,
+    fileKind: "CSV",
+    delimiter: ",",
+    encoding: "utf-8",
+  } });
+  trackPreviewReads = true;
+  await context.self.onmessage({ data: { kind: "get-previews", token: 1, indices: [0] } });
+
+  const preview = messages.find((message) => message.type === "previews").rows[0];
+  assert.equal(preview.row.length, columnCount);
+  assert.equal(preview.row[1], values[1].slice(0, 501));
+  assert.ok(maxActiveReads > 1, `expected concurrent preview reads, got ${maxActiveReads}`);
+  assert.ok(maxActiveReads <= 16, `preview concurrency exceeded its bound: ${maxActiveReads}`);
+});
+
 test("large data worker reads only the requested CSV cell byte range", async () => {
   const { context, messages } = loadLargeWorker();
   const left = "a".repeat(1000);
