@@ -2,6 +2,15 @@
 
 All notable user-facing changes are documented here.
 
+## [Unreleased]
+
+## [2.3.8] - 2026-08-09
+
+### Fixed
+
+- 修复单元格里像 JSON 开头的 `[` / `{`（`[2024上半年`、`[to do`、`[null 值`）一直不闭合时，把后面的列和行全部吞进同一个 cell，表格看上去被压缩成一列。宽容解析会用严格 CSV 影子状态复核候选首行和后续完整记录；JSON 字符串内逗号、分隔符后的尾部空白及合法跨行数组不会触发误回滚。
+- 修复大文件模式回滚推测性解析时字节偏移错位一位，未闭合的 Markdown 围栏回滚后整表内容串位（`bob` 变成 `\nbo`）。
+
 ## [2.3.7] - 2026-08-09
 
 ### Fixed
@@ -83,3 +92,4 @@ All notable user-facing changes are documented here.
 [2.3.5]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.5
 [2.3.6]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.6
 [2.3.7]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.7
+[2.3.8]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.8

@@ -238,6 +238,19 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
   let specEscapeLength = 0;
   let specInQuotes = false;
   let specRecordLength = 0;
+  let specFirstLineMatchesHeader = false;
+  let specPhysicalLineIndex = 0;
+  let specLineFields = 1;
+  let specLineHasContent = false;
+  let specLineFieldStarted = false;
+  let specLineInQuotes = false;
+  let specLineQuotePending = false;
+  let specLineAfterQuote = false;
+  let specLineInvalid = false;
+  let specLineLastSignificantIsDelimiter = false;
+  let specLineSkipNext = false;
+  let specLineSkipLineFeed = false;
+  let specStructureClosed = false;
   let toleranceDisabled = false;
 
   const isWhitespaceByte = (byte) => byte === 0x20 || byte === 0x09 || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN;
@@ -247,10 +260,13 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     if (countsAsContent && !isWhitespaceByte(byte)) fieldHasNonWhitespace = true;
   };
 
-  const beginSpeculation = (mode, offset) => {
+  // 必须在处理入口字节之前调用：现场快照不含入口字节，缓冲区第一个字节就是它，
+  // 回滚时才能从 specStartOffset 原样重放。
+  const beginSpeculation = (mode, offset, entryByte) => {
     if (!specBytes) specBytes = new Uint8Array(INDEX_TOLERANCE_MAX_BYTES);
     specMode = mode;
-    specLength = 0;
+    specBytes[0] = entryByte;
+    specLength = 1;
     specStartOffset = offset;
     specFieldStart = fieldStart;
     specFieldStarted = fieldStarted;
@@ -259,11 +275,133 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     specEscapeLength = fieldEscapes.length;
     specInQuotes = inQuotes;
     specRecordLength = currentRecord.length;
+    specFirstLineMatchesHeader = false;
+    specPhysicalLineIndex = 0;
+    specLineFields = specRecordLength + 1;
+    specLineHasContent = true;
+    specLineFieldStarted = true;
+    specLineInQuotes = specInQuotes;
+    specLineQuotePending = false;
+    specLineAfterQuote = false;
+    specLineInvalid = false;
+    specLineLastSignificantIsDelimiter = false;
+    specLineSkipNext = false;
+    specLineSkipLineFeed = false;
+    specStructureClosed = false;
+  };
+
+  // 推测性解析吞掉的内容同时用严格 CSV 行状态记账。只有候选首行和后续物理行
+  // 都能独立组成表头列数，才有足够证据说明开括号只是普通文本。
+  const trackSpeculationLine = (byte) => {
+    specLineHasContent = true;
+    if (specLineSkipNext) {
+      specLineSkipNext = false;
+      specLineFieldStarted = true;
+      return;
+    }
+    if (sourceIsMultiByteLead && byte >= 0x81 && byte <= 0xfe) {
+      // GB18030 双字节字符的次字节可能与 ASCII 标点重叠，影子解析也必须跳过。
+      specLineSkipNext = true;
+      specLineFieldStarted = true;
+      specLineLastSignificantIsDelimiter = false;
+      return;
+    }
+    if (byte !== 0x20 && byte !== 0x09) specLineLastSignificantIsDelimiter = byte === delimiterByte;
+    if (specLineInvalid) return;
+    if (specLineQuotePending) {
+      if (byte === BYTE_QUOTE) {
+        specLineQuotePending = false;
+        return;
+      }
+      specLineQuotePending = false;
+      specLineInQuotes = false;
+      specLineAfterQuote = true;
+    }
+    if (specLineInQuotes) {
+      if (byte === BYTE_QUOTE) specLineQuotePending = true;
+      return;
+    }
+    if (specLineAfterQuote) {
+      if (byte === delimiterByte) {
+        specLineFields += 1;
+        specLineFieldStarted = false;
+        specLineAfterQuote = false;
+      } else if (byte !== 0x20 && byte !== 0x09) {
+        specLineInvalid = true;
+      }
+      return;
+    }
+    if (byte === delimiterByte) {
+      specLineFields += 1;
+      specLineFieldStarted = false;
+      return;
+    }
+    if (byte === BYTE_QUOTE) {
+      if (!specLineFieldStarted) {
+        specLineFieldStarted = true;
+        specLineInQuotes = true;
+      }
+      // 非字段起始位置的引号按普通字节处理，与关闭宽容模式后的解析行为一致。
+      return;
+    }
+    specLineFieldStarted = true;
+  };
+
+  const resetSpeculationLine = () => {
+    specLineFields = 1;
+    specLineHasContent = false;
+    specLineFieldStarted = false;
+    specLineInQuotes = false;
+    specLineQuotePending = false;
+    specLineAfterQuote = false;
+    specLineInvalid = false;
+    specLineLastSignificantIsDelimiter = false;
+    specLineSkipNext = false;
+  };
+
+  const speculationLineMatchesHeader = () => {
+    if (!headerDescriptors || !specLineHasContent || specLineInvalid) return false;
+    if (specLineInQuotes && !specLineQuotePending) return false;
+    return specLineFields === headerDescriptors.length;
+  };
+
+  const finishSpeculationPhysicalLine = (byte) => {
+    if (byte === BYTE_LINE_FEED && specLineSkipLineFeed) {
+      specLineSkipLineFeed = false;
+      return false;
+    }
+    const matchesHeader = speculationLineMatchesHeader();
+    if (specPhysicalLineIndex === 0) {
+      specFirstLineMatchesHeader = matchesHeader && !specLineLastSignificantIsDelimiter;
+    }
+    const contradicts = specPhysicalLineIndex > 0 && specFirstLineMatchesHeader && matchesHeader;
+    specPhysicalLineIndex += 1;
+    resetSpeculationLine();
+    specLineSkipLineFeed = byte === BYTE_CARRIAGE_RETURN;
+    return contradicts;
+  };
+
+  const speculationContradictsHeaderAtEof = () => {
+    return (
+      specMode === "structure" &&
+      specPhysicalLineIndex > 0 &&
+      specFirstLineMatchesHeader &&
+      speculationLineMatchesHeader()
+    );
   };
 
   const endSpeculation = () => {
     specMode = "";
     specLength = 0;
+    specStructureClosed = false;
+  };
+
+  const closeStructuredSpeculation = () => {
+    if (specPhysicalLineIndex > 0 && specFirstLineMatchesHeader) {
+      specStructureClosed = true;
+    } else {
+      endSpeculation();
+    }
   };
 
   const updateStructuredState = (byte) => {
@@ -287,14 +425,14 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     const open = structureStack.at(-1);
     if ((byte === BYTE_CLOSE_BRACE && open === BYTE_OPEN_BRACE) || (byte === BYTE_CLOSE_BRACKET && open === BYTE_OPEN_BRACKET)) {
       structureStack.pop();
-      if (!structureStack.length) endSpeculation();
+      if (!structureStack.length) closeStructuredSpeculation();
       return;
     }
     if (byte === BYTE_CLOSE_BRACE || byte === BYTE_CLOSE_BRACKET) {
       structureStack = [];
       structureInString = false;
       structureEscaped = false;
-      endSpeculation();
+      closeStructuredSpeculation();
     }
   };
 
@@ -303,7 +441,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     updateStructuredState(byte);
   };
 
-  const resetField = (nextStart) => {
+  const resetField = (nextStart, preserveSpeculation = false) => {
     fieldStart = nextStart;
     fieldStarted = false;
     fieldHasNonWhitespace = false;
@@ -322,18 +460,19 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     structureEscaped = false;
     structurePendingOpen = 0;
     structurePendingQuote = false;
-    toleranceDisabled = false;
-    endSpeculation();
+    toleranceDisabled = preserveSpeculation;
+    if (!preserveSpeculation) endSpeculation();
   };
 
   const finishField = (endOffset, nextStart) => {
+    const preserveSpeculation = specMode === "structure" && specStructureClosed;
     currentRecord.push({
       start: fieldStart,
       end: endOffset,
       flags: fieldQuoted ? CELL_FLAG_QUOTED : 0,
       escapes: fieldEscapes.length ? fieldEscapes : null,
     });
-    resetField(nextStart);
+    resetField(nextStart, preserveSpeculation);
   };
 
   const isDescriptorEmpty = (descriptor) => {
@@ -544,8 +683,8 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
         return;
       }
       if ((byte === BYTE_OPEN_BRACE || byte === BYTE_OPEN_BRACKET) && !fieldHasNonWhitespace && !toleranceDisabled) {
+        beginSpeculation("structure", offset, byte);
         appendFieldByte(byte);
-        beginSpeculation("structure", offset);
         structurePendingOpen = byte;
         return;
       }
@@ -591,7 +730,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     }
 
     if (byte === BYTE_BACKTICK && leadingFenceEligible && leadingBacktickCount < 3 && !toleranceDisabled) {
-      if (!leadingBacktickCount) beginSpeculation("fence", offset);
+      if (!leadingBacktickCount) beginSpeculation("fence", offset, byte);
       appendFieldByte(byte);
       leadingBacktickCount += 1;
       if (leadingBacktickCount === 3) {
@@ -603,8 +742,8 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     if (leadingBacktickCount && leadingBacktickCount < 3 && specMode === "fence") endSpeculation();
 
     if ((byte === BYTE_OPEN_BRACE || byte === BYTE_OPEN_BRACKET) && !fieldHasNonWhitespace && !toleranceDisabled) {
+      beginSpeculation("structure", offset, byte);
       appendFieldByte(byte);
-      beginSpeculation("structure", offset);
       structurePendingOpen = byte;
       return;
     }
@@ -634,6 +773,15 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
       }
       specBytes[specLength] = byte;
       specLength += 1;
+      if (byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN) {
+        if (finishSpeculationPhysicalLine(byte)) {
+          rollbackSpeculation();
+          return;
+        }
+        if (specStructureClosed) endSpeculation();
+      } else {
+        trackSpeculationLine(byte);
+      }
     }
     processByte(byte, offset);
   };
@@ -648,6 +796,8 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
       processedBytes += value.byteLength;
       reportProgress(processedBytes);
     }
+    while (speculationContradictsHeaderAtEof()) rollbackSpeculation();
+    if (specMode === "structure" && specStructureClosed) endSpeculation();
     // 围栏到文件末尾都没闭合，几乎一定是把单元格里的 ``` 当成了代码块。
     if (specMode === "fence" && codeFence) rollbackSpeculation();
     if (structurePendingQuote) {

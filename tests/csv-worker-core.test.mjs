@@ -236,6 +236,78 @@ test("a bracket that is not JSON never swallows the rest of the file", () => {
   }
 });
 
+test("a JSON-looking bracket that never closes stops merging columns at the next full row", () => {
+  const core = loadWorkerCore();
+
+  // 这些开头都能通过 JSON 前瞻（数字、t、n、-、"），但整个文件都不会闭合
+  for (const note of ["[2024上半年", "[to do", "[null 值", "[-未定", '["未闭合', "{\"草稿"]) {
+    const input = `name,note,tag\nalice,${note},a\nbob,ok,b\ncarol,fine,c`;
+    const parsed = core.parseCsvText(input, { delimiter: "," });
+
+    assert.equal(parsed.rows.length, 3, `should keep every row for ${JSON.stringify(note)}`);
+    assert.equal(parsed.rows[0][1], note);
+    assert.equal(parsed.rows[0][2], "a");
+    assert.equal(parsed.rows[2][1], "fine");
+  }
+});
+
+test("an unclosed bracket in the last column releases the following rows", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("name,note,tag\nalice,ok,[2024\nbob,ok,b\ncarol,fine,c", { delimiter: "," });
+
+  assert.equal(parsed.rows.length, 3);
+  assert.equal(parsed.rows[0][2], "[2024");
+  assert.equal(parsed.rows[1][2], "b");
+  assert.equal(parsed.rows[2][2], "c");
+});
+
+test("a quoted JSON-looking bracket that never closes releases following rows", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText('name,note,tag\nalice,"[2024上半年",a\nbob,ok,b', { delimiter: "," });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.rows)), [
+    ["alice", "[2024上半年", "a"],
+    ["bob", "ok", "b"],
+  ]);
+});
+
+test("a later stray closing bracket does not validate a false JSON guess", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("name,note,tag\nalice,[2024上半年,a\nbob,ok],b\ncarol,fine,c", { delimiter: "," });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.rows)), [
+    ["alice", "[2024上半年", "a"],
+    ["bob", "ok]", "b"],
+    ["carol", "fine", "c"],
+  ]);
+});
+
+test("a bare JSON field may still span lines when the line stops on a separator", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText('id,payload\n1,{"a": 1,\n"b": 2}\n2,ok', { delimiter: "," });
+
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(parsed.rows[0][1], '{"a": 1,\n"b": 2}');
+  assert.equal(parsed.rows[1][1], "ok");
+});
+
+test("multiline bare JSON keeps commas inside strings and whitespace after separators", () => {
+  const core = loadWorkerCore();
+  const inputs = [
+    'id,payload,tag\n1,{"text":"a,b"\n,"x":1},z\n2,ok,q',
+    'id,payload,tag\n1,{"a":1,   \n"b":2},z\n2,ok,q',
+    'id,payload,tag\n1,[1,\n2,3,4\n],z\n2,ok,q',
+  ];
+
+  for (const input of inputs) {
+    const parsed = core.parseCsvText(input, { delimiter: "," });
+    assert.equal(parsed.rows.length, 2);
+    assert.equal(parsed.rows[0][2], "z");
+    assert.equal(parsed.rows[1][1], "ok");
+    assert.equal(parsed.issues.inconsistentRows.length, 0);
+  }
+});
+
 test("an unclosed Markdown fence falls back to plain CSV instead of eating later rows", () => {
   const core = loadWorkerCore();
   const parsed = core.parseCsvText("name,note\na,```\nb,ok\nc,fine", { delimiter: "," });

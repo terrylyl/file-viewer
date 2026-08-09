@@ -133,6 +133,116 @@ test("large data worker uses the tolerant CSV parser across stream chunk boundar
   ]);
 });
 
+test("large data worker keeps an unclosed bracket from merging later columns", async () => {
+  const { context, messages } = loadLargeWorker();
+  const text = [
+    "name,note,tag",
+    "alice,[2024上半年,a",
+    "bob,ok,b",
+    "carol,fine,c",
+  ].join("\n");
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(text, [5, 13, 3]),
+    fileKind: "CSV",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.deepEqual(plain(loaded.result.headers), ["name", "note", "tag"]);
+  assert.equal(loaded.result.rowCount, 3);
+
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1, 2] } });
+  const rows = messages.find((message) => message.type === "rows");
+  assert.deepEqual(plain(rows.rows), [
+    { rowIndex: 0, row: ["alice", "[2024上半年", "a"] },
+    { rowIndex: 1, row: ["bob", "ok", "b"] },
+    { rowIndex: 2, row: ["carol", "fine", "c"] },
+  ]);
+});
+
+test("large data worker releases rows after a quoted JSON-looking bracket", async () => {
+  const { context, messages } = loadLargeWorker();
+  const text = 'name,note,tag\r\nalice,"[2024上半年",a\r\nbob,ok,b';
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(text, [1, 7, 2, 11]),
+    fileKind: "CSV",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.rowCount, 2);
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1] } });
+  assert.deepEqual(plain(messages.find((message) => message.type === "rows").rows), [
+    { rowIndex: 0, row: ["alice", "[2024上半年", "a"] },
+    { rowIndex: 1, row: ["bob", "ok", "b"] },
+  ]);
+});
+
+test("large data worker rejects a false structure closed on a later row", async () => {
+  const { context, messages } = loadLargeWorker();
+  const text = "name,note,tag\nalice,[2024上半年,a\nbob,ok],b\ncarol,fine,c";
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(text, [2, 1, 5, 17]),
+    fileKind: "CSV",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.rowCount, 3);
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1, 2] } });
+  assert.deepEqual(plain(messages.find((message) => message.type === "rows").rows), [
+    { rowIndex: 0, row: ["alice", "[2024上半年", "a"] },
+    { rowIndex: 1, row: ["bob", "ok]", "b"] },
+    { rowIndex: 2, row: ["carol", "fine", "c"] },
+  ]);
+});
+
+test("large data worker preserves multiline JSON with ambiguous separators", async () => {
+  for (const text of [
+    'id,payload,tag\n1,{"text":"a,b"\n,"x":1},z\n2,ok,q',
+    'id,payload,tag\n1,{"a":1,   \n"b":2},z\n2,ok,q',
+    'id,payload,tag\n1,[1,\n2,3,4\n],z\n2,ok,q',
+  ]) {
+    const { context, messages } = loadLargeWorker();
+    await context.self.onmessage({ data: {
+      kind: "load-large-file",
+      file: createChunkedFile(text, [3, 1, 9, 2]),
+      fileKind: "CSV",
+      encoding: "utf-8",
+    } });
+
+    const loaded = messages.find((message) => message.type === "loaded");
+    assert.equal(loaded.result.rowCount, 2);
+    assert.equal(loaded.result.issues.inconsistentRows.length, 0);
+    await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1] } });
+    const rows = messages.find((message) => message.type === "rows").rows;
+    assert.equal(rows[0].row[2], "z");
+    assert.equal(rows[1].row[1], "ok");
+  }
+});
+
+test("large data worker replays a rolled back Markdown fence at the right byte offsets", async () => {
+  const { context, messages } = loadLargeWorker();
+  const text = ["name,note,tag", "alice,```x,a", "bob,ok,b", "carol,fine,c"].join("\n");
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(text, [5, 13, 3]),
+    fileKind: "CSV",
+    encoding: "utf-8",
+  } });
+
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1, 2] } });
+  const rows = messages.find((message) => message.type === "rows");
+  assert.deepEqual(plain(rows.rows), [
+    { rowIndex: 0, row: ["alice", "```x", "a"] },
+    { rowIndex: 1, row: ["bob", "ok", "b"] },
+    { rowIndex: 2, row: ["carol", "fine", "c"] },
+  ]);
+});
+
 test("large data worker returns bounded previews and an exact full cell", async () => {
   const { context, messages } = loadLargeWorker();
   const fullValue = `prefix,"quoted"\n${"x".repeat(900)}`;

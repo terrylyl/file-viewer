@@ -10,8 +10,8 @@ const releaseScript = readFileSync(new URL("../scripts/create-release.mjs", impo
 const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const sbom = JSON.parse(readFileSync(new URL("../sbom.cdx.json", import.meta.url), "utf8"));
 
-test("app package version is 2.3.7", () => {
-  assert.equal(packageJson.version, "2.3.7");
+test("app package version is 2.3.8", () => {
+  assert.equal(packageJson.version, "2.3.8");
 });
 
 test("release governance artifacts stay aligned with the baseline", () => {
