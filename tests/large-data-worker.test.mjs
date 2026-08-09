@@ -465,6 +465,36 @@ test("large data worker keeps a quoted JSON blob with bare inner quotes intact",
   assert.deepEqual(plain(rows.rows[0].row), ["1", payload, "x"]);
 });
 
+test("large data worker does not merge records around an invalid quoted structure", async () => {
+  const { context, messages } = loadLargeWorker();
+  const headers = Array.from({ length: 33 }, (_, index) => `h${index + 1}`);
+  const quote = (value) => `"${String(value).replaceAll('"', '""')}"`;
+  const records = Array.from({ length: 200 }, (_, rowIndex) => {
+    const values = Array.from({ length: 33 }, (_, columnIndex) => `r${rowIndex + 1}c${columnIndex + 1}`);
+    if (rowIndex === 0) values[12] = '[\n"plain"';
+    if (rowIndex === 60) values[12] = "foo]";
+    values[12] = quote(values[12]);
+    return values.join(",");
+  });
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(`${headers.join(",")}\n${records.join("\n")}\n`, [17, 4093, 11]),
+    fileKind: "CSV",
+    delimiter: ",",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.headers.length, 33);
+  assert.equal(loaded.result.rowCount, 200, "后文偶然出现的 ] 不能吞掉前 60 条记录");
+
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 60, 61] } });
+  const rows = messages.find((message) => message.type === "rows");
+  assert.equal(rows.rows[0].row[12], '[\n"plain"');
+  assert.equal(rows.rows[1].row[12], "foo]");
+  assert.equal(rows.rows[2].row[0], "r62c1");
+});
+
 test("large data worker points at undoubled quotes when rows break", async () => {
   const { context, messages } = loadLargeWorker();
   const text = 'id,prompt,tag\n1,"```json\n{"model": "gpt", "n": 1}\n```",q\n2,ok,y\n';

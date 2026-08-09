@@ -463,6 +463,26 @@ test("a quoted JSON blob keeps its commas even when the inner quotes are bare", 
   assert.equal(unclosed.rows[1][0], "bob");
 });
 
+test("an invalid quoted structure cannot merge later CSV records", () => {
+  const core = loadWorkerCore();
+  const headers = Array.from({ length: 33 }, (_, index) => `h${index + 1}`);
+  const quote = (value) => `"${String(value).replaceAll('"', '""')}"`;
+  const rows = Array.from({ length: 200 }, (_, rowIndex) => {
+    const values = Array.from({ length: 33 }, (_, columnIndex) => `r${rowIndex + 1}c${columnIndex + 1}`);
+    if (rowIndex === 0) values[12] = '[\n"plain"';
+    if (rowIndex === 60) values[12] = "foo]";
+    values[12] = quote(values[12]);
+    return values.join(",");
+  });
+  const parsed = core.parseCsvText(`${headers.join(",")}\n${rows.join("\n")}\n`, { delimiter: "," });
+
+  assert.equal(parsed.headers.length, 33);
+  assert.equal(parsed.rows.length, 200, "后文偶然出现的 ] 不能确认一个跨记录的无效结构");
+  assert.ok(parsed.rows.every((row) => row.length === 33));
+  assert.equal(parsed.rows[0][12], '[\n"plain"');
+  assert.equal(parsed.rows[60][12], "foo]");
+});
+
 test("a bracket followed by a newline and plain text still ends the record", () => {
   const core = loadWorkerCore();
   // 前瞻不通过时必须把等待期间吞掉的换行还回去，否则两行会被粘成一行

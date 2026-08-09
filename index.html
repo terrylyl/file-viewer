@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-FZNomwNM4FbOUzHb8hJNpDcTySlVx7t7xYLWDZ8UtBs='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-37hrGe7sWsNU7WiZdYfi+TuHZl2EgabN2FY0RX4JEB4='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -3991,9 +3991,9 @@ function createCsvRecordParser(delimiter = ",") {
     } catch (error) {
       // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
-    // 引号内的括号配平了就够：双重编码的 JSON（`\"` 转义、字面 `\n`）
-    // 本身过不了 JSON.parse，但它被引号定界，误判的代价远小于把它切碎。
-    const accept = validJson || specInQuotes;
+    // 同一物理行内允许兼容双重编码、内部引号未双写的 JSON；一旦跨过换行，
+    // 无效结构就不能仅凭后文偶然出现的闭括号成立，否则会把中间的真实记录吞掉。
+    const accept = validJson || (specInQuotes && specPhysicalLineIndex === 0);
     if (!accept || !learnedColumns) {
       rollbackSpeculation(records);
       return;
@@ -6093,9 +6093,9 @@ function createCsvRecordParser(delimiter = ",") {
     } catch (error) {
       // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
-    // 引号内的括号配平了就够：双重编码的 JSON（`\"` 转义、字面 `\n`）
-    // 本身过不了 JSON.parse，但它被引号定界，误判的代价远小于把它切碎。
-    const accept = validJson || specInQuotes;
+    // 同一物理行内允许兼容双重编码、内部引号未双写的 JSON；一旦跨过换行，
+    // 无效结构就不能仅凭后文偶然出现的闭括号成立，否则会把中间的真实记录吞掉。
+    const accept = validJson || (specInQuotes && specPhysicalLineIndex === 0);
     if (!accept || !learnedColumns) {
       rollbackSpeculation(records);
       return;
@@ -7094,9 +7094,9 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     } catch (error) {
       // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
-    // 引号内的括号配平了就够：双重编码的 JSON 过不了 JSON.parse，
-    // 但它被引号定界，误判的代价远小于把它切碎。
-    const accept = validJson || specInQuotes;
+    // 同一物理行内允许兼容双重编码、内部引号未双写的 JSON；一旦跨过换行，
+    // 无效结构就不能仅凭后文偶然出现的闭括号成立，否则会把中间的真实记录吞掉。
+    const accept = validJson || (specInQuotes && specPhysicalLineIndex === 0);
     if (!accept || !headerDescriptors) {
       rollbackSpeculation();
       return;
@@ -9373,9 +9373,9 @@ self.onmessage = (event) => {
           } catch (error) {
             // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
           }
-          // 引号内的括号配平了就够：双重编码的 JSON（`\"` 转义、字面 `\n`）
-          // 本身过不了 JSON.parse，但它被引号定界，误判的代价远小于把它切碎。
-          const accept = validJson || specInQuotes;
+          // 同一物理行内允许兼容双重编码、内部引号未双写的 JSON；一旦跨过换行，
+          // 无效结构就不能仅凭后文偶然出现的闭括号成立，否则会把中间的真实记录吞掉。
+          const accept = validJson || (specInQuotes && specPhysicalLineIndex === 0);
           if (!accept || !learnedColumns) {
             rollbackSpeculation(records);
             return;
@@ -10078,7 +10078,7 @@ self.onmessage = (event) => {
       const EXCEL_SAFE_READ_MAX_BYTES = 80 * 1024 * 1024;
       const EXCEL_SHARED_STRINGS_MAX_BYTES = 120 * 1024 * 1024;
       const EXCEL_CELL_META_SCAN_MAX_CELLS = 200000;
-      const LARGE_TEXT_FILE_THRESHOLD = 24 * 1024 * 1024;
+      const LARGE_TEXT_FILE_THRESHOLD = 300 * 1024 * 1024;
       const LARGE_TEXT_FILE_MAX_BYTES = 500 * 1024 * 1024;
       const LARGE_PREVIEW_CACHE_MAX_BYTES = 32 * 1024 * 1024;
       const LARGE_CELL_CACHE_MAX_BYTES = 64 * 1024 * 1024;

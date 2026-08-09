@@ -209,9 +209,9 @@ function createCsvRecordParser(delimiter = ",") {
     } catch (error) {
       // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
-    // 引号内的括号配平了就够：双重编码的 JSON（`\"` 转义、字面 `\n`）
-    // 本身过不了 JSON.parse，但它被引号定界，误判的代价远小于把它切碎。
-    const accept = validJson || specInQuotes;
+    // 同一物理行内允许兼容双重编码、内部引号未双写的 JSON；一旦跨过换行，
+    // 无效结构就不能仅凭后文偶然出现的闭括号成立，否则会把中间的真实记录吞掉。
+    const accept = validJson || (specInQuotes && specPhysicalLineIndex === 0);
     if (!accept || !learnedColumns) {
       rollbackSpeculation(records);
       return;
