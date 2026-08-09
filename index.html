@@ -6615,6 +6615,9 @@ const INDEX_TOLERANCE_MAX_BYTES = 1024 * 1024;
 const CELL_FLAG_QUOTED = 1;
 
 const BYTE_QUOTE = 0x22;
+const BYTE_EQUALS = 0x3d;
+const BYTE_OPEN_PAREN = 0x28;
+const BYTE_CLOSE_PAREN = 0x29;
 const BYTE_BACKSLASH = 0x5c;
 const BYTE_BACKTICK = 0x60;
 const BYTE_OPEN_BRACE = 0x7b;
@@ -6812,6 +6815,9 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
   let fieldStarted = false;
   let fieldHasNonWhitespace = false;
   let fieldQuoted = false;
+  let fieldLeadsWithEquals = false;
+  let fieldBracketSurplus = 0;
+  let fieldBracketDeficit = 0;
   let fieldEscapes = [];
   let inQuotes = false;
   let pendingQuote = false;
@@ -6836,6 +6842,9 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
   let specFieldStarted = false;
   let specFieldHasNonWhitespace = false;
   let specFieldQuoted = false;
+  let specFieldLeadsWithEquals = false;
+  let specFieldBracketSurplus = 0;
+  let specFieldBracketDeficit = 0;
   let specEscapeLength = 0;
   let specInQuotes = false;
   let specRecordLength = 0;
@@ -6856,8 +6865,19 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
   const isWhitespaceByte = (byte) => byte === 0x20 || byte === 0x09 || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN;
 
   const appendFieldByte = (byte, countsAsContent = true) => {
+    // 公式修复要的两样东西：字段是不是以 `=` 开头，以及括号的盈亏。
+    // 都在扫描时顺手记下来，免得为此把 cell 解码出来。
+    if (countsAsContent && !isWhitespaceByte(byte)) {
+      if (!fieldHasNonWhitespace) fieldLeadsWithEquals = byte === BYTE_EQUALS;
+      fieldHasNonWhitespace = true;
+      if (byte === BYTE_OPEN_PAREN || byte === BYTE_OPEN_BRACKET || byte === BYTE_OPEN_BRACE) {
+        fieldBracketSurplus += 1;
+      } else if (byte === BYTE_CLOSE_PAREN || byte === BYTE_CLOSE_BRACKET || byte === BYTE_CLOSE_BRACE) {
+        if (fieldBracketSurplus > 0) fieldBracketSurplus -= 1;
+        else fieldBracketDeficit += 1;
+      }
+    }
     fieldStarted = true;
-    if (countsAsContent && !isWhitespaceByte(byte)) fieldHasNonWhitespace = true;
   };
 
   // 必须在处理入口字节之前调用：现场快照不含入口字节，缓冲区第一个字节就是它，
@@ -6872,6 +6892,9 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     specFieldStarted = fieldStarted;
     specFieldHasNonWhitespace = fieldHasNonWhitespace;
     specFieldQuoted = fieldQuoted;
+    specFieldLeadsWithEquals = fieldLeadsWithEquals;
+    specFieldBracketSurplus = fieldBracketSurplus;
+    specFieldBracketDeficit = fieldBracketDeficit;
     specEscapeLength = fieldEscapes.length;
     specInQuotes = inQuotes;
     specRecordLength = currentRecord.length;
@@ -7051,6 +7074,9 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     fieldStarted = false;
     fieldHasNonWhitespace = false;
     fieldQuoted = false;
+    fieldLeadsWithEquals = false;
+    fieldBracketSurplus = 0;
+    fieldBracketDeficit = 0;
     fieldEscapes = [];
     inQuotes = false;
     pendingQuote = false;
@@ -7075,6 +7101,9 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
       end: endOffset,
       flags: fieldQuoted ? CELL_FLAG_QUOTED : 0,
       escapes: fieldEscapes.length ? fieldEscapes : null,
+      leadsWithEquals: fieldLeadsWithEquals,
+      bracketSurplus: fieldBracketSurplus,
+      bracketDeficit: fieldBracketDeficit,
     });
     resetField(nextStart);
   };
@@ -7083,6 +7112,69 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     const length = descriptor.end - descriptor.start;
     if (length <= 0) return true;
     return (descriptor.flags & CELL_FLAG_QUOTED) !== 0 && length === 2;
+  };
+
+  // 未加引号的公式 `=IF(A1 > 0, B1, C1)` 会被逗号切开。普通路径的
+  // repairFormulaRecord 按括号配平合并回去，这里按同一套算法合并 descriptor：
+  // 相邻 descriptor 合并就是取 first.start→last.end 一段字节，分隔符天然含在里面。
+  const mergeDescriptors = (record, from, to) => {
+    const first = record[from];
+    let escapes = null;
+    for (let index = from; index <= to; index += 1) {
+      if (!record[index].escapes) continue;
+      escapes = escapes ? escapes.concat(record[index].escapes) : record[index].escapes.slice();
+    }
+    return {
+      start: first.start,
+      end: record[to].end,
+      flags: first.flags,
+      escapes,
+      leadsWithEquals: first.leadsWithEquals,
+      bracketSurplus: 0,
+      bracketDeficit: 0,
+    };
+  };
+
+  const repairFormulaRecord = () => {
+    if (!headerDescriptors) return;
+    const expected = headerDescriptors.length;
+    if (!expected || currentRecord.length <= expected) return;
+    const repaired = [];
+    let changed = false;
+
+    for (let index = 0; index < currentRecord.length; index += 1) {
+      const remainingOutput = expected - repaired.length;
+      const remainingFields = currentRecord.length - index;
+      if (remainingFields === remainingOutput) {
+        for (let rest = index; rest < currentRecord.length; rest += 1) repaired.push(currentRecord[rest]);
+        break;
+      }
+
+      const startIndex = index;
+      if (currentRecord[index].leadsWithEquals) {
+        // 括号深度按夹逼累计：先减亏欠（不低于 0）再加盈余，等价于普通路径
+        // 对整段文本做的逐字符计数。
+        let depth = currentRecord[index].bracketSurplus;
+        while (
+          depth > 0
+          && index + 1 < currentRecord.length
+          && currentRecord.length - (index + 2) >= remainingOutput - 1
+        ) {
+          index += 1;
+          depth = Math.max(0, depth - currentRecord[index].bracketDeficit) + currentRecord[index].bracketSurplus;
+        }
+        if (depth === 0 && index > startIndex) {
+          repaired.push(mergeDescriptors(currentRecord, startIndex, index));
+          changed = true;
+          continue;
+        }
+        index = startIndex;
+      }
+
+      repaired.push(currentRecord[index]);
+    }
+
+    if (changed && repaired.length === expected) currentRecord = repaired;
   };
 
   // 未加引号的 `\` + 分隔符会被当成转义而少切一列（Windows 路径 C:\dir\,next）。
@@ -7111,6 +7203,8 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
   };
 
   const finishRecord = () => {
+    // 顺序与普通路径一致：先按公式合并多切的列，再按反斜杠拆回少切的列
+    repairFormulaRecord();
     repairShortRecord();
     // 表头之前的全空记录（文件开头的空行、",,"占位行）既不是表头也不是数据行，
     // 直接丢掉；与普通路径 parseCsvText 的口径保持一致。
@@ -7143,6 +7237,9 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     fieldStarted = specFieldStarted;
     fieldHasNonWhitespace = specFieldHasNonWhitespace;
     fieldQuoted = specFieldQuoted;
+    fieldLeadsWithEquals = specFieldLeadsWithEquals;
+    fieldBracketSurplus = specFieldBracketSurplus;
+    fieldBracketDeficit = specFieldBracketDeficit;
     fieldEscapes.length = specEscapeLength;
     inQuotes = specInQuotes;
     currentRecord.length = specRecordLength;

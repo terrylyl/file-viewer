@@ -394,6 +394,37 @@ test("large data worker honours an explicit header row", async () => {
   ]);
 });
 
+test("large data worker merges unquoted formulas back into one column", async () => {
+  const { context, messages } = loadLargeWorker();
+  const text = [
+    "id,formula,result",
+    "1,=IF(A1 > 0, B1, C1),ok",
+    "2,=ROUND(SUM(A2, B2), 2),done",
+    '3,=CONCAT("a, b", C1),fine',
+    "4,plain,last",
+  ].join("\n");
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(text, [9, 4, 23]),
+    fileKind: "CSV",
+    delimiter: ",",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.deepEqual(plain(loaded.result.headers), ["id", "formula", "result"]);
+  assert.equal(loaded.result.issues.inconsistentRows.length, 0, "合并回去之后不该再报列数不一致");
+
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1, 2, 3] } });
+  const rows = messages.find((message) => message.type === "rows");
+  assert.deepEqual(plain(rows.rows), [
+    { rowIndex: 0, row: ["1", "=IF(A1 > 0, B1, C1)", "ok"] },
+    { rowIndex: 1, row: ["2", "=ROUND(SUM(A2, B2), 2)", "done"] },
+    { rowIndex: 2, row: ["3", '=CONCAT("a, b", C1)', "fine"] },
+    { rowIndex: 3, row: ["4", "plain", "last"] },
+  ]);
+});
+
 test("large data worker warns when the table collapses into a single column", async () => {
   const { context, messages } = loadLargeWorker();
   await context.self.onmessage({ data: {
