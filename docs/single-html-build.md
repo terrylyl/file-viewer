@@ -12,6 +12,7 @@ src/shared/column-profile.js
 src/shared/filters.js
 src/shared/issues.js
 src/shared/csv-utils.js
+src/shared/excel-utils.js
 src/app/state.js
 src/app/file-io.js
 src/app/filtering.js
@@ -24,6 +25,7 @@ src/app/export.js
 src/app/main.js
 src/workers/csv-worker.js
 src/workers/query-worker.js
+src/workers/large-data-worker.js
 src/workers/excel-worker.js
 ```
 

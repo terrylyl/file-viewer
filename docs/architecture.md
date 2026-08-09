@@ -192,14 +192,15 @@ Important `state` groups:
 
 `csv-worker-source` owns:
 
-- CSV delimiter detection. Candidate delimiters are scored on field-count consistency **and** on whether data records reproduce the header's column count, so a `|`-separated list living inside one column of a comma file does not win.
+- CSV delimiter detection. Candidate delimiters are scored on field-count consistency and on whether data records reproduce a plausible header's column count. The detector may skip up to three leading single-cell preamble records, but charges a penalty when another candidate could split a skipped record. Width and variance contributions are capped, and Markdown-style `| a | b |` decoration is penalized, so embedded tables or a few malformed records cannot overwhelm the dominant CSV structure. `.tsv` files bypass detection and use Tab; the import controls can override both delimiter and header row when automatic detection remains ambiguous.
 - CSV state-machine parsing. Standard CSV quoting remains the primary rule; the parser also conservatively retains unquoted JSON object/array fields, backslash-escaped delimiters, and fenced Markdown blocks so their commas/newlines do not become table boundaries.
 
 The tolerant extensions are guarded, because an unterminated one used to swallow the rest of the file:
 
 - A `{` or `[` only opens a structured field when the next character actually looks like JSON. Inside a quoted field the parser looks one character further so a field's own closing quote (`"{"`) is not mistaken for the start of a JSON string.
 - Structured fields and code fences run under `CSV_TOLERANCE_MAX_CHARS`. Exceeding it rolls the parser back to the start of the field and replays the buffered text with tolerance disabled.
-- A code fence still open at EOF is rolled back the same way; an unclosed JSON bracket at EOF is kept as-is so the import warning still surfaces a genuinely truncated source file.
+- A code fence or structured-field candidate still open at EOF is rolled back the same way, while parser diagnostics retain the corresponding unclosed-field warning.
+- Speculative JSON/array handling is checked against a strict CSV shadow state at each physical line. If the candidate would merge rows that independently reproduce the header width, it is rolled back and replayed as ordinary CSV. A bracketed value that is not valid JSON may be accepted for compatibility only when it closes on the same physical line inside an already quoted field; later rows cannot accidentally validate it with a closing bracket.
 - Inside quotes, `\"` is only an escape when another character follows it; `"C:\dir\",next` closes at its own quote.
 - `parseCsvText` additionally splits backslash-escaped delimiters back apart when a record came out shorter than the header.
 
