@@ -444,6 +444,25 @@ test("pretty-printed JSON survives a newline right after the opening bracket", (
   assert.equal(braces.rows[0][1], '{\n  "a": 1,\n  "b": 2\n}');
 });
 
+test("a quoted JSON blob keeps its commas even when the inner quotes are bare", () => {
+  const core = loadWorkerCore();
+  // 双重编码：外层是 CSV 引号，里面是一段被转义过的 pretty-print 数组，
+  // 缩进是字面的 \n\t，元素引号没有双写。2.3.5 能完整读出，2.3.7 起被切开。
+  const payload = '[\\n\\t\\t\\t"BOLL-DMI",\\n\\t\\t\\t"MA-DMI",\\n\\t\\t\\t"MA-WR"\\n]';
+  const parsed = core.parseCsvText(`id,payload,tag\n1,"${payload}",x\n2,ok,y\n`, { delimiter: "," });
+
+  assert.equal(parsed.headers.length, 3);
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(parsed.rows[0][1], payload);
+  assert.equal(parsed.rows[0][2], "x");
+
+  // 引号内的括号不闭合时仍然要收得住，不能吞掉后面的行
+  const unclosed = core.parseCsvText('id,note,tag\nalice,"[2024上半年",a\nbob,ok,b\n', { delimiter: "," });
+  assert.equal(unclosed.rows.length, 2);
+  assert.equal(unclosed.rows[0][1], "[2024上半年");
+  assert.equal(unclosed.rows[1][0], "bob");
+});
+
 test("a bracket followed by a newline and plain text still ends the record", () => {
   const core = loadWorkerCore();
   // 前瞻不通过时必须把等待期间吞掉的换行还回去，否则两行会被粘成一行

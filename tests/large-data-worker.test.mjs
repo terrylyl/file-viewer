@@ -445,6 +445,26 @@ test("large data worker keeps pretty-printed JSON in one cell", async () => {
   assert.deepEqual(plain(rows.rows[0].row), ["1", pretty, "x"]);
 });
 
+test("large data worker keeps a quoted JSON blob with bare inner quotes intact", async () => {
+  const { context, messages } = loadLargeWorker();
+  const payload = '[\\n\\t\\t\\t"BOLL-DMI",\\n\\t\\t\\t"MA-DMI"\\n]';
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(`id,payload,tag\n1,"${payload}",x\n2,ok,y\n`, [5, 11, 3]),
+    fileKind: "CSV",
+    delimiter: ",",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.deepEqual(plain(loaded.result.headers), ["id", "payload", "tag"]);
+  assert.equal(loaded.result.rowCount, 2);
+
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0] } });
+  const rows = messages.find((message) => message.type === "rows");
+  assert.deepEqual(plain(rows.rows[0].row), ["1", payload, "x"]);
+});
+
 test("large data worker points at undoubled quotes when rows break", async () => {
   const { context, messages } = loadLargeWorker();
   const text = 'id,prompt,tag\n1,"```json\n{"model": "gpt", "n": 1}\n```",q\n2,ok,y\n';

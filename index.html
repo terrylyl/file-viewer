@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-tL70Ru68KnnDXAKau7yX2qbM3rN4DtxCikdmn4bhXEU='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-FZNomwNM4FbOUzHb8hJNpDcTySlVx7t7xYLWDZ8UtBs='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -3991,7 +3991,10 @@ function createCsvRecordParser(delimiter = ",") {
     } catch (error) {
       // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
-    if (!validJson || !learnedColumns) {
+    // 引号内的括号配平了就够：双重编码的 JSON（`\"` 转义、字面 `\n`）
+    // 本身过不了 JSON.parse，但它被引号定界，误判的代价远小于把它切碎。
+    const accept = validJson || specInQuotes;
+    if (!accept || !learnedColumns) {
       rollbackSpeculation(records);
       return;
     }
@@ -4128,7 +4131,11 @@ function createCsvRecordParser(delimiter = ",") {
       }
       const open = structurePendingOpen;
       structurePendingOpen = "";
-      if (isJsonStructureLead(open, ch)) {
+      // 引号内的开括号放宽前瞻：字段边界本来就由引号定界，`[2024上半年`
+      // 吞掉整个文件那个风险是未加引号场景独有的。而被 JSON 转义过的内容
+      // （`[\n\t\t\t\"名字\"` 这种双重编码）开头就是反斜杠，卡在白名单上
+      // 就会丢掉保护，然后在第一个 `",` 处被当成字段收尾。
+      if (specInQuotes || isJsonStructureLead(open, ch)) {
         structureStack = [open];
         structureInString = false;
         structureEscaped = false;
@@ -6086,7 +6093,10 @@ function createCsvRecordParser(delimiter = ",") {
     } catch (error) {
       // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
-    if (!validJson || !learnedColumns) {
+    // 引号内的括号配平了就够：双重编码的 JSON（`\"` 转义、字面 `\n`）
+    // 本身过不了 JSON.parse，但它被引号定界，误判的代价远小于把它切碎。
+    const accept = validJson || specInQuotes;
+    if (!accept || !learnedColumns) {
       rollbackSpeculation(records);
       return;
     }
@@ -6223,7 +6233,11 @@ function createCsvRecordParser(delimiter = ",") {
       }
       const open = structurePendingOpen;
       structurePendingOpen = "";
-      if (isJsonStructureLead(open, ch)) {
+      // 引号内的开括号放宽前瞻：字段边界本来就由引号定界，`[2024上半年`
+      // 吞掉整个文件那个风险是未加引号场景独有的。而被 JSON 转义过的内容
+      // （`[\n\t\t\t\"名字\"` 这种双重编码）开头就是反斜杠，卡在白名单上
+      // 就会丢掉保护，然后在第一个 `",` 处被当成字段收尾。
+      if (specInQuotes || isJsonStructureLead(open, ch)) {
         structureStack = [open];
         structureInString = false;
         structureEscaped = false;
@@ -7080,7 +7094,10 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     } catch (error) {
       // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
-    if (!validJson || !headerDescriptors) {
+    // 引号内的括号配平了就够：双重编码的 JSON 过不了 JSON.parse，
+    // 但它被引号定界，误判的代价远小于把它切碎。
+    const accept = validJson || specInQuotes;
+    if (!accept || !headerDescriptors) {
       rollbackSpeculation();
       return;
     }
@@ -7415,7 +7432,9 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
       }
       const open = structurePendingOpen;
       structurePendingOpen = 0;
-      if (isJsonStructureLeadByte(open, byte)) {
+      // 引号内放宽前瞻：字段边界已由引号定界，`[2024上半年` 吞掉整个文件
+      // 那个风险是未加引号场景独有的。
+      if (specInQuotes || isJsonStructureLeadByte(open, byte)) {
         structureStack = [open];
         structureInString = false;
         structureEscaped = false;
@@ -9354,7 +9373,10 @@ self.onmessage = (event) => {
           } catch (error) {
             // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
           }
-          if (!validJson || !learnedColumns) {
+          // 引号内的括号配平了就够：双重编码的 JSON（`\"` 转义、字面 `\n`）
+          // 本身过不了 JSON.parse，但它被引号定界，误判的代价远小于把它切碎。
+          const accept = validJson || specInQuotes;
+          if (!accept || !learnedColumns) {
             rollbackSpeculation(records);
             return;
           }
@@ -9491,7 +9513,11 @@ self.onmessage = (event) => {
             }
             const open = structurePendingOpen;
             structurePendingOpen = "";
-            if (isJsonStructureLead(open, ch)) {
+            // 引号内的开括号放宽前瞻：字段边界本来就由引号定界，`[2024上半年`
+            // 吞掉整个文件那个风险是未加引号场景独有的。而被 JSON 转义过的内容
+            // （`[\n\t\t\t\"名字\"` 这种双重编码）开头就是反斜杠，卡在白名单上
+            // 就会丢掉保护，然后在第一个 `",` 处被当成字段收尾。
+            if (specInQuotes || isJsonStructureLead(open, ch)) {
               structureStack = [open];
               structureInString = false;
               structureEscaped = false;

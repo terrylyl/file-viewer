@@ -432,7 +432,10 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     } catch (error) {
       // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
-    if (!validJson || !headerDescriptors) {
+    // 引号内的括号配平了就够：双重编码的 JSON 过不了 JSON.parse，
+    // 但它被引号定界，误判的代价远小于把它切碎。
+    const accept = validJson || specInQuotes;
+    if (!accept || !headerDescriptors) {
       rollbackSpeculation();
       return;
     }
@@ -767,7 +770,9 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
       }
       const open = structurePendingOpen;
       structurePendingOpen = 0;
-      if (isJsonStructureLeadByte(open, byte)) {
+      // 引号内放宽前瞻：字段边界已由引号定界，`[2024上半年` 吞掉整个文件
+      // 那个风险是未加引号场景独有的。
+      if (specInQuotes || isJsonStructureLeadByte(open, byte)) {
         structureStack = [open];
         structureInString = false;
         structureEscaped = false;

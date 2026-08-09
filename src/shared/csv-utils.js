@@ -209,7 +209,10 @@ function createCsvRecordParser(delimiter = ",") {
     } catch (error) {
       // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
-    if (!validJson || !learnedColumns) {
+    // 引号内的括号配平了就够：双重编码的 JSON（`\"` 转义、字面 `\n`）
+    // 本身过不了 JSON.parse，但它被引号定界，误判的代价远小于把它切碎。
+    const accept = validJson || specInQuotes;
+    if (!accept || !learnedColumns) {
       rollbackSpeculation(records);
       return;
     }
@@ -346,7 +349,11 @@ function createCsvRecordParser(delimiter = ",") {
       }
       const open = structurePendingOpen;
       structurePendingOpen = "";
-      if (isJsonStructureLead(open, ch)) {
+      // 引号内的开括号放宽前瞻：字段边界本来就由引号定界，`[2024上半年`
+      // 吞掉整个文件那个风险是未加引号场景独有的。而被 JSON 转义过的内容
+      // （`[\n\t\t\t\"名字\"` 这种双重编码）开头就是反斜杠，卡在白名单上
+      // 就会丢掉保护，然后在第一个 `",` 处被当成字段收尾。
+      if (specInQuotes || isJsonStructureLead(open, ch)) {
         structureStack = [open];
         structureInString = false;
         structureEscaped = false;
