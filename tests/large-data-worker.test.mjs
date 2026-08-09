@@ -348,13 +348,14 @@ test("large data worker warns when the table collapses into a single column", as
   const { context, messages } = loadLargeWorker();
   await context.self.onmessage({ data: {
     kind: "load-large-file",
-    file: createChunkedFile("月度报表\nid;name;age\n1;a;2\n2;b;3\n", [5, 9]),
+    // 前言行超过跳过上限，探测放弃分号；这时不能静默
+    file: createChunkedFile("报表\n说明一\n说明二\n说明三\nid;name;age\n1;a;2\n", [5, 9]),
     fileKind: "CSV",
     encoding: "utf-8",
   } });
 
   const loaded = messages.find((message) => message.type === "loaded");
-  assert.equal(loaded.result.headers.length, 1, "这个用例目前仍会塌成一列（待第 2 组修复）");
+  assert.equal(loaded.result.headers.length, 1);
   const warning = loaded.result.issues.inconsistentRows.find((issue) => issue.type === "分隔符可能判断有误");
   assert.ok(warning, "大文件路径同样不能静默");
   assert.match(warning.detail, /分号/);

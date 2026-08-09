@@ -68,42 +68,50 @@ const CORPUS = [
   { name: "前言行 + 逗号表", input: "导出时间: 2026-08-09\nid,name,age\n1,a,2\n", delimiter: ",", columns: 3 },
   { name: "无表头的分号数据", input: "1;a;2\n2;b;3\n3;c;4\n", delimiter: ";", columns: 3 },
 
-  // ---- 标题行/前言行不含真分隔符：第 2 组才能修 ----
+  // ---- 标题行/前言行不含真分隔符 ----
+  { name: "标题行 + 空行 + 分号表", input: "月度报表\n\nid;name;age\n1;a;2\n2;b;3\n", delimiter: ";", columns: 3 },
+  { name: "标题行(含逗号) + 分号表", input: "报表：1月,2月\nid;name;age\n1;a;2\n2;b;3\n", delimiter: ";", columns: 3 },
+  { name: "前言两行 + TSV", input: "导出时间: 2026-08-09\n数据来源: XX\nid\tname\tage\n1\ta\t2\n", delimiter: "\t", columns: 3 },
+  { name: "# 注释行 + TSV", input: "# 导出说明\nid\tname\tage\n1\ta\t2\n", delimiter: "\t", columns: 3 },
+  { name: "说明行 + 竖线表", input: "月报\nid|name|age\n1|a|2\n", delimiter: "|", columns: 3 },
+  { name: "首记录是引号包住的多行 cell + 分号表", input: '"第一行\n第二行"\nid;name;age\n1;a;2\n', delimiter: ";", columns: 3 },
+
+  // ---- 允许跳过表头行之后新增的风险面：正文高频字符不能靠跳表头反超 ----
+  { name: "tags 列竖线(每行 5 项)", input: "id,tags\n1,a|b|c|d|e\n2,f|g|h|i|j\n3,k|l|m|n|o\n", delimiter: ",", columns: 2 },
+  { name: "tags 列分号(每行 5 项)", input: "id,tags\n1,a;b;c;d;e\n2,f;g;h;i;j\n3,k;l;m;n;o\n", delimiter: ",", columns: 2 },
+  { name: "备注列含制表符(每行 5 段)", input: "id,note\n1,a\tb\tc\td\te\n2,f\tg\th\ti\tj\n", delimiter: ",", columns: 2 },
+  // 整个文件就是一张 Markdown 表：没有竞争候选时仍要按竖线切开
   {
-    name: "标题行 + 空行 + 分号表",
-    input: "月度报表\n\nid;name;age\n1;a;2\n2;b;3\n",
-    delimiter: ";", columns: 3,
-    current: { delimiter: ",", columns: 1 }, pending: "B1+B2",
+    name: "纯 Markdown 表格文件",
+    input: "| id | name |\n| --- | --- |\n| 1 | 张三 |\n| 2 | 李四 |\n",
+    delimiter: "|", columns: 4,
   },
+  { name: "前言行含制表符 + 逗号表", input: "导出: a\tb\nid,name\n1,2\n", delimiter: ",", columns: 2 },
+  // 宽度不能盖过结构：引号里的 60 列 Markdown 表不该赢过 38 列的真表头
   {
-    name: "标题行(含逗号) + 分号表",
-    input: "报表：1月,2月\nid;name;age\n1;a;2\n2;b;3\n",
-    delimiter: ";", columns: 3,
-    current: { delimiter: ",", columns: 2 }, pending: "B1+B2",
+    name: "宽表：38 列逗号 + 引号内 60 列 md 表",
+    input: (() => {
+      const headers = Array.from({ length: 38 }, (_, i) => `h${i + 1}`);
+      const row = `|${Array.from({ length: 60 }, (_, i) => `c${i + 1}`).join("|")}|`;
+      const tail = Array.from({ length: 36 }, (_, i) => `v${i + 3}`);
+      return `${headers.join(",")}\n1,"${Array.from({ length: 8 }, () => row).join("\n")}",${tail.join(",")}\n`;
+    })(),
+    delimiter: ",", columns: 38,
   },
+  // 但真正的宽表仍要认出来：封顶只是让宽度不再线性加分
   {
-    name: "前言两行 + TSV",
-    input: "导出时间: 2026-08-09\n数据来源: XX\nid\tname\tage\n1\ta\t2\n",
-    delimiter: "\t", columns: 3,
-    current: { delimiter: ",", columns: 1 }, pending: "B1+B2",
+    name: "宽表：20 列竖线",
+    input: (() => {
+      const line = (p) => Array.from({ length: 20 }, (_, i) => `${p}${i + 1}`).join("|");
+      return `${line("h")}\n${line("a")}\n${line("b")}\n`;
+    })(),
+    delimiter: "|", columns: 20,
   },
+  // 前言行超过跳过上限，仍会塌成一列——此时必须给出告警（见下面的告警用例）
   {
-    name: "# 注释行 + TSV",
-    input: "# 导出说明\nid\tname\tage\n1\ta\t2\n",
-    delimiter: "\t", columns: 3,
-    current: { delimiter: ",", columns: 1 }, pending: "B1+B2",
-  },
-  {
-    name: "说明行 + 竖线表",
-    input: "月报\nid|name|age\n1|a|2\n",
-    delimiter: "|", columns: 3,
-    current: { delimiter: ",", columns: 1 }, pending: "B1+B2",
-  },
-  {
-    name: "首记录是引号包住的多行 cell + 分号表",
-    input: '"第一行\n第二行"\nid;name;age\n1;a;2\n',
-    delimiter: ";", columns: 3,
-    current: { delimiter: ",", columns: 1 }, pending: "B1+B2",
+    name: "四行前言 + 分号表(超出跳过上限)",
+    input: "报表\n说明一\n说明二\n说明三\nid;name;age\n1;a;2\n",
+    delimiter: ",", columns: 1,
   },
 ];
 
@@ -132,22 +140,17 @@ test("delimiter corpus: detection and column count", () => {
 
 test("delimiter corpus: pending cases are tracked, not silently accepted", () => {
   const pending = CORPUS.filter((entry) => entry.pending);
-  // 第 2 组落地后这些用例会开始按 delimiter/columns 通过，届时删掉 current/pending 字段。
-  assert.equal(pending.length, 6, "待修用例数量变化时请同步更新语料");
-  for (const entry of pending) {
-    assert.notDeepEqual(
-      { delimiter: entry.current.delimiter, columns: entry.current.columns },
-      { delimiter: entry.delimiter, columns: entry.columns },
-      `${entry.name}: current 与期望相同就不该再标 pending`,
-    );
-  }
+  // 目前没有待修用例。将来再引入已知失败时在语料里加 current/pending，
+  // 修好后这条断言会红，提醒把标记删掉。
+  assert.deepEqual(pending.map((entry) => entry.name), []);
 });
 
 test("低置信度：整表塌成一列时给出分隔符告警", () => {
   const core = loadWorkerCore().self.__CSV_CORE__;
-  const parsed = core.parseCsvText("月度报表\nid;name;age\n1;a;2\n2;b;3\n");
+  // 前言行超过跳过上限，探测放弃分号；这时不能静默
+  const parsed = core.parseCsvText("报表\n说明一\n说明二\n说明三\nid;name;age\n1;a;2\n");
 
-  assert.equal(parsed.headers.length, 1, "这个用例目前仍会塌成一列（待第 2 组修复）");
+  assert.equal(parsed.headers.length, 1);
   const warning = parsed.issues.inconsistentRows.find((issue) => issue.type === "分隔符可能判断有误");
   assert.ok(warning, "塌成一列时必须给出告警，不能静默");
   assert.match(warning.detail, /分号/);

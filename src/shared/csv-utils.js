@@ -606,32 +606,72 @@ function sampleCsvRecords(text, delimiter, options = {}) {
   return records.filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
 }
 
+// 表头不一定是第一条记录：标题行、导出说明、`#` 注释都可能排在前面。
+// 但"能跳过表头行"这件事本身很危险——tags 列（a|b|c）和正文里的 Markdown
+// 表格都能靠跳过表头凑出漂亮的列结构。所以跳过分两种：
+//   其它候选也切不开的行 = 真前言，免费跳；
+//   其它候选能切开的行 = 它可能才是真表头，跳它要付代价。
+// 代价要够大：`id,note` + `1,a;b;c;d;e` 这类 tags 列，跳过表头后能凑出
+// 稳定的 5 列结构（≈34 分），必须压到真分隔符（≈24 分）以下；
+// 又要够小：`报表：1月,2月` 后面才是分号表时，分号跳一行仍要能赢（≈27 分对逗号 6 分）。
+const CSV_DELIMITER_MAX_HEADER_SKIP = 3;
+const CSV_DELIMITER_SKIP_PENALTY = 16;
+// `| a | b |` 这类用法是给内容"包边"而不是分隔：每条记录的首尾字段同时为空。
+// 它在正文里出现得再密集也不能赢过真正的分隔符。
+const CSV_DELIMITER_DECORATION_PENALTY = 40;
+// 切得更宽只在小范围内算证据。不封顶的话，一张 60 列的 Markdown 表能靠宽度
+// 压过 38 列的真表头，宽度项会盖掉一致性、表头复现和包边惩罚。
+const CSV_DELIMITER_WIDTH_CAP = 12;
+
+function isCsvPreambleLine(line, delimiter) {
+  return !CSV_DELIMITER_CANDIDATES.some((other) => other !== delimiter && line.includes(other));
+}
+
+function scoreCsvDelimiterCandidate(records, headerIndex, priority) {
+  const scoped = records.slice(headerIndex);
+  const headerColumns = scoped[0] ? scoped[0].length : 0;
+  if (headerColumns < 2) return null;
+  const counts = scoped.map((record) => Math.max(0, record.length - 1));
+  const nonZero = counts.filter((count) => count > 0);
+  if (!nonZero.length) return null;
+  const average = nonZero.reduce((sum, count) => sum + count, 0) / nonZero.length;
+  const variance = nonZero.reduce((sum, count) => sum + Math.abs(count - average), 0) / nonZero.length;
+  const consistency = nonZero.length / Math.max(1, scoped.length);
+  // 真正的分隔符会让数据行的列数稳定复现表头列数；
+  // 只是恰好出现在某个单元格里的字符（tags 列的 a|b|c）做不到这一点。
+  const dataRecords = scoped.slice(1);
+  const headerMatch = dataRecords.length
+    ? dataRecords.filter((record) => record.length === headerColumns).length / dataRecords.length
+    : 1;
+  const decorated = scoped.filter((record) => (
+    record.length > 2 && record[0].trim() === "" && record[record.length - 1].trim() === ""
+  )).length / scoped.length;
+  return Math.min(average, CSV_DELIMITER_WIDTH_CAP) * 4 + consistency * 8 + headerMatch * 12
+    - variance * 3
+    - priority * 0.5
+    - decorated * CSV_DELIMITER_DECORATION_PENALTY;
+}
+
 function detectCsvDelimiter(text, options = {}) {
   let best = ",";
   let bestScore = -Infinity;
 
   CSV_DELIMITER_CANDIDATES.forEach((delimiter, priority) => {
     const records = sampleCsvRecords(text, delimiter, options);
-    const headerColumns = records[0] ? records[0].length : 0;
-    // 表头是分隔符探测的硬约束。候选字符如果连首条非空记录都切不开，
-    // 不能仅凭正文中的 Markdown 表格、标签列表等高频内容获胜。
-    if (headerColumns < 2) return;
-    const counts = records.map((record) => Math.max(0, record.length - 1));
-    const nonZero = counts.filter((count) => count > 0);
-    if (!nonZero.length) return;
-    const average = nonZero.reduce((sum, count) => sum + count, 0) / nonZero.length;
-    const variance = nonZero.reduce((sum, count) => sum + Math.abs(count - average), 0) / nonZero.length;
-    const consistency = nonZero.length / Math.max(1, records.length);
-    // 真正的分隔符会让数据行的列数稳定复现表头列数；
-    // 只是恰好出现在某个单元格里的字符（tags 列的 a|b|c）做不到这一点。
-    const dataRecords = records.slice(1);
-    const headerMatch = dataRecords.length
-      ? dataRecords.filter((record) => record.length === headerColumns).length / dataRecords.length
-      : 1;
-    const score = average * 4 + consistency * 8 + headerMatch * 12 - variance * 3 - priority * 0.5;
-    if (score > bestScore) {
-      best = delimiter;
-      bestScore = score;
+    const maxSkip = Math.min(CSV_DELIMITER_MAX_HEADER_SKIP, Math.max(0, records.length - 1));
+    let skipCost = 0;
+    for (let headerIndex = 0; headerIndex <= maxSkip; headerIndex += 1) {
+      if (headerIndex > 0) {
+        const skipped = records[headerIndex - 1];
+        const free = skipped.length === 1 && isCsvPreambleLine(skipped[0], delimiter);
+        skipCost += free ? 0 : CSV_DELIMITER_SKIP_PENALTY;
+      }
+      const score = scoreCsvDelimiterCandidate(records, headerIndex, priority);
+      if (score == null) continue;
+      if (score - skipCost > bestScore) {
+        best = delimiter;
+        bestScore = score - skipCost;
+      }
     }
   });
 
@@ -645,7 +685,11 @@ function findCsvDelimiterAlternative(text, chosen, options = {}) {
 
   for (const delimiter of CSV_DELIMITER_CANDIDATES) {
     if (delimiter === chosen) continue;
-    const records = sampleCsvRecords(text, delimiter, options);
+    const sampled = sampleCsvRecords(text, delimiter, options);
+    // 前言行同样会稀释覆盖率，这里和探测一样先跳掉开头切不开的记录
+    let start = 0;
+    while (start < sampled.length && sampled[start].length < 2) start += 1;
+    const records = sampled.slice(start);
     if (records.length < 2) continue;
     const tally = new Map();
     for (const record of records) {
