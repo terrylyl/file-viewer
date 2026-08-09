@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-dgvvaB4aMWFdpJhLm2eVCWC/SNZ4m1EWsyjaGEUArR0='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-wVLYUbiYrg55BcTXDma9VTrUiUzLdTT3PlBgWEYsT8U='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -4441,6 +4441,35 @@ function detectCsvDelimiter(text, options = {}) {
   return best;
 }
 
+// 表头不一定是第一条记录。标题行、导出说明、`#` 注释都只有一个单元格，
+// 切不出表格主体的常见宽度。只跳这种单格行，最多 3 行：
+// 「表头比数据行窄」是合法的（行尾多一个分隔符就会这样），不能一起跳。
+const CSV_MAX_PREAMBLE_RECORDS = 3;
+
+function findCsvHeaderIndex(records) {
+  if (!records.length) return 0;
+  const tally = new Map();
+  for (const record of records.slice(0, 20)) tally.set(record.length, (tally.get(record.length) || 0) + 1);
+  let modal = 0;
+  let hits = 0;
+  for (const [width, seen] of tally) {
+    if (seen > hits || (seen === hits && width > modal)) {
+      modal = width;
+      hits = seen;
+    }
+  }
+  if (modal < 2) return 0;
+  let index = 0;
+  while (
+    index < records.length - 1
+    && index < CSV_MAX_PREAMBLE_RECORDS
+    && records[index].length === 1
+  ) index += 1;
+  // 跳到上限还是单格行，说明前言比允许的更长：与其把说明文字当表头，
+  // 不如退回原样，由「分隔符可能判断有误」「列数不一致」去提示。
+  return records[index] && records[index].length > 1 ? index : 0;
+}
+
 // 只在整表塌成一列时调用：这时另一个候选如果能把多数记录切成同样的宽度，
 // 基本可以断定分隔符判错了。用众数而不是首条记录，前言行才不会挡住判断。
 function findCsvDelimiterAlternative(text, chosen, options = {}) {
@@ -4630,12 +4659,17 @@ function parseCsvText(text, options = {}) {
   // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
   // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
   const nonEmptyRecords = records.filter((row) => row.some((cell) => cell !== ""));
-  const rawHeaders = nonEmptyRecords[0] || [];
+  const headerIndex = findCsvHeaderIndex(nonEmptyRecords);
+  const rawHeaders = nonEmptyRecords[headerIndex] || [];
   const expectedColumns = rawHeaders.length;
+  // 标题行仍然是用户的数据，只是不再占着表头：按原顺序留在表头之前的位置。
+  const bodyRecords = headerIndex
+    ? [...nonEmptyRecords.slice(0, headerIndex), ...nonEmptyRecords.slice(headerIndex + 1)]
+    : nonEmptyRecords.slice(1);
   const recordsForAnalysis = expectedColumns
     ? [
       rawHeaders,
-      ...nonEmptyRecords.slice(1).map((row) => repairBackslashRecord(
+      ...bodyRecords.map((row) => repairBackslashRecord(
         repairFormulaRecord(row, expectedColumns, delimiter),
         expectedColumns,
         delimiter,
@@ -4651,6 +4685,18 @@ function parseCsvText(text, options = {}) {
     longFields: [],
     duplicateColumns: detectDuplicateColumns(rawHeaders),
   };
+  if (headerIndex > 0) {
+    issues.inconsistentRows.push(
+      buildIssueSummary(
+        "表头不在首行",
+        1,
+        -1,
+        "",
+        `前 ${headerIndex} 行只有一个单元格，已按标题行处理：表头取自第 ${headerIndex + 1} 行，这些行仍作为数据行保留`,
+        nonEmptyRecords[0]?.join(delimiter) || "",
+      ),
+    );
+  }
   // 分隔符判错最典型的表现就是整表只剩一列，而且每行列数都"一致"，
   // 不会触发任何既有告警。这里主动提示一次，别让它静默。
   if (maxColumns <= 1 && recordsForAnalysis.length > 1) {
@@ -6451,6 +6497,35 @@ function detectCsvDelimiter(text, options = {}) {
   return best;
 }
 
+// 表头不一定是第一条记录。标题行、导出说明、`#` 注释都只有一个单元格，
+// 切不出表格主体的常见宽度。只跳这种单格行，最多 3 行：
+// 「表头比数据行窄」是合法的（行尾多一个分隔符就会这样），不能一起跳。
+const CSV_MAX_PREAMBLE_RECORDS = 3;
+
+function findCsvHeaderIndex(records) {
+  if (!records.length) return 0;
+  const tally = new Map();
+  for (const record of records.slice(0, 20)) tally.set(record.length, (tally.get(record.length) || 0) + 1);
+  let modal = 0;
+  let hits = 0;
+  for (const [width, seen] of tally) {
+    if (seen > hits || (seen === hits && width > modal)) {
+      modal = width;
+      hits = seen;
+    }
+  }
+  if (modal < 2) return 0;
+  let index = 0;
+  while (
+    index < records.length - 1
+    && index < CSV_MAX_PREAMBLE_RECORDS
+    && records[index].length === 1
+  ) index += 1;
+  // 跳到上限还是单格行，说明前言比允许的更长：与其把说明文字当表头，
+  // 不如退回原样，由「分隔符可能判断有误」「列数不一致」去提示。
+  return records[index] && records[index].length > 1 ? index : 0;
+}
+
 // 只在整表塌成一列时调用：这时另一个候选如果能把多数记录切成同样的宽度，
 // 基本可以断定分隔符判错了。用众数而不是首条记录，前言行才不会挡住判断。
 function findCsvDelimiterAlternative(text, chosen, options = {}) {
@@ -6688,13 +6763,14 @@ function isJsonStructureLeadByte(open, next) {
   );
 }
 
-function createCsvByteIndexer(file, delimiterByte, reportProgress) {
+function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex = 0) {
   const starts = createGrowableU32(4096);
   const ends = createGrowableU32(4096);
   const flags = createGrowableU8(4096);
   const offsets = createGrowableU32(1024);
   offsets.push(0);
   let headerDescriptors = null;
+  let nonEmptyRecordIndex = 0;
   let maxColumns = 0;
   let currentRecord = [];
   let fieldStart = 0;
@@ -7008,9 +7084,12 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
       return;
     }
     maxColumns = Math.max(maxColumns, currentRecord.length);
-    if (!headerDescriptors) {
+    // headerIndex 由采样阶段算好：在它之前的标题行按数据行写入，顺序不变。
+    if (!headerDescriptors && nonEmptyRecordIndex === headerIndex) {
       headerDescriptors = currentRecord;
+      nonEmptyRecordIndex += 1;
     } else if (currentRecord.some((descriptor) => !isDescriptorEmpty(descriptor))) {
+      nonEmptyRecordIndex += 1;
       for (const descriptor of currentRecord) {
         starts.push(descriptor.start);
         ends.push(descriptor.end);
@@ -7391,7 +7470,9 @@ async function loadIndexedCsv(file, options) {
   rowCount = 0;
   const issues = createIssues();
   const reportProgress = createProgressReporter(file, "CSV");
-  const indexer = createCsvByteIndexer(file, delimiter.charCodeAt(0), reportProgress);
+  // 表头行由采样文本判定，索引器按记录序号认表头，不必为此缓冲整条流。
+  const headerIndex = findCsvHeaderIndex(sampleCsvRecords(sampleText, delimiter, sampleOptions));
+  const indexer = createCsvByteIndexer(file, delimiter.charCodeAt(0), reportProgress, headerIndex);
   const indexed = await indexer.scan();
   cellStarts = indexed.starts;
   cellEnds = indexed.ends;
@@ -7402,6 +7483,16 @@ async function loadIndexedCsv(file, options) {
   sourceColumnCount = Math.max(rawHeaders.length, indexed.maxColumns);
   headers = normalizeHeaders(rawHeaders, sourceColumnCount);
   issues.duplicateColumns = detectDuplicateHeaderIssues(rawHeaders);
+  if (headerIndex > 0) {
+    addIssue(issues, "inconsistentRows", buildIssue(
+      "表头不在首行",
+      1,
+      -1,
+      "",
+      `前 ${headerIndex} 行只有一个单元格，已按标题行处理：表头取自第 ${headerIndex + 1} 行，这些行仍作为数据行保留`,
+      "",
+    ));
+  }
   // 与普通路径一致：整表只剩一列时主动提示分隔符可能判错，别静默。
   if (sourceColumnCount <= 1 && rowCount > 0) {
     const alternative = findCsvDelimiterAlternative(sampleText, delimiter, sampleOptions);
@@ -9510,6 +9601,35 @@ self.onmessage = (event) => {
         });
 
         return best;
+      }
+
+      // 表头不一定是第一条记录。标题行、导出说明、`#` 注释都只有一个单元格，
+      // 切不出表格主体的常见宽度。只跳这种单格行，最多 3 行：
+      // 「表头比数据行窄」是合法的（行尾多一个分隔符就会这样），不能一起跳。
+      const CSV_MAX_PREAMBLE_RECORDS = 3;
+
+      function findCsvHeaderIndex(records) {
+        if (!records.length) return 0;
+        const tally = new Map();
+        for (const record of records.slice(0, 20)) tally.set(record.length, (tally.get(record.length) || 0) + 1);
+        let modal = 0;
+        let hits = 0;
+        for (const [width, seen] of tally) {
+          if (seen > hits || (seen === hits && width > modal)) {
+            modal = width;
+            hits = seen;
+          }
+        }
+        if (modal < 2) return 0;
+        let index = 0;
+        while (
+          index < records.length - 1
+          && index < CSV_MAX_PREAMBLE_RECORDS
+          && records[index].length === 1
+        ) index += 1;
+        // 跳到上限还是单格行，说明前言比允许的更长：与其把说明文字当表头，
+        // 不如退回原样，由「分隔符可能判断有误」「列数不一致」去提示。
+        return records[index] && records[index].length > 1 ? index : 0;
       }
 
       // 只在整表塌成一列时调用：这时另一个候选如果能把多数记录切成同样的宽度，

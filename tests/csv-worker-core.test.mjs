@@ -428,6 +428,39 @@ test("a JSON-looking field that never closes gives up after the tolerance budget
   assert.equal(lastRow[1], "data");
 });
 
+test("a single-cell title row does not take the header slot", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("月度报表\nid;name;age\n1;张三;20\n2;李四;30\n");
+
+  assert.equal(JSON.stringify(parsed.headers), JSON.stringify(["id", "name", "age"]));
+  // 标题行是用户的数据，不能丢：按原顺序留在数据区最前面
+  assert.equal(JSON.stringify(parsed.rows[0]), JSON.stringify(["月度报表", "", ""]));
+  assert.equal(JSON.stringify(parsed.rows[1]), JSON.stringify(["1", "张三", "20"]));
+  assert.equal(parsed.rows.length, 3);
+  const notice = parsed.issues.inconsistentRows.find((issue) => issue.type === "表头不在首行");
+  assert.ok(notice, "换了表头行必须说明");
+  assert.match(notice.detail, /第 2 行/);
+});
+
+test("two preamble lines are skipped, three data-shaped rows are not", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("导出时间: 2026\n数据来源: XX\nid,name,age\n1,a,2\n2,b,3\n");
+  assert.equal(JSON.stringify(parsed.headers), JSON.stringify(["id", "name", "age"]));
+  assert.equal(parsed.rows.length, 4);
+
+  // 表头比数据行窄是合法的（行尾多一个分隔符），不能当成前言跳过
+  const trailing = core.parseCsvText("a,b,c\n1,2,3,\n4,5,6,\n7,8,9,\n");
+  assert.equal(JSON.stringify(trailing.headers.slice(0, 3)), JSON.stringify(["a", "b", "c"]));
+  assert.equal(JSON.stringify(trailing.rows[0].slice(0, 3)), JSON.stringify(["1", "2", "3"]));
+
+  // 前言超过上限就整体放弃，不能把说明文字当表头
+  const tooMany = core.parseCsvText(
+    `报表\n说明一\n说明二\n说明三\nid,name,age\n${Array.from({ length: 10 }, (_, i) => `${i},a,2`).join("\n")}\n`,
+  );
+  assert.equal(tooMany.headers[0], "报表");
+  assert.equal(tooMany.issues.inconsistentRows.some((issue) => issue.type === "表头不在首行"), false);
+});
+
 test("detectDelimiter ignores separator-like characters inside a single column", () => {
   const core = loadWorkerCore();
 

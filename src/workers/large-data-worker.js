@@ -198,13 +198,14 @@ function isJsonStructureLeadByte(open, next) {
   );
 }
 
-function createCsvByteIndexer(file, delimiterByte, reportProgress) {
+function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex = 0) {
   const starts = createGrowableU32(4096);
   const ends = createGrowableU32(4096);
   const flags = createGrowableU8(4096);
   const offsets = createGrowableU32(1024);
   offsets.push(0);
   let headerDescriptors = null;
+  let nonEmptyRecordIndex = 0;
   let maxColumns = 0;
   let currentRecord = [];
   let fieldStart = 0;
@@ -518,9 +519,12 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
       return;
     }
     maxColumns = Math.max(maxColumns, currentRecord.length);
-    if (!headerDescriptors) {
+    // headerIndex 由采样阶段算好：在它之前的标题行按数据行写入，顺序不变。
+    if (!headerDescriptors && nonEmptyRecordIndex === headerIndex) {
       headerDescriptors = currentRecord;
+      nonEmptyRecordIndex += 1;
     } else if (currentRecord.some((descriptor) => !isDescriptorEmpty(descriptor))) {
+      nonEmptyRecordIndex += 1;
       for (const descriptor of currentRecord) {
         starts.push(descriptor.start);
         ends.push(descriptor.end);
@@ -901,7 +905,9 @@ async function loadIndexedCsv(file, options) {
   rowCount = 0;
   const issues = createIssues();
   const reportProgress = createProgressReporter(file, "CSV");
-  const indexer = createCsvByteIndexer(file, delimiter.charCodeAt(0), reportProgress);
+  // 表头行由采样文本判定，索引器按记录序号认表头，不必为此缓冲整条流。
+  const headerIndex = findCsvHeaderIndex(sampleCsvRecords(sampleText, delimiter, sampleOptions));
+  const indexer = createCsvByteIndexer(file, delimiter.charCodeAt(0), reportProgress, headerIndex);
   const indexed = await indexer.scan();
   cellStarts = indexed.starts;
   cellEnds = indexed.ends;
@@ -912,6 +918,16 @@ async function loadIndexedCsv(file, options) {
   sourceColumnCount = Math.max(rawHeaders.length, indexed.maxColumns);
   headers = normalizeHeaders(rawHeaders, sourceColumnCount);
   issues.duplicateColumns = detectDuplicateHeaderIssues(rawHeaders);
+  if (headerIndex > 0) {
+    addIssue(issues, "inconsistentRows", buildIssue(
+      "表头不在首行",
+      1,
+      -1,
+      "",
+      `前 ${headerIndex} 行只有一个单元格，已按标题行处理：表头取自第 ${headerIndex + 1} 行，这些行仍作为数据行保留`,
+      "",
+    ));
+  }
   // 与普通路径一致：整表只剩一列时主动提示分隔符可能判错，别静默。
   if (sourceColumnCount <= 1 && rowCount > 0) {
     const alternative = findCsvDelimiterAlternative(sampleText, delimiter, sampleOptions);

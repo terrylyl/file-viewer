@@ -344,6 +344,28 @@ test("large data worker never lets a leading empty record become the header", as
   }
 });
 
+test("large data worker takes the header from below a title row", async () => {
+  const { context, messages } = loadLargeWorker();
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile("月度报表\nid;name;age\n1;张三;20\n2;李四;30\n", [7, 3, 15]),
+    fileKind: "CSV",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.deepEqual(plain(loaded.result.headers), ["id", "name", "age"]);
+  assert.equal(loaded.result.rowCount, 3, "标题行仍然算一行数据，不能丢");
+  assert.ok(loaded.result.issues.inconsistentRows.some((issue) => issue.type === "表头不在首行"));
+
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 1] } });
+  const rows = messages.find((message) => message.type === "rows");
+  assert.deepEqual(plain(rows.rows), [
+    { rowIndex: 0, row: ["月度报表", "", ""] },
+    { rowIndex: 1, row: ["1", "张三", "20"] },
+  ]);
+});
+
 test("large data worker warns when the table collapses into a single column", async () => {
   const { context, messages } = loadLargeWorker();
   await context.self.onmessage({ data: {

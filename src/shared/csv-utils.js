@@ -678,6 +678,35 @@ function detectCsvDelimiter(text, options = {}) {
   return best;
 }
 
+// 表头不一定是第一条记录。标题行、导出说明、`#` 注释都只有一个单元格，
+// 切不出表格主体的常见宽度。只跳这种单格行，最多 3 行：
+// 「表头比数据行窄」是合法的（行尾多一个分隔符就会这样），不能一起跳。
+const CSV_MAX_PREAMBLE_RECORDS = 3;
+
+function findCsvHeaderIndex(records) {
+  if (!records.length) return 0;
+  const tally = new Map();
+  for (const record of records.slice(0, 20)) tally.set(record.length, (tally.get(record.length) || 0) + 1);
+  let modal = 0;
+  let hits = 0;
+  for (const [width, seen] of tally) {
+    if (seen > hits || (seen === hits && width > modal)) {
+      modal = width;
+      hits = seen;
+    }
+  }
+  if (modal < 2) return 0;
+  let index = 0;
+  while (
+    index < records.length - 1
+    && index < CSV_MAX_PREAMBLE_RECORDS
+    && records[index].length === 1
+  ) index += 1;
+  // 跳到上限还是单格行，说明前言比允许的更长：与其把说明文字当表头，
+  // 不如退回原样，由「分隔符可能判断有误」「列数不一致」去提示。
+  return records[index] && records[index].length > 1 ? index : 0;
+}
+
 // 只在整表塌成一列时调用：这时另一个候选如果能把多数记录切成同样的宽度，
 // 基本可以断定分隔符判错了。用众数而不是首条记录，前言行才不会挡住判断。
 function findCsvDelimiterAlternative(text, chosen, options = {}) {
