@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-onAmkyy7RcVPxvaSkopUTJbJpeaO+ZEBZx1CQBQgVvU='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-HLv9riMvaMFN2fimN2ocpAmTZLtBJ48U3Ofmctzmv3E='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -4344,15 +4344,37 @@ function describeCsvParserDiagnostics(diagnostics) {
   return problems.length ? `复杂字段未闭合：${problems.join("、")}。后续内容已保留在同一单元格，请检查源 CSV。` : "";
 }
 
-function detectCsvDelimiter(text) {
-  const candidates = [",", "\t", ";", "|"];
-  const sample = String(text == null ? "" : text).slice(0, 256 * 1024);
+const CSV_DELIMITER_CANDIDATES = [",", "\t", ";", "|"];
+const CSV_DELIMITER_SAMPLE_MAX_CHARS = 256 * 1024;
+
+function describeCsvDelimiter(delimiter) {
+  if (delimiter === "\t") return "Tab";
+  if (delimiter === ",") return "逗号";
+  if (delimiter === ";") return "分号";
+  if (delimiter === "|") return "竖线";
+  return delimiter || "";
+}
+
+// options.truncated：调用方给的 text 本身就是截断样本（大文件只读前 512 KiB）。
+// 只有样本覆盖完整输入时才能 finish()，否则会把半条记录当成完整证据。
+function sampleCsvRecords(text, delimiter, options = {}) {
+  const source = String(text == null ? "" : text);
+  const sample = source.slice(0, CSV_DELIMITER_SAMPLE_MAX_CHARS);
+  const complete = !options.truncated && sample.length === source.length;
+  const parser = createCsvRecordParser(delimiter);
+  const records = parser.push(sample);
+  if (complete) {
+    for (const record of parser.finish()) records.push(record);
+  }
+  return records.filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+}
+
+function detectCsvDelimiter(text, options = {}) {
   let best = ",";
   let bestScore = -Infinity;
 
-  candidates.forEach((delimiter, priority) => {
-    const parser = createCsvRecordParser(delimiter);
-    const records = parser.push(sample).filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+  CSV_DELIMITER_CANDIDATES.forEach((delimiter, priority) => {
+    const records = sampleCsvRecords(text, delimiter, options);
     const headerColumns = records[0] ? records[0].length : 0;
     // 表头是分隔符探测的硬约束。候选字符如果连首条非空记录都切不开，
     // 不能仅凭正文中的 Markdown 表格、标签列表等高频内容获胜。
@@ -4375,6 +4397,39 @@ function detectCsvDelimiter(text) {
       bestScore = score;
     }
   });
+
+  return best;
+}
+
+// 只在整表塌成一列时调用：这时另一个候选如果能把多数记录切成同样的宽度，
+// 基本可以断定分隔符判错了。用众数而不是首条记录，前言行才不会挡住判断。
+function findCsvDelimiterAlternative(text, chosen, options = {}) {
+  let best = null;
+
+  for (const delimiter of CSV_DELIMITER_CANDIDATES) {
+    if (delimiter === chosen) continue;
+    const records = sampleCsvRecords(text, delimiter, options);
+    if (records.length < 2) continue;
+    const tally = new Map();
+    for (const record of records) {
+      if (record.length < 2) continue;
+      tally.set(record.length, (tally.get(record.length) || 0) + 1);
+    }
+    let columns = 0;
+    let hits = 0;
+    for (const [count, seen] of tally) {
+      if (seen > hits || (seen === hits && count > columns)) {
+        columns = count;
+        hits = seen;
+      }
+    }
+    if (!columns) continue;
+    const coverage = hits / records.length;
+    if (coverage < 0.6) continue;
+    if (!best || coverage > best.coverage || (coverage === best.coverage && columns > best.columns)) {
+      best = { delimiter, columns, coverage };
+    }
+  }
 
   return best;
 }
@@ -4528,10 +4583,9 @@ function parseCsvText(text, options = {}) {
   for (const parsedRecord of parser.finish()) records.push(parsedRecord);
   const parserWarning = describeCsvParserDiagnostics(parser.getDiagnostics());
 
-  const nonEmptyRecords = records.filter((row, index) => {
-    if (index === 0) return true;
-    return row.some((cell) => cell !== "");
-  });
+  // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
+  // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
+  const nonEmptyRecords = records.filter((row) => row.some((cell) => cell !== ""));
   const rawHeaders = nonEmptyRecords[0] || [];
   const expectedColumns = rawHeaders.length;
   const recordsForAnalysis = expectedColumns
@@ -4553,6 +4607,23 @@ function parseCsvText(text, options = {}) {
     longFields: [],
     duplicateColumns: detectDuplicateColumns(rawHeaders),
   };
+  // 分隔符判错最典型的表现就是整表只剩一列，而且每行列数都"一致"，
+  // 不会触发任何既有告警。这里主动提示一次，别让它静默。
+  if (maxColumns <= 1 && recordsForAnalysis.length > 1) {
+    const alternative = findCsvDelimiterAlternative(text, delimiter);
+    if (alternative) {
+      issues.inconsistentRows.push(
+        buildIssueSummary(
+          "分隔符可能判断有误",
+          1,
+          -1,
+          "",
+          `整表只解析出 1 列；改用「${describeCsvDelimiter(alternative.delimiter)}」可切出 ${alternative.columns} 列，请确认源文件的分隔符`,
+          recordsForAnalysis[0]?.join(delimiter) || "",
+        ),
+      );
+    }
+  }
   if (parserWarning) {
     issues.inconsistentRows.push(
       buildIssueSummary(
@@ -6239,15 +6310,37 @@ function describeCsvParserDiagnostics(diagnostics) {
   return problems.length ? `复杂字段未闭合：${problems.join("、")}。后续内容已保留在同一单元格，请检查源 CSV。` : "";
 }
 
-function detectCsvDelimiter(text) {
-  const candidates = [",", "\t", ";", "|"];
-  const sample = String(text == null ? "" : text).slice(0, 256 * 1024);
+const CSV_DELIMITER_CANDIDATES = [",", "\t", ";", "|"];
+const CSV_DELIMITER_SAMPLE_MAX_CHARS = 256 * 1024;
+
+function describeCsvDelimiter(delimiter) {
+  if (delimiter === "\t") return "Tab";
+  if (delimiter === ",") return "逗号";
+  if (delimiter === ";") return "分号";
+  if (delimiter === "|") return "竖线";
+  return delimiter || "";
+}
+
+// options.truncated：调用方给的 text 本身就是截断样本（大文件只读前 512 KiB）。
+// 只有样本覆盖完整输入时才能 finish()，否则会把半条记录当成完整证据。
+function sampleCsvRecords(text, delimiter, options = {}) {
+  const source = String(text == null ? "" : text);
+  const sample = source.slice(0, CSV_DELIMITER_SAMPLE_MAX_CHARS);
+  const complete = !options.truncated && sample.length === source.length;
+  const parser = createCsvRecordParser(delimiter);
+  const records = parser.push(sample);
+  if (complete) {
+    for (const record of parser.finish()) records.push(record);
+  }
+  return records.filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+}
+
+function detectCsvDelimiter(text, options = {}) {
   let best = ",";
   let bestScore = -Infinity;
 
-  candidates.forEach((delimiter, priority) => {
-    const parser = createCsvRecordParser(delimiter);
-    const records = parser.push(sample).filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+  CSV_DELIMITER_CANDIDATES.forEach((delimiter, priority) => {
+    const records = sampleCsvRecords(text, delimiter, options);
     const headerColumns = records[0] ? records[0].length : 0;
     // 表头是分隔符探测的硬约束。候选字符如果连首条非空记录都切不开，
     // 不能仅凭正文中的 Markdown 表格、标签列表等高频内容获胜。
@@ -6270,6 +6363,39 @@ function detectCsvDelimiter(text) {
       bestScore = score;
     }
   });
+
+  return best;
+}
+
+// 只在整表塌成一列时调用：这时另一个候选如果能把多数记录切成同样的宽度，
+// 基本可以断定分隔符判错了。用众数而不是首条记录，前言行才不会挡住判断。
+function findCsvDelimiterAlternative(text, chosen, options = {}) {
+  let best = null;
+
+  for (const delimiter of CSV_DELIMITER_CANDIDATES) {
+    if (delimiter === chosen) continue;
+    const records = sampleCsvRecords(text, delimiter, options);
+    if (records.length < 2) continue;
+    const tally = new Map();
+    for (const record of records) {
+      if (record.length < 2) continue;
+      tally.set(record.length, (tally.get(record.length) || 0) + 1);
+    }
+    let columns = 0;
+    let hits = 0;
+    for (const [count, seen] of tally) {
+      if (seen > hits || (seen === hits && count > columns)) {
+        columns = count;
+        hits = seen;
+      }
+    }
+    if (!columns) continue;
+    const coverage = hits / records.length;
+    if (coverage < 0.6) continue;
+    if (!best || coverage > best.coverage || (coverage === best.coverage && columns > best.columns)) {
+      best = { delimiter, columns, coverage };
+    }
+  }
 
   return best;
 }
@@ -6787,6 +6913,12 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
 
   const finishRecord = () => {
     repairShortRecord();
+    // 表头之前的全空记录（文件开头的空行、",,"占位行）既不是表头也不是数据行，
+    // 直接丢掉；与普通路径 parseCsvText 的口径保持一致。
+    if (!headerDescriptors && !currentRecord.some((descriptor) => !isDescriptorEmpty(descriptor))) {
+      currentRecord = [];
+      return;
+    }
     maxColumns = Math.max(maxColumns, currentRecord.length);
     if (!headerDescriptors) {
       headerDescriptors = currentRecord;
@@ -7163,7 +7295,10 @@ async function loadIndexedCsv(file, options) {
   const sample = new Uint8Array(await file.slice(0, 512 * 1024).arrayBuffer());
   const encoding = chooseEncoding(sample, options.encoding);
   setSourceEncoding(encoding.label, encoding.name);
-  delimiter = options.delimiter || detectCsvDelimiter(sourceDecoder.decode(trimToUtf8Boundary(sample)));
+  // 采样只有前 512 KiB，超过这个体积的文件末尾那条记录是半截的，不能当完整证据。
+  const sampleText = sourceDecoder.decode(trimToUtf8Boundary(sample));
+  const sampleOptions = { truncated: file.size > sample.byteLength };
+  delimiter = options.delimiter || detectCsvDelimiter(sampleText, sampleOptions);
   dataKind = "CSV";
   rowCount = 0;
   const issues = createIssues();
@@ -7179,6 +7314,20 @@ async function loadIndexedCsv(file, options) {
   sourceColumnCount = Math.max(rawHeaders.length, indexed.maxColumns);
   headers = normalizeHeaders(rawHeaders, sourceColumnCount);
   issues.duplicateColumns = detectDuplicateHeaderIssues(rawHeaders);
+  // 与普通路径一致：整表只剩一列时主动提示分隔符可能判错，别静默。
+  if (sourceColumnCount <= 1 && rowCount > 0) {
+    const alternative = findCsvDelimiterAlternative(sampleText, delimiter, sampleOptions);
+    if (alternative) {
+      addIssue(issues, "inconsistentRows", buildIssue(
+        "分隔符可能判断有误",
+        1,
+        -1,
+        "",
+        `整表只解析出 1 列；改用「${describeCsvDelimiter(alternative.delimiter)}」可切出 ${alternative.columns} 列，请确认源文件的分隔符`,
+        rawHeaders[0] || "",
+      ));
+    }
+  }
   // 只用偏移索引判定问题行，样本文本稍后按需读取，避免为此常驻整表预览。
   for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
     const startCell = rowCellOffsets[rowIndex];
@@ -9178,15 +9327,37 @@ self.onmessage = (event) => {
         return problems.length ? `复杂字段未闭合：${problems.join("、")}。后续内容已保留在同一单元格，请检查源 CSV。` : "";
       }
 
-      function detectCsvDelimiter(text) {
-        const candidates = [",", "\t", ";", "|"];
-        const sample = String(text == null ? "" : text).slice(0, 256 * 1024);
+      const CSV_DELIMITER_CANDIDATES = [",", "\t", ";", "|"];
+      const CSV_DELIMITER_SAMPLE_MAX_CHARS = 256 * 1024;
+
+      function describeCsvDelimiter(delimiter) {
+        if (delimiter === "\t") return "Tab";
+        if (delimiter === ",") return "逗号";
+        if (delimiter === ";") return "分号";
+        if (delimiter === "|") return "竖线";
+        return delimiter || "";
+      }
+
+      // options.truncated：调用方给的 text 本身就是截断样本（大文件只读前 512 KiB）。
+      // 只有样本覆盖完整输入时才能 finish()，否则会把半条记录当成完整证据。
+      function sampleCsvRecords(text, delimiter, options = {}) {
+        const source = String(text == null ? "" : text);
+        const sample = source.slice(0, CSV_DELIMITER_SAMPLE_MAX_CHARS);
+        const complete = !options.truncated && sample.length === source.length;
+        const parser = createCsvRecordParser(delimiter);
+        const records = parser.push(sample);
+        if (complete) {
+          for (const record of parser.finish()) records.push(record);
+        }
+        return records.filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+      }
+
+      function detectCsvDelimiter(text, options = {}) {
         let best = ",";
         let bestScore = -Infinity;
 
-        candidates.forEach((delimiter, priority) => {
-          const parser = createCsvRecordParser(delimiter);
-          const records = parser.push(sample).filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+        CSV_DELIMITER_CANDIDATES.forEach((delimiter, priority) => {
+          const records = sampleCsvRecords(text, delimiter, options);
           const headerColumns = records[0] ? records[0].length : 0;
           // 表头是分隔符探测的硬约束。候选字符如果连首条非空记录都切不开，
           // 不能仅凭正文中的 Markdown 表格、标签列表等高频内容获胜。
@@ -9209,6 +9380,39 @@ self.onmessage = (event) => {
             bestScore = score;
           }
         });
+
+        return best;
+      }
+
+      // 只在整表塌成一列时调用：这时另一个候选如果能把多数记录切成同样的宽度，
+      // 基本可以断定分隔符判错了。用众数而不是首条记录，前言行才不会挡住判断。
+      function findCsvDelimiterAlternative(text, chosen, options = {}) {
+        let best = null;
+
+        for (const delimiter of CSV_DELIMITER_CANDIDATES) {
+          if (delimiter === chosen) continue;
+          const records = sampleCsvRecords(text, delimiter, options);
+          if (records.length < 2) continue;
+          const tally = new Map();
+          for (const record of records) {
+            if (record.length < 2) continue;
+            tally.set(record.length, (tally.get(record.length) || 0) + 1);
+          }
+          let columns = 0;
+          let hits = 0;
+          for (const [count, seen] of tally) {
+            if (seen > hits || (seen === hits && count > columns)) {
+              columns = count;
+              hits = seen;
+            }
+          }
+          if (!columns) continue;
+          const coverage = hits / records.length;
+          if (coverage < 0.6) continue;
+          if (!best || coverage > best.coverage || (coverage === best.coverage && columns > best.columns)) {
+            best = { delimiter, columns, coverage };
+          }
+        }
 
         return best;
       }
@@ -10566,11 +10770,7 @@ self.onmessage = (event) => {
       }
 
       function delimiterLabel(delimiter) {
-        if (delimiter === "\t") return "Tab";
-        if (delimiter === ",") return "逗号";
-        if (delimiter === ";") return "分号";
-        if (delimiter === "|") return "竖线";
-        return delimiter || "";
+        return describeCsvDelimiter(delimiter);
       }
 
       function setProgress(progress, label) {
@@ -15455,6 +15655,12 @@ self.onmessage = (event) => {
         return file.size >= LARGE_TEXT_FILE_THRESHOLD;
       }
 
+      // .tsv 的分隔符由扩展名确定：带标题行的 TSV 会被探测判成逗号，而扩展名是确定的证据。
+      // .csv 不强制逗号——部分地区导出的 CSV 用分号。
+      function delimiterFromFileName(name) {
+        return /\.tsv$/i.test(name || "") ? "\t" : "";
+      }
+
       function cancelActiveLoad() {
         if (!state.worker) return;
         beginLoad();
@@ -15546,6 +15752,7 @@ self.onmessage = (event) => {
           kind: "load-large-file",
           file,
           fileKind,
+          delimiter: delimiterFromFileName(file.name),
           encoding: els.encodingSelect.value,
           previewLimit: PREVIEW_LIMIT,
           longFieldThreshold: 50000,
@@ -15660,6 +15867,7 @@ self.onmessage = (event) => {
               fileName: file.name,
               fileSize: file.size,
               fileLastModified: file.lastModified,
+              delimiter: delimiterFromFileName(file.name),
               encoding: els.encodingSelect.value,
               previewLimit: PREVIEW_LIMIT,
               longFieldThreshold: 50000,

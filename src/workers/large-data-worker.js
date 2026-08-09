@@ -511,6 +511,12 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
 
   const finishRecord = () => {
     repairShortRecord();
+    // 表头之前的全空记录（文件开头的空行、",,"占位行）既不是表头也不是数据行，
+    // 直接丢掉；与普通路径 parseCsvText 的口径保持一致。
+    if (!headerDescriptors && !currentRecord.some((descriptor) => !isDescriptorEmpty(descriptor))) {
+      currentRecord = [];
+      return;
+    }
     maxColumns = Math.max(maxColumns, currentRecord.length);
     if (!headerDescriptors) {
       headerDescriptors = currentRecord;
@@ -887,7 +893,10 @@ async function loadIndexedCsv(file, options) {
   const sample = new Uint8Array(await file.slice(0, 512 * 1024).arrayBuffer());
   const encoding = chooseEncoding(sample, options.encoding);
   setSourceEncoding(encoding.label, encoding.name);
-  delimiter = options.delimiter || detectCsvDelimiter(sourceDecoder.decode(trimToUtf8Boundary(sample)));
+  // 采样只有前 512 KiB，超过这个体积的文件末尾那条记录是半截的，不能当完整证据。
+  const sampleText = sourceDecoder.decode(trimToUtf8Boundary(sample));
+  const sampleOptions = { truncated: file.size > sample.byteLength };
+  delimiter = options.delimiter || detectCsvDelimiter(sampleText, sampleOptions);
   dataKind = "CSV";
   rowCount = 0;
   const issues = createIssues();
@@ -903,6 +912,20 @@ async function loadIndexedCsv(file, options) {
   sourceColumnCount = Math.max(rawHeaders.length, indexed.maxColumns);
   headers = normalizeHeaders(rawHeaders, sourceColumnCount);
   issues.duplicateColumns = detectDuplicateHeaderIssues(rawHeaders);
+  // 与普通路径一致：整表只剩一列时主动提示分隔符可能判错，别静默。
+  if (sourceColumnCount <= 1 && rowCount > 0) {
+    const alternative = findCsvDelimiterAlternative(sampleText, delimiter, sampleOptions);
+    if (alternative) {
+      addIssue(issues, "inconsistentRows", buildIssue(
+        "分隔符可能判断有误",
+        1,
+        -1,
+        "",
+        `整表只解析出 1 列；改用「${describeCsvDelimiter(alternative.delimiter)}」可切出 ${alternative.columns} 列，请确认源文件的分隔符`,
+        rawHeaders[0] || "",
+      ));
+    }
+  }
   // 只用偏移索引判定问题行，样本文本稍后按需读取，避免为此常驻整表预览。
   for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
     const startCell = rowCellOffsets[rowIndex];

@@ -136,6 +136,12 @@ function shouldUseLargeTextDataPath(file) {
   return file.size >= LARGE_TEXT_FILE_THRESHOLD;
 }
 
+// .tsv 的分隔符由扩展名确定：带标题行的 TSV 会被探测判成逗号，而扩展名是确定的证据。
+// .csv 不强制逗号——部分地区导出的 CSV 用分号。
+function delimiterFromFileName(name) {
+  return /\.tsv$/i.test(name || "") ? "\t" : "";
+}
+
 function cancelActiveLoad() {
   if (!state.worker) return;
   beginLoad();
@@ -227,6 +233,7 @@ async function parseLargeTextFile(file, fileKind) {
     kind: "load-large-file",
     file,
     fileKind,
+    delimiter: delimiterFromFileName(file.name),
     encoding: els.encodingSelect.value,
     previewLimit: PREVIEW_LIMIT,
     longFieldThreshold: 50000,
@@ -341,6 +348,7 @@ async function parseCsvFile(file) {
         fileName: file.name,
         fileSize: file.size,
         fileLastModified: file.lastModified,
+        delimiter: delimiterFromFileName(file.name),
         encoding: els.encodingSelect.value,
         previewLimit: PREVIEW_LIMIT,
         longFieldThreshold: 50000,

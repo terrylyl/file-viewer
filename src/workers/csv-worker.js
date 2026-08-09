@@ -147,10 +147,9 @@ function parseCsvText(text, options = {}) {
   for (const parsedRecord of parser.finish()) records.push(parsedRecord);
   const parserWarning = describeCsvParserDiagnostics(parser.getDiagnostics());
 
-  const nonEmptyRecords = records.filter((row, index) => {
-    if (index === 0) return true;
-    return row.some((cell) => cell !== "");
-  });
+  // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
+  // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
+  const nonEmptyRecords = records.filter((row) => row.some((cell) => cell !== ""));
   const rawHeaders = nonEmptyRecords[0] || [];
   const expectedColumns = rawHeaders.length;
   const recordsForAnalysis = expectedColumns
@@ -172,6 +171,23 @@ function parseCsvText(text, options = {}) {
     longFields: [],
     duplicateColumns: detectDuplicateColumns(rawHeaders),
   };
+  // 分隔符判错最典型的表现就是整表只剩一列，而且每行列数都"一致"，
+  // 不会触发任何既有告警。这里主动提示一次，别让它静默。
+  if (maxColumns <= 1 && recordsForAnalysis.length > 1) {
+    const alternative = findCsvDelimiterAlternative(text, delimiter);
+    if (alternative) {
+      issues.inconsistentRows.push(
+        buildIssueSummary(
+          "分隔符可能判断有误",
+          1,
+          -1,
+          "",
+          `整表只解析出 1 列；改用「${describeCsvDelimiter(alternative.delimiter)}」可切出 ${alternative.columns} 列，请确认源文件的分隔符`,
+          recordsForAnalysis[0]?.join(delimiter) || "",
+        ),
+      );
+    }
+  }
   if (parserWarning) {
     issues.inconsistentRows.push(
       buildIssueSummary(

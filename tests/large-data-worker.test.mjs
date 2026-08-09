@@ -322,6 +322,60 @@ test("large data worker replays a rolled back Markdown fence at the right byte o
   ]);
 });
 
+test("large data worker never lets a leading empty record become the header", async () => {
+  for (const [label, text] of [
+    ["前导空行", "\nid,name,age\n1,张三,20\n2,李四,30\n"],
+    ["占位行", ",,\nid,name,age\n1,张三,20\n"],
+  ]) {
+    const { context, messages } = loadLargeWorker();
+    await context.self.onmessage({ data: {
+      kind: "load-large-file",
+      file: createChunkedFile(text, [3, 11, 7]),
+      fileKind: "CSV",
+      encoding: "utf-8",
+    } });
+
+    const loaded = messages.find((message) => message.type === "loaded");
+    assert.deepEqual(plain(loaded.result.headers), ["id", "name", "age"], label);
+
+    await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0] } });
+    const rows = messages.find((message) => message.type === "rows");
+    assert.deepEqual(plain(rows.rows[0].row), ["1", "张三", "20"], label);
+  }
+});
+
+test("large data worker warns when the table collapses into a single column", async () => {
+  const { context, messages } = loadLargeWorker();
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile("月度报表\nid;name;age\n1;a;2\n2;b;3\n", [5, 9]),
+    fileKind: "CSV",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.headers.length, 1, "这个用例目前仍会塌成一列（待第 2 组修复）");
+  const warning = loaded.result.issues.inconsistentRows.find((issue) => issue.type === "分隔符可能判断有误");
+  assert.ok(warning, "大文件路径同样不能静默");
+  assert.match(warning.detail, /分号/);
+});
+
+test("large data worker honours an explicitly supplied delimiter", async () => {
+  const { context, messages } = loadLargeWorker();
+  // .tsv 由扩展名定分隔符：这个文件带标题行，靠探测会被判成逗号
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile("导出说明\nid\tname\tage\n1\ta\t2\n", [4, 13]),
+    fileKind: "CSV",
+    delimiter: "\t",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.file.delimiter, "\t");
+  assert.equal(loaded.result.headers.length, 3);
+});
+
 test("large data worker returns bounded previews and an exact full cell", async () => {
   const { context, messages } = loadLargeWorker();
   const fullValue = `prefix,"quoted"\n${"x".repeat(900)}`;

@@ -264,11 +264,7 @@ async function assertExcelSharedStringsWithinSafeLimit(file) {
 }
 
 function delimiterLabel(delimiter) {
-  if (delimiter === "\t") return "Tab";
-  if (delimiter === ",") return "逗号";
-  if (delimiter === ";") return "分号";
-  if (delimiter === "|") return "竖线";
-  return delimiter || "";
+  return describeCsvDelimiter(delimiter);
 }
 
 function setProgress(progress, label) {

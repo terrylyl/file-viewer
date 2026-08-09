@@ -581,15 +581,37 @@ function describeCsvParserDiagnostics(diagnostics) {
   return problems.length ? `复杂字段未闭合：${problems.join("、")}。后续内容已保留在同一单元格，请检查源 CSV。` : "";
 }
 
-function detectCsvDelimiter(text) {
-  const candidates = [",", "\t", ";", "|"];
-  const sample = String(text == null ? "" : text).slice(0, 256 * 1024);
+const CSV_DELIMITER_CANDIDATES = [",", "\t", ";", "|"];
+const CSV_DELIMITER_SAMPLE_MAX_CHARS = 256 * 1024;
+
+function describeCsvDelimiter(delimiter) {
+  if (delimiter === "\t") return "Tab";
+  if (delimiter === ",") return "逗号";
+  if (delimiter === ";") return "分号";
+  if (delimiter === "|") return "竖线";
+  return delimiter || "";
+}
+
+// options.truncated：调用方给的 text 本身就是截断样本（大文件只读前 512 KiB）。
+// 只有样本覆盖完整输入时才能 finish()，否则会把半条记录当成完整证据。
+function sampleCsvRecords(text, delimiter, options = {}) {
+  const source = String(text == null ? "" : text);
+  const sample = source.slice(0, CSV_DELIMITER_SAMPLE_MAX_CHARS);
+  const complete = !options.truncated && sample.length === source.length;
+  const parser = createCsvRecordParser(delimiter);
+  const records = parser.push(sample);
+  if (complete) {
+    for (const record of parser.finish()) records.push(record);
+  }
+  return records.filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+}
+
+function detectCsvDelimiter(text, options = {}) {
   let best = ",";
   let bestScore = -Infinity;
 
-  candidates.forEach((delimiter, priority) => {
-    const parser = createCsvRecordParser(delimiter);
-    const records = parser.push(sample).filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+  CSV_DELIMITER_CANDIDATES.forEach((delimiter, priority) => {
+    const records = sampleCsvRecords(text, delimiter, options);
     const headerColumns = records[0] ? records[0].length : 0;
     // 表头是分隔符探测的硬约束。候选字符如果连首条非空记录都切不开，
     // 不能仅凭正文中的 Markdown 表格、标签列表等高频内容获胜。
@@ -612,6 +634,39 @@ function detectCsvDelimiter(text) {
       bestScore = score;
     }
   });
+
+  return best;
+}
+
+// 只在整表塌成一列时调用：这时另一个候选如果能把多数记录切成同样的宽度，
+// 基本可以断定分隔符判错了。用众数而不是首条记录，前言行才不会挡住判断。
+function findCsvDelimiterAlternative(text, chosen, options = {}) {
+  let best = null;
+
+  for (const delimiter of CSV_DELIMITER_CANDIDATES) {
+    if (delimiter === chosen) continue;
+    const records = sampleCsvRecords(text, delimiter, options);
+    if (records.length < 2) continue;
+    const tally = new Map();
+    for (const record of records) {
+      if (record.length < 2) continue;
+      tally.set(record.length, (tally.get(record.length) || 0) + 1);
+    }
+    let columns = 0;
+    let hits = 0;
+    for (const [count, seen] of tally) {
+      if (seen > hits || (seen === hits && count > columns)) {
+        columns = count;
+        hits = seen;
+      }
+    }
+    if (!columns) continue;
+    const coverage = hits / records.length;
+    if (coverage < 0.6) continue;
+    if (!best || coverage > best.coverage || (coverage === best.coverage && columns > best.columns)) {
+      best = { delimiter, columns, coverage };
+    }
+  }
 
   return best;
 }

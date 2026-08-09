@@ -172,6 +172,31 @@ test("JSONL files are parsed as JSON Lines tables", () => {
   assert.match(html, /JSONL 解析失败/, "JSONL parse errors should be visible to users");
 });
 
+test(".tsv imports take their delimiter from the extension, .csv does not", () => {
+  assert.match(html, /function delimiterFromFileName\(/, "missing extension based delimiter hint");
+  assert.match(html, /\/\\\.tsv\$\/i\.test/, "only .tsv should be pinned to Tab");
+  assert.doesNotMatch(html, /\/\\\.csv\$\/i\.test\(name/, "「.csv 强制逗号」会打错用分号导出的 CSV");
+  const csvImport = html.slice(html.indexOf('kind: "parse-csv"'));
+  assert.match(
+    csvImport.slice(0, 400),
+    /delimiter: delimiterFromFileName\(file\.name\)/,
+    "普通 CSV 路径应带上扩展名推断的分隔符",
+  );
+  const largeImport = html.slice(html.indexOf('kind: "load-large-file"'));
+  assert.match(
+    largeImport.slice(0, 400),
+    /delimiter: delimiterFromFileName\(file\.name\)/,
+    "大文件路径应带上扩展名推断的分隔符",
+  );
+});
+
+test("delimiter misdetection is surfaced instead of failing silently", () => {
+  assert.match(html, /function findCsvDelimiterAlternative\(/, "missing low confidence delimiter check");
+  assert.match(html, /分隔符可能判断有误/, "整表塌成一列时必须给出告警");
+  assert.match(html, /function sampleCsvRecords\(/, "delimiter sampling should be shared");
+  assert.match(html, /options\.truncated/, "截断样本不能调用 finish()");
+});
+
 test("Excel sheet conversion avoids spreading large matrices", () => {
   assert.match(html, /getMatrixColumnCount/, "missing iterative matrix column counter");
   assert.doesNotMatch(html, /Math\.max\(\s*\.\.\.matrix\.map/, "large Excel matrices should not be spread into Math.max");
