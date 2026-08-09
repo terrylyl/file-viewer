@@ -425,6 +425,42 @@ test("large data worker merges unquoted formulas back into one column", async ()
   ]);
 });
 
+test("large data worker keeps pretty-printed JSON in one cell", async () => {
+  const { context, messages } = loadLargeWorker();
+  const pretty = '[\n\t\t\t"BOLL-DMI",\n\t\t\t"MA-WR"\n]';
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(`id,payload,tag\n1,${pretty},x\n2,ok,y\n`, [6, 13, 4]),
+    fileKind: "CSV",
+    delimiter: ",",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.deepEqual(plain(loaded.result.headers), ["id", "payload", "tag"]);
+  assert.equal(loaded.result.rowCount, 2, "开括号后面的换行是 JSON 缩进，不是记录边界");
+
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0] } });
+  const rows = messages.find((message) => message.type === "rows");
+  assert.deepEqual(plain(rows.rows[0].row), ["1", pretty, "x"]);
+});
+
+test("large data worker points at undoubled quotes when rows break", async () => {
+  const { context, messages } = loadLargeWorker();
+  const text = 'id,prompt,tag\n1,"```json\n{"model": "gpt", "n": 1}\n```",q\n2,ok,y\n';
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(text, [7, 3, 17]),
+    fileKind: "CSV",
+    delimiter: ",",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  const hint = loaded.result.issues.inconsistentRows.find((issue) => issue.type === "疑似引号未双写");
+  assert.ok(hint, "大文件路径同样要指出是引号没双写");
+});
+
 test("large data worker warns when the table collapses into a single column", async () => {
   const { context, messages } = loadLargeWorker();
   await context.self.onmessage({ data: {

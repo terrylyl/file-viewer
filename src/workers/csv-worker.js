@@ -145,7 +145,8 @@ function parseCsvText(text, options = {}) {
     if (options.onProgress) options.onProgress(Math.min(0.98, (start + chunkSize) / Math.max(1, text.length)));
   }
   for (const parsedRecord of parser.finish()) records.push(parsedRecord);
-  const parserWarning = describeCsvParserDiagnostics(parser.getDiagnostics());
+  const parserDiagnostics = parser.getDiagnostics();
+  const parserWarning = describeCsvParserDiagnostics(parserDiagnostics);
 
   // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
   // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
@@ -270,6 +271,14 @@ function parseCsvText(text, options = {}) {
 
     const padded = Array.from({ length: maxColumns }, (_, col) => rawRow[col] == null ? "" : String(rawRow[col]));
     rows.push(padded);
+  }
+
+  // 未双写的引号本身还能兜住，真正的破坏是"某个 `"` 后面恰好跟着分隔符"导致
+  // 字段提前收尾。所以要等列数不一致真的出现了才提示，避免对合法文件误报。
+  if (parserDiagnostics.undoubledQuote && issues.inconsistentRows.some((issue) => issue.type === "列数不一致")) {
+    issues.inconsistentRows.push(
+      buildIssueSummary(CSV_UNDOUBLED_QUOTE_ISSUE, 1, -1, "", CSV_UNDOUBLED_QUOTE_DETAIL, ""),
+    );
   }
 
   return {

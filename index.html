@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-pAygYcgGOLppj4exJTJtZlYZvtekB9FspdzuBQ6cmEs='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-tL70Ru68KnnDXAKau7yX2qbM3rN4DtxCikdmn4bhXEU='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -3862,7 +3862,8 @@ function createCsvRecordParser(delimiter = ",") {
   let specLineInvalid = false;
   let specLineLastSignificantIsDelimiter = false;
   let specLineSkipLineFeed = false;
-  let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false };
+  let sawUndoubledQuote = false;
+  let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false, undoubledQuote: false };
 
   // 进入推测性解析前记录现场，预算用尽或到达文件末尾仍未闭合时可以回滚重放。
   const beginSpeculation = (mode, entryChar) => {
@@ -3956,7 +3957,12 @@ function createCsvRecordParser(delimiter = ",") {
     if (specPhysicalLineIndex === 0) {
       specFirstLineMatchesHeader = matchesHeader && !specLineLastSignificantIsDelimiter;
     }
-    const contradicts = specPhysicalLineIndex > 0 && specFirstLineMatchesHeader && matchesHeader;
+    // 行尾停在分隔符上的行，最后一个字段是空的——那更像跨行 JSON 的续行
+    // （`"a": 1,`），不是一条自成一体的记录。首行已有这条保护，后续行同样需要。
+    const contradicts = specPhysicalLineIndex > 0
+      && specFirstLineMatchesHeader
+      && matchesHeader
+      && !specLineLastSignificantIsDelimiter;
     specPhysicalLineIndex += 1;
     resetSpeculationLine();
     specLineSkipLineFeed = ch === "\r";
@@ -4108,7 +4114,9 @@ function createCsvRecordParser(delimiter = ",") {
     }
 
     if (structurePendingOpen) {
-      if (ch === " " || ch === "\t") {
+      // 换行也是 JSON 里的合法缩进：`[\n  "a"]` 是标准的 pretty-print，
+      // 只认空格和 Tab 会把它挡在结构化模式外面，然后按换行切成好几行。
+      if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
         field += ch;
         started = true;
         return;
@@ -4124,10 +4132,12 @@ function createCsvRecordParser(delimiter = ",") {
         structureStack = [open];
         structureInString = false;
         structureEscaped = false;
-      } else {
-        endSpeculation();
+        processCharacter(ch, records);
+        return;
       }
-      processCharacter(ch, records);
+      // 前瞻不通过就回滚重放：等待期间可能已经吞掉了换行，
+      // 直接 endSpeculation 会把记录边界一起吃掉，把两行粘成一行。
+      rollbackSpeculation(records);
       return;
     }
 
@@ -4183,6 +4193,10 @@ function createCsvRecordParser(delimiter = ",") {
         processCharacter(ch, records);
         return;
       }
+      // 引号后面既不是引号也不是分隔符/换行：这是引号内一个没有双写的 `"`。
+      // 它本身还能兜住，但同一份文件里只要有一个 `"` 后面恰好跟着分隔符，
+      // 字段就会在那里提前收尾、整行错位——记下来给用户一条明确的线索。
+      sawUndoubledQuote = true;
       field += '"';
       started = true;
       processCharacter(ch, records);
@@ -4331,6 +4345,7 @@ function createCsvRecordParser(delimiter = ",") {
         unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
         unclosedStructuredField,
         unclosedCodeFence: codeFence,
+        undoubledQuote: sawUndoubledQuote,
       };
       if (pendingEscapedQuote) {
         field += "\\";
@@ -4354,6 +4369,11 @@ function createCsvRecordParser(delimiter = ",") {
     },
   };
 }
+
+// 引号内出现未双写的 `"`，同时又真的切出了列数不一致的行——这两件事凑齐，
+// 基本可以断定是生成端没有把内部 `"` 转义成 `""`，而不是本地解析出了问题。
+const CSV_UNDOUBLED_QUOTE_ISSUE = "疑似引号未双写";
+const CSV_UNDOUBLED_QUOTE_DETAIL = "字段内出现了没有双写的 \"，CSV 会在其中一个 \" 后面遇到分隔符时提前收尾，导致整行错位。请在生成 CSV 时把字段内部的每个 \" 写成 \"\"。";
 
 function describeCsvParserDiagnostics(diagnostics) {
   const problems = [];
@@ -4678,7 +4698,8 @@ function parseCsvText(text, options = {}) {
     if (options.onProgress) options.onProgress(Math.min(0.98, (start + chunkSize) / Math.max(1, text.length)));
   }
   for (const parsedRecord of parser.finish()) records.push(parsedRecord);
-  const parserWarning = describeCsvParserDiagnostics(parser.getDiagnostics());
+  const parserDiagnostics = parser.getDiagnostics();
+  const parserWarning = describeCsvParserDiagnostics(parserDiagnostics);
 
   // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
   // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
@@ -4803,6 +4824,14 @@ function parseCsvText(text, options = {}) {
 
     const padded = Array.from({ length: maxColumns }, (_, col) => rawRow[col] == null ? "" : String(rawRow[col]));
     rows.push(padded);
+  }
+
+  // 未双写的引号本身还能兜住，真正的破坏是"某个 `"` 后面恰好跟着分隔符"导致
+  // 字段提前收尾。所以要等列数不一致真的出现了才提示，避免对合法文件误报。
+  if (parserDiagnostics.undoubledQuote && issues.inconsistentRows.some((issue) => issue.type === "列数不一致")) {
+    issues.inconsistentRows.push(
+      buildIssueSummary(CSV_UNDOUBLED_QUOTE_ISSUE, 1, -1, "", CSV_UNDOUBLED_QUOTE_DETAIL, ""),
+    );
   }
 
   return {
@@ -5928,7 +5957,8 @@ function createCsvRecordParser(delimiter = ",") {
   let specLineInvalid = false;
   let specLineLastSignificantIsDelimiter = false;
   let specLineSkipLineFeed = false;
-  let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false };
+  let sawUndoubledQuote = false;
+  let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false, undoubledQuote: false };
 
   // 进入推测性解析前记录现场，预算用尽或到达文件末尾仍未闭合时可以回滚重放。
   const beginSpeculation = (mode, entryChar) => {
@@ -6022,7 +6052,12 @@ function createCsvRecordParser(delimiter = ",") {
     if (specPhysicalLineIndex === 0) {
       specFirstLineMatchesHeader = matchesHeader && !specLineLastSignificantIsDelimiter;
     }
-    const contradicts = specPhysicalLineIndex > 0 && specFirstLineMatchesHeader && matchesHeader;
+    // 行尾停在分隔符上的行，最后一个字段是空的——那更像跨行 JSON 的续行
+    // （`"a": 1,`），不是一条自成一体的记录。首行已有这条保护，后续行同样需要。
+    const contradicts = specPhysicalLineIndex > 0
+      && specFirstLineMatchesHeader
+      && matchesHeader
+      && !specLineLastSignificantIsDelimiter;
     specPhysicalLineIndex += 1;
     resetSpeculationLine();
     specLineSkipLineFeed = ch === "\r";
@@ -6174,7 +6209,9 @@ function createCsvRecordParser(delimiter = ",") {
     }
 
     if (structurePendingOpen) {
-      if (ch === " " || ch === "\t") {
+      // 换行也是 JSON 里的合法缩进：`[\n  "a"]` 是标准的 pretty-print，
+      // 只认空格和 Tab 会把它挡在结构化模式外面，然后按换行切成好几行。
+      if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
         field += ch;
         started = true;
         return;
@@ -6190,10 +6227,12 @@ function createCsvRecordParser(delimiter = ",") {
         structureStack = [open];
         structureInString = false;
         structureEscaped = false;
-      } else {
-        endSpeculation();
+        processCharacter(ch, records);
+        return;
       }
-      processCharacter(ch, records);
+      // 前瞻不通过就回滚重放：等待期间可能已经吞掉了换行，
+      // 直接 endSpeculation 会把记录边界一起吃掉，把两行粘成一行。
+      rollbackSpeculation(records);
       return;
     }
 
@@ -6249,6 +6288,10 @@ function createCsvRecordParser(delimiter = ",") {
         processCharacter(ch, records);
         return;
       }
+      // 引号后面既不是引号也不是分隔符/换行：这是引号内一个没有双写的 `"`。
+      // 它本身还能兜住，但同一份文件里只要有一个 `"` 后面恰好跟着分隔符，
+      // 字段就会在那里提前收尾、整行错位——记下来给用户一条明确的线索。
+      sawUndoubledQuote = true;
       field += '"';
       started = true;
       processCharacter(ch, records);
@@ -6397,6 +6440,7 @@ function createCsvRecordParser(delimiter = ",") {
         unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
         unclosedStructuredField,
         unclosedCodeFence: codeFence,
+        undoubledQuote: sawUndoubledQuote,
       };
       if (pendingEscapedQuote) {
         field += "\\";
@@ -6420,6 +6464,11 @@ function createCsvRecordParser(delimiter = ",") {
     },
   };
 }
+
+// 引号内出现未双写的 `"`，同时又真的切出了列数不一致的行——这两件事凑齐，
+// 基本可以断定是生成端没有把内部 `"` 转义成 `""`，而不是本地解析出了问题。
+const CSV_UNDOUBLED_QUOTE_ISSUE = "疑似引号未双写";
+const CSV_UNDOUBLED_QUOTE_DETAIL = "字段内出现了没有双写的 \"，CSV 会在其中一个 \" 后面遇到分隔符时提前收尾，导致整行错位。请在生成 CSV 时把字段内部的每个 \" 写成 \"\"。";
 
 function describeCsvParserDiagnostics(diagnostics) {
   const problems = [];
@@ -6861,6 +6910,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
   let specLineSkipNext = false;
   let specLineSkipLineFeed = false;
   let toleranceDisabled = false;
+  let sawUndoubledQuote = false;
 
   const isWhitespaceByte = (byte) => byte === 0x20 || byte === 0x09 || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN;
 
@@ -6996,7 +7046,12 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     if (specPhysicalLineIndex === 0) {
       specFirstLineMatchesHeader = matchesHeader && !specLineLastSignificantIsDelimiter;
     }
-    const contradicts = specPhysicalLineIndex > 0 && specFirstLineMatchesHeader && matchesHeader;
+    // 行尾停在分隔符上的行更像跨行 JSON 的续行，不是自成一体的记录；
+    // 首行已有这条保护，后续行同样需要。
+    const contradicts = specPhysicalLineIndex > 0
+      && specFirstLineMatchesHeader
+      && matchesHeader
+      && !specLineLastSignificantIsDelimiter;
     specPhysicalLineIndex += 1;
     resetSpeculationLine();
     specLineSkipLineFeed = byte === BYTE_CARRIAGE_RETURN;
@@ -7322,6 +7377,8 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
         processByte(byte, offset);
         return;
       }
+      // 引号后面既不是引号也不是分隔符/换行：引号内有一个没有双写的 `"`
+      sawUndoubledQuote = true;
       processByte(byte, offset);
       return;
     }
@@ -7346,7 +7403,8 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     }
 
     if (structurePendingOpen) {
-      if (byte === 0x20 || byte === 0x09) {
+      // 换行也是 JSON 里的合法缩进，`[\n  "a"]` 是标准 pretty-print
+      if (byte === 0x20 || byte === 0x09 || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN) {
         appendFieldByte(byte);
         return;
       }
@@ -7361,10 +7419,12 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
         structureStack = [open];
         structureInString = false;
         structureEscaped = false;
-      } else {
-        endSpeculation();
+        processByte(byte, offset);
+        return;
       }
-      processByte(byte, offset);
+      // 前瞻不通过就回滚重放：等待期间可能已经吞掉了换行，
+      // 直接 endSpeculation 会把记录边界一起吃掉。
+      rollbackSpeculation();
       return;
     }
 
@@ -7522,6 +7582,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
       unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
       unclosedStructuredField,
       unclosedCodeFence: codeFence,
+      undoubledQuote: sawUndoubledQuote,
     };
     if (fieldStarted || currentRecord.length || fieldStart < file.size) {
       finishField(file.size, file.size);
@@ -7671,6 +7732,10 @@ async function loadIndexedCsv(file, options) {
     }
   }
   await attachIssueSamples(issues);
+  // 与普通路径一致：未双写的引号只有在真的切出列数不一致时才提示
+  if (indexed.diagnostics.undoubledQuote && issues.inconsistentRows.some((issue) => issue.type === "列数不一致")) {
+    addIssue(issues, "inconsistentRows", buildIssue(CSV_UNDOUBLED_QUOTE_ISSUE, 1, -1, "", CSV_UNDOUBLED_QUOTE_DETAIL, ""));
+  }
   const parserWarning = describeCsvParserDiagnostics(indexed.diagnostics);
   if (parserWarning) addIssue(issues, "inconsistentRows", buildIssue("复杂字段未闭合", rowCount + 1, -1, "", parserWarning, "请检查源 CSV 的引号、JSON/数组括号或 Markdown 代码块"));
   reportProgress(file.size, true, "索引完成");
@@ -9160,7 +9225,8 @@ self.onmessage = (event) => {
         let specLineInvalid = false;
         let specLineLastSignificantIsDelimiter = false;
         let specLineSkipLineFeed = false;
-        let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false };
+        let sawUndoubledQuote = false;
+        let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false, undoubledQuote: false };
 
         // 进入推测性解析前记录现场，预算用尽或到达文件末尾仍未闭合时可以回滚重放。
         const beginSpeculation = (mode, entryChar) => {
@@ -9254,7 +9320,12 @@ self.onmessage = (event) => {
           if (specPhysicalLineIndex === 0) {
             specFirstLineMatchesHeader = matchesHeader && !specLineLastSignificantIsDelimiter;
           }
-          const contradicts = specPhysicalLineIndex > 0 && specFirstLineMatchesHeader && matchesHeader;
+          // 行尾停在分隔符上的行，最后一个字段是空的——那更像跨行 JSON 的续行
+          // （`"a": 1,`），不是一条自成一体的记录。首行已有这条保护，后续行同样需要。
+          const contradicts = specPhysicalLineIndex > 0
+            && specFirstLineMatchesHeader
+            && matchesHeader
+            && !specLineLastSignificantIsDelimiter;
           specPhysicalLineIndex += 1;
           resetSpeculationLine();
           specLineSkipLineFeed = ch === "\r";
@@ -9406,7 +9477,9 @@ self.onmessage = (event) => {
           }
 
           if (structurePendingOpen) {
-            if (ch === " " || ch === "\t") {
+            // 换行也是 JSON 里的合法缩进：`[\n  "a"]` 是标准的 pretty-print，
+            // 只认空格和 Tab 会把它挡在结构化模式外面，然后按换行切成好几行。
+            if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
               field += ch;
               started = true;
               return;
@@ -9422,10 +9495,12 @@ self.onmessage = (event) => {
               structureStack = [open];
               structureInString = false;
               structureEscaped = false;
-            } else {
-              endSpeculation();
+              processCharacter(ch, records);
+              return;
             }
-            processCharacter(ch, records);
+            // 前瞻不通过就回滚重放：等待期间可能已经吞掉了换行，
+            // 直接 endSpeculation 会把记录边界一起吃掉，把两行粘成一行。
+            rollbackSpeculation(records);
             return;
           }
 
@@ -9481,6 +9556,10 @@ self.onmessage = (event) => {
               processCharacter(ch, records);
               return;
             }
+            // 引号后面既不是引号也不是分隔符/换行：这是引号内一个没有双写的 `"`。
+            // 它本身还能兜住，但同一份文件里只要有一个 `"` 后面恰好跟着分隔符，
+            // 字段就会在那里提前收尾、整行错位——记下来给用户一条明确的线索。
+            sawUndoubledQuote = true;
             field += '"';
             started = true;
             processCharacter(ch, records);
@@ -9629,6 +9708,7 @@ self.onmessage = (event) => {
               unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
               unclosedStructuredField,
               unclosedCodeFence: codeFence,
+              undoubledQuote: sawUndoubledQuote,
             };
             if (pendingEscapedQuote) {
               field += "\\";
@@ -9652,6 +9732,11 @@ self.onmessage = (event) => {
           },
         };
       }
+
+      // 引号内出现未双写的 `"`，同时又真的切出了列数不一致的行——这两件事凑齐，
+      // 基本可以断定是生成端没有把内部 `"` 转义成 `""`，而不是本地解析出了问题。
+      const CSV_UNDOUBLED_QUOTE_ISSUE = "疑似引号未双写";
+      const CSV_UNDOUBLED_QUOTE_DETAIL = "字段内出现了没有双写的 \"，CSV 会在其中一个 \" 后面遇到分隔符时提前收尾，导致整行错位。请在生成 CSV 时把字段内部的每个 \" 写成 \"\"。";
 
       function describeCsvParserDiagnostics(diagnostics) {
         const problems = [];

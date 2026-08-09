@@ -262,6 +262,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
   let specLineSkipNext = false;
   let specLineSkipLineFeed = false;
   let toleranceDisabled = false;
+  let sawUndoubledQuote = false;
 
   const isWhitespaceByte = (byte) => byte === 0x20 || byte === 0x09 || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN;
 
@@ -397,7 +398,12 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     if (specPhysicalLineIndex === 0) {
       specFirstLineMatchesHeader = matchesHeader && !specLineLastSignificantIsDelimiter;
     }
-    const contradicts = specPhysicalLineIndex > 0 && specFirstLineMatchesHeader && matchesHeader;
+    // 行尾停在分隔符上的行更像跨行 JSON 的续行，不是自成一体的记录；
+    // 首行已有这条保护，后续行同样需要。
+    const contradicts = specPhysicalLineIndex > 0
+      && specFirstLineMatchesHeader
+      && matchesHeader
+      && !specLineLastSignificantIsDelimiter;
     specPhysicalLineIndex += 1;
     resetSpeculationLine();
     specLineSkipLineFeed = byte === BYTE_CARRIAGE_RETURN;
@@ -723,6 +729,8 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
         processByte(byte, offset);
         return;
       }
+      // 引号后面既不是引号也不是分隔符/换行：引号内有一个没有双写的 `"`
+      sawUndoubledQuote = true;
       processByte(byte, offset);
       return;
     }
@@ -747,7 +755,8 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     }
 
     if (structurePendingOpen) {
-      if (byte === 0x20 || byte === 0x09) {
+      // 换行也是 JSON 里的合法缩进，`[\n  "a"]` 是标准 pretty-print
+      if (byte === 0x20 || byte === 0x09 || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN) {
         appendFieldByte(byte);
         return;
       }
@@ -762,10 +771,12 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
         structureStack = [open];
         structureInString = false;
         structureEscaped = false;
-      } else {
-        endSpeculation();
+        processByte(byte, offset);
+        return;
       }
-      processByte(byte, offset);
+      // 前瞻不通过就回滚重放：等待期间可能已经吞掉了换行，
+      // 直接 endSpeculation 会把记录边界一起吃掉。
+      rollbackSpeculation();
       return;
     }
 
@@ -923,6 +934,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
       unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
       unclosedStructuredField,
       unclosedCodeFence: codeFence,
+      undoubledQuote: sawUndoubledQuote,
     };
     if (fieldStarted || currentRecord.length || fieldStart < file.size) {
       finishField(file.size, file.size);
@@ -1072,6 +1084,10 @@ async function loadIndexedCsv(file, options) {
     }
   }
   await attachIssueSamples(issues);
+  // 与普通路径一致：未双写的引号只有在真的切出列数不一致时才提示
+  if (indexed.diagnostics.undoubledQuote && issues.inconsistentRows.some((issue) => issue.type === "列数不一致")) {
+    addIssue(issues, "inconsistentRows", buildIssue(CSV_UNDOUBLED_QUOTE_ISSUE, 1, -1, "", CSV_UNDOUBLED_QUOTE_DETAIL, ""));
+  }
   const parserWarning = describeCsvParserDiagnostics(indexed.diagnostics);
   if (parserWarning) addIssue(issues, "inconsistentRows", buildIssue("复杂字段未闭合", rowCount + 1, -1, "", parserWarning, "请检查源 CSV 的引号、JSON/数组括号或 Markdown 代码块"));
   reportProgress(file.size, true, "索引完成");

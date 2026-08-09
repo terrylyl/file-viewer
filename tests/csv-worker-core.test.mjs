@@ -428,6 +428,48 @@ test("a JSON-looking field that never closes gives up after the tolerance budget
   assert.equal(lastRow[1], "data");
 });
 
+test("pretty-printed JSON survives a newline right after the opening bracket", () => {
+  const core = loadWorkerCore();
+  const pretty = '[\n\t\t\t"BOLL-DMI",\n\t\t\t"MA-WR",\n\t\t\t"EMA-CCI"\n]';
+  const parsed = core.parseCsvText(`id,payload,tag\n1,${pretty},x\n2,ok,y\n`, { delimiter: "," });
+
+  assert.equal(parsed.headers.length, 3, "缩进用换行和用 Tab 不该有区别");
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(parsed.rows[0][1], pretty);
+  assert.equal(parsed.rows[0][2], "x");
+
+  const braces = core.parseCsvText('id,payload\n1,{\n  "a": 1,\n  "b": 2\n}\n2,ok\n', { delimiter: "," });
+  assert.equal(braces.headers.length, 2);
+  assert.equal(braces.rows.length, 2);
+  assert.equal(braces.rows[0][1], '{\n  "a": 1,\n  "b": 2\n}');
+});
+
+test("a bracket followed by a newline and plain text still ends the record", () => {
+  const core = loadWorkerCore();
+  // 前瞻不通过时必须把等待期间吞掉的换行还回去，否则两行会被粘成一行
+  const parsed = core.parseCsvText("id,note\n1,[\nalice,ok\nbob,fine\n", { delimiter: "," });
+
+  assert.equal(parsed.rows.length, 3);
+  assert.equal(parsed.rows[0][0], "1");
+  assert.equal(parsed.rows[1][0], "alice");
+  assert.equal(parsed.rows[2][0], "bob");
+});
+
+test("undoubled quotes are called out once the row widths break", () => {
+  const core = loadWorkerCore();
+  const broken = core.parseCsvText('id,prompt,tag\n1,"```json\n{"model": "gpt", "n": 1}\n```",q\n2,ok,y\n', { delimiter: "," });
+  const hint = broken.issues.inconsistentRows.find((issue) => issue.type === "疑似引号未双写");
+  assert.ok(hint, "列错位时要指出是引号没双写，而不是让用户以为工具坏了");
+  assert.match(hint.detail, /双写/);
+
+  // 同样的内容，引号双写之后必须干净通过，不能误报
+  const fixed = core.parseCsvText('id,prompt,tag\n1,"```json\n{""model"": ""gpt"", ""n"": 1}\n```",q\n2,ok,y\n', { delimiter: "," });
+  assert.equal(fixed.headers.length, 3);
+  assert.equal(fixed.rows.length, 2);
+  assert.equal(fixed.issues.inconsistentRows.length, 0);
+  assert.equal(fixed.rows[0][1], '```json\n{"model": "gpt", "n": 1}\n```');
+});
+
 test("a single-cell title row does not take the header slot", () => {
   const core = loadWorkerCore();
   const parsed = core.parseCsvText("月度报表\nid;name;age\n1;张三;20\n2;李四;30\n");
