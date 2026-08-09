@@ -48,6 +48,7 @@ Local serving is done by `scripts/serve.mjs`; static file access is enough for n
 - `tests/query-worker-filter.test.mjs`: validates query Worker filtering behavior.
 - `tests/shared-core.test.mjs`: validates shared pure helpers directly.
 - `tests/large-data-worker.test.mjs`: indexing, encoding detection, and on-demand read behavior for the large-file Worker.
+- `tests/rfc4180-conformance.test.mjs`: RFC 4180 corpus run through both parsing paths, plus the documented deviations.
 - `tests/html-contract.test.mjs`: contract tests for required DOM ids, function hooks, Worker scripts, and high-risk behavior guards.
 
 ## Main Layers
