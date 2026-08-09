@@ -142,6 +142,35 @@ function delimiterFromFileName(name) {
   return /\.tsv$/i.test(name || "") ? "\t" : "";
 }
 
+// 手动指定优先于扩展名，扩展名优先于探测。探测本身存在无法消除的歧义
+// （前言行与正文里的 Markdown 表格在前 20 条记录里是同构的），所以必须有人工兜底。
+function resolveImportDelimiter(file) {
+  return els.delimiterSelect.value || delimiterFromFileName(file?.name);
+}
+
+function resolveImportHeaderRow() {
+  const value = Number.parseInt(els.headerRowInput.value, 10);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function setImportOverridesEnabled(enabled) {
+  els.delimiterSelect.disabled = !enabled;
+  els.headerRowInput.disabled = !enabled;
+}
+
+// 换文件时必须清掉：上一份文件的手动分隔符静默套到新文件上比探测判错更难查。
+function resetImportOverrides() {
+  els.delimiterSelect.value = "";
+  els.headerRowInput.value = "";
+}
+
+function reimportWithOverrides() {
+  const file = state.sourceTextFile;
+  if (!file) return;
+  if (!confirmDatasetReplacement()) return;
+  parseCsvFile(file);
+}
+
 function cancelActiveLoad() {
   if (!state.worker) return;
   beginLoad();
@@ -233,7 +262,8 @@ async function parseLargeTextFile(file, fileKind) {
     kind: "load-large-file",
     file,
     fileKind,
-    delimiter: delimiterFromFileName(file.name),
+    delimiter: resolveImportDelimiter(file),
+    headerRow: resolveImportHeaderRow(),
     encoding: els.encodingSelect.value,
     previewLimit: PREVIEW_LIMIT,
     longFieldThreshold: 50000,
@@ -348,7 +378,8 @@ async function parseCsvFile(file) {
         fileName: file.name,
         fileSize: file.size,
         fileLastModified: file.lastModified,
-        delimiter: delimiterFromFileName(file.name),
+        delimiter: resolveImportDelimiter(file),
+        headerRow: resolveImportHeaderRow(),
         encoding: els.encodingSelect.value,
         previewLimit: PREVIEW_LIMIT,
         longFieldThreshold: 50000,
@@ -549,6 +580,11 @@ function handleFiles(files, sourceFileHandle = null) {
   els.detailSearchInput.value = "";
   els.modalSearchInput.value = "";
   closeClipboardImportPopover();
+  // 手动分隔符/表头行只对上一份文件成立，换文件一律回到自动
+  resetImportOverrides();
+  const isTextTable = !lower.endsWith(".xlsx") && !lower.endsWith(".xls") && !lower.endsWith(".jsonl");
+  state.sourceTextFile = isTextTable ? file : null;
+  setImportOverridesEnabled(isTextTable);
   if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
     parseExcelFile(file);
   } else if (lower.endsWith(".jsonl")) {

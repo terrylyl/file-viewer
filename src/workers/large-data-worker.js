@@ -906,7 +906,10 @@ async function loadIndexedCsv(file, options) {
   const issues = createIssues();
   const reportProgress = createProgressReporter(file, "CSV");
   // 表头行由采样文本判定，索引器按记录序号认表头，不必为此缓冲整条流。
-  const headerIndex = findCsvHeaderIndex(sampleCsvRecords(sampleText, delimiter, sampleOptions));
+  // options.headerRow 是用户手动指定的第几条非空记录（1 起），优先于自动识别。
+  const headerIndex = options.headerRow > 0
+    ? options.headerRow - 1
+    : findCsvHeaderIndex(sampleCsvRecords(sampleText, delimiter, sampleOptions));
   const indexer = createCsvByteIndexer(file, delimiter.charCodeAt(0), reportProgress, headerIndex);
   const indexed = await indexer.scan();
   cellStarts = indexed.starts;
@@ -918,7 +921,7 @@ async function loadIndexedCsv(file, options) {
   sourceColumnCount = Math.max(rawHeaders.length, indexed.maxColumns);
   headers = normalizeHeaders(rawHeaders, sourceColumnCount);
   issues.duplicateColumns = detectDuplicateHeaderIssues(rawHeaders);
-  if (headerIndex > 0) {
+  if (headerIndex > 0 && !(options.headerRow > 0)) {
     addIssue(issues, "inconsistentRows", buildIssue(
       "表头不在首行",
       1,

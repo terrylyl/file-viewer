@@ -274,6 +274,8 @@ els.selectionExcludeButton.addEventListener("click", excludeSelectedRows);
 els.cancelClipboardImportButton.addEventListener("click", closeClipboardImportPopover);
 els.confirmClipboardImportButton.addEventListener("click", importClipboardTable);
 els.fileInput.addEventListener("change", (event) => handleFiles(event.target.files, null));
+els.delimiterSelect.addEventListener("change", reimportWithOverrides);
+els.headerRowInput.addEventListener("change", reimportWithOverrides);
 els.cancelLoadButton.addEventListener("click", cancelActiveLoad);
 els.dropZone.addEventListener("dragover", (event) => {
   event.preventDefault();

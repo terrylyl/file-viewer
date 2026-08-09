@@ -461,6 +461,30 @@ test("two preamble lines are skipped, three data-shaped rows are not", () => {
   assert.equal(tooMany.issues.inconsistentRows.some((issue) => issue.type === "表头不在首行"), false);
 });
 
+test("an explicit header row overrides detection and stays quiet about it", () => {
+  const core = loadWorkerCore();
+  const input = "报表\n说明一\n说明二\n说明三\nid,name,age\n1,a,2\n";
+
+  // 自动识别会因为前言超过上限而放弃
+  assert.equal(core.parseCsvText(input).headers[0], "报表");
+
+  // 手动指定第 5 条记录为表头（1 起）
+  const manual = core.parseCsvText(input, { headerIndex: 4 });
+  assert.equal(JSON.stringify(manual.headers), JSON.stringify(["id", "name", "age"]));
+  assert.equal(JSON.stringify(manual.rows[0]), JSON.stringify(["报表", "", ""]));
+  assert.equal(JSON.stringify(manual.rows.at(-1)), JSON.stringify(["1", "a", "2"]));
+  assert.equal(manual.rows.length, 5, "被跳过的前言行仍然保留");
+  assert.equal(
+    manual.issues.inconsistentRows.some((issue) => issue.type === "表头不在首行"),
+    false,
+    "用户自己指定的表头行不需要再提示",
+  );
+
+  // 超出记录数时收敛到最后一条，不抛错也不产生空表头
+  const clamped = core.parseCsvText(input, { headerIndex: 99 });
+  assert.equal(JSON.stringify(clamped.headers), JSON.stringify(["1", "a", "2"]));
+});
+
 test("detectDelimiter ignores separator-like characters inside a single column", () => {
   const core = loadWorkerCore();
 

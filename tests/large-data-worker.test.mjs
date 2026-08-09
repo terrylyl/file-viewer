@@ -366,6 +366,34 @@ test("large data worker takes the header from below a title row", async () => {
   ]);
 });
 
+test("large data worker honours an explicit header row", async () => {
+  const { context, messages } = loadLargeWorker();
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile("报表\n说明一\n说明二\n说明三\nid;name;age\n1;a;2\n", [6, 4, 11]),
+    fileKind: "CSV",
+    delimiter: ";",
+    headerRow: 5,
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.deepEqual(plain(loaded.result.headers), ["id", "name", "age"]);
+  assert.equal(loaded.result.rowCount, 5, "前言行仍然保留为数据行");
+  assert.equal(
+    loaded.result.issues.inconsistentRows.some((issue) => issue.type === "表头不在首行"),
+    false,
+    "用户自己指定的表头行不需要再提示",
+  );
+
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0, 4] } });
+  const rows = messages.find((message) => message.type === "rows");
+  assert.deepEqual(plain(rows.rows), [
+    { rowIndex: 0, row: ["报表", "", ""] },
+    { rowIndex: 4, row: ["1", "a", "2"] },
+  ]);
+});
+
 test("large data worker warns when the table collapses into a single column", async () => {
   const { context, messages } = loadLargeWorker();
   await context.self.onmessage({ data: {

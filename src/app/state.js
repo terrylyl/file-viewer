@@ -63,6 +63,8 @@ const els = {
   toolbar: document.getElementById("toolbar"),
   mobileToolsButton: document.getElementById("mobileToolsButton"),
   encodingSelect: document.getElementById("encodingSelect"),
+  delimiterSelect: document.getElementById("delimiterSelect"),
+  headerRowInput: document.getElementById("headerRowInput"),
   sheetSelectLabel: document.getElementById("sheetSelectLabel"),
   sheetSelect: document.getElementById("sheetSelect"),
   searchInput: document.getElementById("searchInput"),
@@ -240,6 +242,8 @@ const state = {
   loadToken: 0,
   file: null,
   sourceFileHandle: null,
+  // 探测判错时要能手动重来，所以留着原始 File；只对文本表格路径有意义。
+  sourceTextFile: null,
   viewIndices: [],
   rowPositionMap: new Map(),
   largeRowPositionMemo: new Map(),

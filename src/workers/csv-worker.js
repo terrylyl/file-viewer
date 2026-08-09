@@ -150,7 +150,11 @@ function parseCsvText(text, options = {}) {
   // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
   // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
   const nonEmptyRecords = records.filter((row) => row.some((cell) => cell !== ""));
-  const headerIndex = findCsvHeaderIndex(nonEmptyRecords);
+  // options.headerIndex 来自用户手动指定，优先于自动识别
+  const manualHeaderIndex = Number.isFinite(options.headerIndex) && options.headerIndex >= 0
+    ? Math.min(options.headerIndex, Math.max(0, nonEmptyRecords.length - 1))
+    : -1;
+  const headerIndex = manualHeaderIndex >= 0 ? manualHeaderIndex : findCsvHeaderIndex(nonEmptyRecords);
   const rawHeaders = nonEmptyRecords[headerIndex] || [];
   const expectedColumns = rawHeaders.length;
   // 标题行仍然是用户的数据，只是不再占着表头：按原顺序留在表头之前的位置。
@@ -176,7 +180,7 @@ function parseCsvText(text, options = {}) {
     longFields: [],
     duplicateColumns: detectDuplicateColumns(rawHeaders),
   };
-  if (headerIndex > 0) {
+  if (headerIndex > 0 && manualHeaderIndex < 0) {
     issues.inconsistentRows.push(
       buildIssueSummary(
         "表头不在首行",
@@ -459,6 +463,7 @@ self.onmessage = (event) => {
     const delimiter = message.delimiter || detectDelimiter(decoded.text);
     const result = parseCsvText(decoded.text, {
       delimiter,
+      headerIndex: message.headerRow > 0 ? message.headerRow - 1 : -1,
       previewLimit: message.previewLimit || DEFAULT_PREVIEW_LIMIT,
       longFieldThreshold: message.longFieldThreshold || DEFAULT_LONG_FIELD_THRESHOLD,
       onProgress(progress) {

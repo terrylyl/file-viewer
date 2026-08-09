@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-wVLYUbiYrg55BcTXDma9VTrUiUzLdTT3PlBgWEYsT8U='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-Ila0ctpZFYlFU0I50dYBY0KyE061xUhWPZQJjbAI+fU='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -415,6 +415,10 @@
       }
 
       .export-split-input {
+        width: 74px;
+      }
+
+      .header-row-input {
         width: 74px;
       }
 
@@ -3194,6 +3198,21 @@
                   <option value="gb18030">GB18030 / GBK</option>
                 </select>
               </label>
+              <label>
+                分隔符
+                <select id="delimiterSelect" disabled title="探测判错时可以手动指定；换文件会回到自动">
+                  <option value="">自动</option>
+                  <option value=",">逗号</option>
+                  <option value=";">分号</option>
+                  <option value="&#9;">Tab</option>
+                  <option value="|">竖线</option>
+                </select>
+              </label>
+              <label>
+                表头行
+                <input id="headerRowInput" class="header-row-input" type="number" min="1" step="1" placeholder="自动" disabled
+                  title="第几条非空记录作为表头；留空按标题行自动识别，换文件会回到自动" />
+              </label>
               <label class="sheet-control" id="sheetSelectLabel" hidden>
                 Sheet
                 <select id="sheetSelect" disabled>
@@ -4659,7 +4678,11 @@ function parseCsvText(text, options = {}) {
   // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
   // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
   const nonEmptyRecords = records.filter((row) => row.some((cell) => cell !== ""));
-  const headerIndex = findCsvHeaderIndex(nonEmptyRecords);
+  // options.headerIndex 来自用户手动指定，优先于自动识别
+  const manualHeaderIndex = Number.isFinite(options.headerIndex) && options.headerIndex >= 0
+    ? Math.min(options.headerIndex, Math.max(0, nonEmptyRecords.length - 1))
+    : -1;
+  const headerIndex = manualHeaderIndex >= 0 ? manualHeaderIndex : findCsvHeaderIndex(nonEmptyRecords);
   const rawHeaders = nonEmptyRecords[headerIndex] || [];
   const expectedColumns = rawHeaders.length;
   // 标题行仍然是用户的数据，只是不再占着表头：按原顺序留在表头之前的位置。
@@ -4685,7 +4708,7 @@ function parseCsvText(text, options = {}) {
     longFields: [],
     duplicateColumns: detectDuplicateColumns(rawHeaders),
   };
-  if (headerIndex > 0) {
+  if (headerIndex > 0 && manualHeaderIndex < 0) {
     issues.inconsistentRows.push(
       buildIssueSummary(
         "表头不在首行",
@@ -4968,6 +4991,7 @@ self.onmessage = (event) => {
     const delimiter = message.delimiter || detectDelimiter(decoded.text);
     const result = parseCsvText(decoded.text, {
       delimiter,
+      headerIndex: message.headerRow > 0 ? message.headerRow - 1 : -1,
       previewLimit: message.previewLimit || DEFAULT_PREVIEW_LIMIT,
       longFieldThreshold: message.longFieldThreshold || DEFAULT_LONG_FIELD_THRESHOLD,
       onProgress(progress) {
@@ -7471,7 +7495,10 @@ async function loadIndexedCsv(file, options) {
   const issues = createIssues();
   const reportProgress = createProgressReporter(file, "CSV");
   // 表头行由采样文本判定，索引器按记录序号认表头，不必为此缓冲整条流。
-  const headerIndex = findCsvHeaderIndex(sampleCsvRecords(sampleText, delimiter, sampleOptions));
+  // options.headerRow 是用户手动指定的第几条非空记录（1 起），优先于自动识别。
+  const headerIndex = options.headerRow > 0
+    ? options.headerRow - 1
+    : findCsvHeaderIndex(sampleCsvRecords(sampleText, delimiter, sampleOptions));
   const indexer = createCsvByteIndexer(file, delimiter.charCodeAt(0), reportProgress, headerIndex);
   const indexed = await indexer.scan();
   cellStarts = indexed.starts;
@@ -7483,7 +7510,7 @@ async function loadIndexedCsv(file, options) {
   sourceColumnCount = Math.max(rawHeaders.length, indexed.maxColumns);
   headers = normalizeHeaders(rawHeaders, sourceColumnCount);
   issues.duplicateColumns = detectDuplicateHeaderIssues(rawHeaders);
-  if (headerIndex > 0) {
+  if (headerIndex > 0 && !(options.headerRow > 0)) {
     addIssue(issues, "inconsistentRows", buildIssue(
       "表头不在首行",
       1,
@@ -9866,6 +9893,8 @@ self.onmessage = (event) => {
         toolbar: document.getElementById("toolbar"),
         mobileToolsButton: document.getElementById("mobileToolsButton"),
         encodingSelect: document.getElementById("encodingSelect"),
+        delimiterSelect: document.getElementById("delimiterSelect"),
+        headerRowInput: document.getElementById("headerRowInput"),
         sheetSelectLabel: document.getElementById("sheetSelectLabel"),
         sheetSelect: document.getElementById("sheetSelect"),
         searchInput: document.getElementById("searchInput"),
@@ -10043,6 +10072,8 @@ self.onmessage = (event) => {
         loadToken: 0,
         file: null,
         sourceFileHandle: null,
+        // 探测判错时要能手动重来，所以留着原始 File；只对文本表格路径有意义。
+        sourceTextFile: null,
         viewIndices: [],
         rowPositionMap: new Map(),
         largeRowPositionMemo: new Map(),
@@ -15913,6 +15944,35 @@ self.onmessage = (event) => {
         return /\.tsv$/i.test(name || "") ? "\t" : "";
       }
 
+      // 手动指定优先于扩展名，扩展名优先于探测。探测本身存在无法消除的歧义
+      // （前言行与正文里的 Markdown 表格在前 20 条记录里是同构的），所以必须有人工兜底。
+      function resolveImportDelimiter(file) {
+        return els.delimiterSelect.value || delimiterFromFileName(file?.name);
+      }
+
+      function resolveImportHeaderRow() {
+        const value = Number.parseInt(els.headerRowInput.value, 10);
+        return Number.isFinite(value) && value > 0 ? value : 0;
+      }
+
+      function setImportOverridesEnabled(enabled) {
+        els.delimiterSelect.disabled = !enabled;
+        els.headerRowInput.disabled = !enabled;
+      }
+
+      // 换文件时必须清掉：上一份文件的手动分隔符静默套到新文件上比探测判错更难查。
+      function resetImportOverrides() {
+        els.delimiterSelect.value = "";
+        els.headerRowInput.value = "";
+      }
+
+      function reimportWithOverrides() {
+        const file = state.sourceTextFile;
+        if (!file) return;
+        if (!confirmDatasetReplacement()) return;
+        parseCsvFile(file);
+      }
+
       function cancelActiveLoad() {
         if (!state.worker) return;
         beginLoad();
@@ -16004,7 +16064,8 @@ self.onmessage = (event) => {
           kind: "load-large-file",
           file,
           fileKind,
-          delimiter: delimiterFromFileName(file.name),
+          delimiter: resolveImportDelimiter(file),
+          headerRow: resolveImportHeaderRow(),
           encoding: els.encodingSelect.value,
           previewLimit: PREVIEW_LIMIT,
           longFieldThreshold: 50000,
@@ -16119,7 +16180,8 @@ self.onmessage = (event) => {
               fileName: file.name,
               fileSize: file.size,
               fileLastModified: file.lastModified,
-              delimiter: delimiterFromFileName(file.name),
+              delimiter: resolveImportDelimiter(file),
+              headerRow: resolveImportHeaderRow(),
               encoding: els.encodingSelect.value,
               previewLimit: PREVIEW_LIMIT,
               longFieldThreshold: 50000,
@@ -16320,6 +16382,11 @@ self.onmessage = (event) => {
         els.detailSearchInput.value = "";
         els.modalSearchInput.value = "";
         closeClipboardImportPopover();
+        // 手动分隔符/表头行只对上一份文件成立，换文件一律回到自动
+        resetImportOverrides();
+        const isTextTable = !lower.endsWith(".xlsx") && !lower.endsWith(".xls") && !lower.endsWith(".jsonl");
+        state.sourceTextFile = isTextTable ? file : null;
+        setImportOverridesEnabled(isTextTable);
         if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
           parseExcelFile(file);
         } else if (lower.endsWith(".jsonl")) {
@@ -16908,6 +16975,8 @@ self.onmessage = (event) => {
       els.cancelClipboardImportButton.addEventListener("click", closeClipboardImportPopover);
       els.confirmClipboardImportButton.addEventListener("click", importClipboardTable);
       els.fileInput.addEventListener("change", (event) => handleFiles(event.target.files, null));
+      els.delimiterSelect.addEventListener("change", reimportWithOverrides);
+      els.headerRowInput.addEventListener("change", reimportWithOverrides);
       els.cancelLoadButton.addEventListener("click", cancelActiveLoad);
       els.dropZone.addEventListener("dragover", (event) => {
         event.preventDefault();

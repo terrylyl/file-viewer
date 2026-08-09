@@ -59,6 +59,21 @@
                   <option value="gb18030">GB18030 / GBK</option>
                 </select>
               </label>
+              <label>
+                分隔符
+                <select id="delimiterSelect" disabled title="探测判错时可以手动指定；换文件会回到自动">
+                  <option value="">自动</option>
+                  <option value=",">逗号</option>
+                  <option value=";">分号</option>
+                  <option value="&#9;">Tab</option>
+                  <option value="|">竖线</option>
+                </select>
+              </label>
+              <label>
+                表头行
+                <input id="headerRowInput" class="header-row-input" type="number" min="1" step="1" placeholder="自动" disabled
+                  title="第几条非空记录作为表头；留空按标题行自动识别，换文件会回到自动" />
+              </label>
               <label class="sheet-control" id="sheetSelectLabel" hidden>
                 Sheet
                 <select id="sheetSelect" disabled>

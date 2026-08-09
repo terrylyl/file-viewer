@@ -410,6 +410,10 @@ label {
   width: 74px;
 }
 
+.header-row-input {
+  width: 74px;
+}
+
 .file-stats {
   display: flex;
   align-items: center;

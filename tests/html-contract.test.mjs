@@ -179,15 +179,38 @@ test(".tsv imports take their delimiter from the extension, .csv does not", () =
   const csvImport = html.slice(html.indexOf('kind: "parse-csv"'));
   assert.match(
     csvImport.slice(0, 400),
-    /delimiter: delimiterFromFileName\(file\.name\)/,
-    "普通 CSV 路径应带上扩展名推断的分隔符",
+    /delimiter: resolveImportDelimiter\(file\)/,
+    "普通 CSV 路径应带上解析出来的分隔符",
   );
   const largeImport = html.slice(html.indexOf('kind: "load-large-file"'));
   assert.match(
     largeImport.slice(0, 400),
-    /delimiter: delimiterFromFileName\(file\.name\)/,
-    "大文件路径应带上扩展名推断的分隔符",
+    /delimiter: resolveImportDelimiter\(file\)/,
+    "大文件路径应带上解析出来的分隔符",
   );
+});
+
+test("delimiter and header row can be overridden by hand", () => {
+  assert.match(html, /id="delimiterSelect"/, "missing manual delimiter control");
+  assert.match(html, /id="headerRowInput"/, "missing manual header row control");
+  assert.match(html, /delimiterSelect: document\.getElementById\("delimiterSelect"\)/, "delimiter control should be in els");
+  assert.match(html, /headerRowInput: document\.getElementById\("headerRowInput"\)/, "header row control should be in els");
+  assert.match(
+    html,
+    /els\.delimiterSelect\.addEventListener\("change", reimportWithOverrides\)/,
+    "改分隔符应重新解析当前文件",
+  );
+  assert.match(
+    html,
+    /els\.headerRowInput\.addEventListener\("change", reimportWithOverrides\)/,
+    "改表头行应重新解析当前文件",
+  );
+  assert.match(html, /function reimportWithOverrides\(/, "missing reimport entry point");
+  assert.match(html, /confirmDatasetReplacement\(\)/, "重新解析会丢弃编辑，必须先确认");
+  assert.match(html, /resetImportOverrides\(\);/, "换文件必须清掉上一份文件的手动设置");
+  assert.match(html, /headerRow: resolveImportHeaderRow\(\)/, "两条导入路径都要带上手动表头行");
+  assert.match(html, /message\.headerRow > 0 \? message\.headerRow - 1 : -1/, "worker 应把 1 起的行号转成下标");
+  assert.match(html, /options\.headerRow > 0/, "大文件路径应接受手动表头行");
 });
 
 test("delimiter misdetection is surfaced instead of failing silently", () => {
