@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-37hrGe7sWsNU7WiZdYfi+TuHZl2EgabN2FY0RX4JEB4='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-U3GROpllyI/Rmdvrbl/G4oMjMuPhv8BdX0oCXGj6+bI='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -10078,7 +10078,7 @@ self.onmessage = (event) => {
       const EXCEL_SAFE_READ_MAX_BYTES = 80 * 1024 * 1024;
       const EXCEL_SHARED_STRINGS_MAX_BYTES = 120 * 1024 * 1024;
       const EXCEL_CELL_META_SCAN_MAX_CELLS = 200000;
-      const LARGE_TEXT_FILE_THRESHOLD = 300 * 1024 * 1024;
+      const LARGE_TEXT_FILE_THRESHOLD = 24 * 1024 * 1024;
       const LARGE_TEXT_FILE_MAX_BYTES = 500 * 1024 * 1024;
       const LARGE_PREVIEW_CACHE_MAX_BYTES = 32 * 1024 * 1024;
       const LARGE_CELL_CACHE_MAX_BYTES = 64 * 1024 * 1024;

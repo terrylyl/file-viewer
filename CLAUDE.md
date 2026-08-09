@@ -45,7 +45,7 @@ PowerShell 若拦截 `npm.ps1`，改用 `npm.cmd run build` / `npm.cmd test`。�
 | --- | --- |
 | csv-worker | CSV 分隔符探测、状态机解析、JSONL 展开、UTF-8/GB18030 解码、解析问题检测 |
 | query-worker | 持有 row chunks，负责搜索、列筛选、重复值筛选、排序、row window 切片、异步唯一值统计 |
-| large-data-worker | ≥300 MiB 的 CSV/TSV/TXT/JSONL：流式扫描原始 `File` 建立字节偏移索引，按需 `File.slice()` 取 cell/row |
+| large-data-worker | ≥24 MiB 的 CSV/TSV/TXT/JSONL：流式扫描原始 `File` 建立字节偏移索引，按需 `File.slice()` 取 cell/row |
 | excel-worker | 内联了校验过的 SheetJS，负责 workbook 解析、sheet 切换、XLSX 导出；主线程从不持有 workbook |
 
 数据流核心不变量：

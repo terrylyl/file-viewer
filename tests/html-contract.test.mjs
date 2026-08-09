@@ -563,7 +563,7 @@ test("table rows are stored behind a chunked array facade", () => {
 });
 
 test("large text files use a streamed offset index over the original File", () => {
-  assert.match(html, /LARGE_TEXT_FILE_THRESHOLD\s*=\s*300 \* 1024 \* 1024/, "large-file threshold should be 300 MiB");
+  assert.match(html, /LARGE_TEXT_FILE_THRESHOLD\s*=\s*24 \* 1024 \* 1024/, "rich-text CSVs should switch to the streamed path at 24 MiB");
   assert.match(html, /LARGE_TEXT_FILE_MAX_BYTES\s*=\s*500 \* 1024 \* 1024/, "large-file capacity should be 500 MiB");
   assert.match(html, /function createLargeDataWorker\(\)/, "missing large data worker factory");
   assert.match(html, /id="large-data-worker-source"/, "large data worker must be embedded in the single HTML build");
