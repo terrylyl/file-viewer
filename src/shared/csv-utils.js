@@ -80,7 +80,6 @@ function createCsvRecordParser(delimiter = ",") {
   let specLineInvalid = false;
   let specLineLastSignificantIsDelimiter = false;
   let specLineSkipLineFeed = false;
-  let specStructureClosed = false;
   let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false };
 
   // 进入推测性解析前记录现场，预算用尽或到达文件末尾仍未闭合时可以回滚重放。
@@ -102,7 +101,6 @@ function createCsvRecordParser(delimiter = ",") {
     specLineInvalid = false;
     specLineLastSignificantIsDelimiter = false;
     specLineSkipLineFeed = false;
-    specStructureClosed = false;
   };
 
   // 推测性解析吞掉的内容同时用严格 CSV 行状态记账。只有候选首行和后续物理行
@@ -195,15 +193,21 @@ function createCsvRecordParser(delimiter = ",") {
   const endSpeculation = () => {
     specMode = "";
     specBuffer = "";
-    specStructureClosed = false;
   };
 
-  const closeStructuredSpeculation = () => {
-    if (specPhysicalLineIndex > 0 && specFirstLineMatchesHeader) {
-      specStructureClosed = true;
-    } else {
-      endSpeculation();
+  const closeStructuredSpeculation = (records) => {
+    let validJson = false;
+    try {
+      JSON.parse(specBuffer);
+      validJson = true;
+    } catch (error) {
+      // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
+    if (!validJson || !learnedColumns) {
+      rollbackSpeculation(records);
+      return;
+    }
+    endSpeculation();
   };
 
   const rollbackSpeculation = (records) => {
@@ -251,7 +255,7 @@ function createCsvRecordParser(delimiter = ",") {
     endSpeculation();
   };
 
-  const appendStructuredCharacter = (ch) => {
+  const appendStructuredCharacter = (ch, records) => {
     field += ch;
     started = true;
     if (structureEscaped) {
@@ -274,14 +278,14 @@ function createCsvRecordParser(delimiter = ",") {
     const open = structureStack.at(-1);
     if ((ch === "}" && open === "{") || (ch === "]" && open === "[")) {
       structureStack.pop();
-      if (!structureStack.length) closeStructuredSpeculation();
+      if (!structureStack.length) closeStructuredSpeculation(records);
       return;
     }
     if (ch === "}" || ch === "]") {
       structureStack = [];
       structureInString = false;
       structureEscaped = false;
-      closeStructuredSpeculation();
+      closeStructuredSpeculation(records);
     }
   };
 
@@ -382,7 +386,7 @@ function createCsvRecordParser(delimiter = ",") {
     if (pendingQuote) {
       pendingQuote = false;
       if (structureStack.length) {
-        appendStructuredCharacter('"');
+        appendStructuredCharacter('"', records);
         if (ch === '"') return;
         processCharacter(ch, records);
         return;
@@ -409,7 +413,7 @@ function createCsvRecordParser(delimiter = ",") {
         return;
       }
       if (structureStack.length) {
-        appendStructuredCharacter(ch);
+        appendStructuredCharacter(ch, records);
         return;
       }
       if (ch === "\\") {
@@ -442,7 +446,7 @@ function createCsvRecordParser(delimiter = ",") {
     }
 
     if (structureStack.length) {
-      appendStructuredCharacter(ch);
+      appendStructuredCharacter(ch, records);
       return;
     }
 
@@ -480,12 +484,11 @@ function createCsvRecordParser(delimiter = ",") {
     }
 
     if (ch === delimiter) {
-      const preserveSpeculation = specMode === "structure" && specStructureClosed;
       record.push(field);
       field = "";
       started = true;
-      toleranceDisabled = preserveSpeculation;
-      if (!preserveSpeculation) endSpeculation();
+      toleranceDisabled = false;
+      endSpeculation();
       return;
     }
 
@@ -512,7 +515,6 @@ function createCsvRecordParser(delimiter = ",") {
           rollbackSpeculation(records);
           return;
         }
-        if (specStructureClosed) endSpeculation();
       } else {
         trackSpeculationLine(ch);
       }
@@ -529,9 +531,8 @@ function createCsvRecordParser(delimiter = ",") {
     finish() {
       const records = [];
       while (speculationContradictsHeaderAtEof()) rollbackSpeculation(records);
-      if (specMode === "structure" && specStructureClosed) endSpeculation();
-      // 围栏一直到文件结束都没闭合，几乎一定是把单元格里的 ``` 当成了代码块。
-      // 未闭合的 JSON 括号则保留原样，由导入警告提示用户源文件被截断。
+      // 围栏或 JSON 候选一直到文件结束都没闭合时，回滚为标准 CSV，
+      // 同时保留诊断，让调用方提示源内容可能被截断。
       if (specMode === "fence" && codeFence) rollbackSpeculation(records);
       if (structurePendingQuote) {
         // 文件在开括号后的引号处结束，那个引号是收尾引号
@@ -540,9 +541,13 @@ function createCsvRecordParser(delimiter = ",") {
         inQuotes = false;
         endSpeculation();
       }
+      const unclosedStructuredField = specMode === "structure" && (
+        structureStack.length > 0 || Boolean(structurePendingOpen)
+      );
+      if (unclosedStructuredField) rollbackSpeculation(records);
       diagnostics = {
         unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
-        unclosedStructuredField: structureStack.length > 0,
+        unclosedStructuredField,
         unclosedCodeFence: codeFence,
       };
       if (pendingEscapedQuote) {

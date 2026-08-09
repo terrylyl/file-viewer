@@ -200,6 +200,57 @@ test("large data worker rejects a false structure closed on a later row", async 
   ]);
 });
 
+test("large data worker rejects balanced prose and preserves short title rows", async () => {
+  for (const expected of [
+    {
+      text: "id,note,tag\n1,[用户表达,时间周期],z\n2,ok,q",
+      headers: ["id", "note", "tag", "Column 4"],
+      rows: [
+        ["1", "[用户表达", "时间周期]", "z"],
+        ["2", "ok", "q", ""],
+      ],
+    },
+    {
+      text: "id,note,tag\n1,[开始,a\n用户表达\n时间周期\n],z\n2,ok,q",
+      headers: ["id", "note", "tag"],
+      rows: [
+        ["1", "[开始", "a"],
+        ["用户表达", "", ""],
+        ["时间周期", "", ""],
+        ["]", "z", ""],
+        ["2", "ok", "q"],
+      ],
+    },
+    {
+      text: "id,note,tag\n1,[2024开始,a\n用户表达\n时间周期",
+      headers: ["id", "note", "tag"],
+      rows: [
+        ["1", "[2024开始", "a"],
+        ["用户表达", "", ""],
+        ["时间周期", "", ""],
+      ],
+    },
+  ]) {
+    const { context, messages } = loadLargeWorker();
+    await context.self.onmessage({ data: {
+      kind: "load-large-file",
+      file: createChunkedFile(expected.text, [1, 4, 2, 9]),
+      fileKind: "CSV",
+      encoding: "utf-8",
+    } });
+
+    const loaded = messages.find((message) => message.type === "loaded");
+    assert.deepEqual(plain(loaded.result.headers), expected.headers);
+    await context.self.onmessage({
+      data: { kind: "get-rows", token: 1, indices: expected.rows.map((_, index) => index) },
+    });
+    assert.deepEqual(
+      plain(messages.find((message) => message.type === "rows").rows),
+      expected.rows.map((row, rowIndex) => ({ rowIndex, row })),
+    );
+  }
+});
+
 test("large data worker preserves multiline JSON with ambiguous separators", async () => {
   for (const text of [
     'id,payload,tag\n1,{"text":"a,b"\n,"x":1},z\n2,ok,q',

@@ -282,6 +282,57 @@ test("a later stray closing bracket does not validate a false JSON guess", () =>
   ]);
 });
 
+test("balanced bracketed prose is not mistaken for JSON", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("id,note,tag\n1,[用户表达,时间周期],z\n2,ok,q", { delimiter: "," });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.headers)), ["id", "note", "tag", "Column 4"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.rows)), [
+    ["1", "[用户表达", "时间周期]", "z"],
+    ["2", "ok", "q", ""],
+  ]);
+});
+
+test("invalid bracketed prose releases irregular short title rows", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText(
+    "id,note,tag\n1,[开始,a\n用户表达\n时间周期\n],z\n2,ok,q",
+    { delimiter: "," },
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.headers)), ["id", "note", "tag"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.rows)), [
+    ["1", "[开始", "a"],
+    ["用户表达", "", ""],
+    ["时间周期", "", ""],
+    ["]", "z", ""],
+    ["2", "ok", "q"],
+  ]);
+});
+
+test("an unclosed structure at EOF releases irregular short title rows", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("id,note,tag\n1,[2024开始,a\n用户表达\n时间周期", { delimiter: "," });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.rows)), [
+    ["1", "[2024开始", "a"],
+    ["用户表达", "", ""],
+    ["时间周期", "", ""],
+  ]);
+  assert.ok(parsed.issues.inconsistentRows.some((issue) => issue.type === "复杂字段未闭合"));
+});
+
+test("literal newline escapes and empty headers keep their CSV columns", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText("id,,section\n1,\\n,用户表达\n2,text,时间周期", { delimiter: "," });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.headers)), ["id", "Column 2", "section"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.rows)), [
+    ["1", "\\n", "用户表达"],
+    ["2", "text", "时间周期"],
+  ]);
+});
+
 test("a bare JSON field may still span lines when the line stops on a separator", () => {
   const core = loadWorkerCore();
   const parsed = core.parseCsvText('id,payload\n1,{"a": 1,\n"b": 2}\n2,ok', { delimiter: "," });

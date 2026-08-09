@@ -250,7 +250,6 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
   let specLineLastSignificantIsDelimiter = false;
   let specLineSkipNext = false;
   let specLineSkipLineFeed = false;
-  let specStructureClosed = false;
   let toleranceDisabled = false;
 
   const isWhitespaceByte = (byte) => byte === 0x20 || byte === 0x09 || byte === BYTE_LINE_FEED || byte === BYTE_CARRIAGE_RETURN;
@@ -287,7 +286,6 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     specLineLastSignificantIsDelimiter = false;
     specLineSkipNext = false;
     specLineSkipLineFeed = false;
-    specStructureClosed = false;
   };
 
   // 推测性解析吞掉的内容同时用严格 CSV 行状态记账。只有候选首行和后续物理行
@@ -393,15 +391,21 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
   const endSpeculation = () => {
     specMode = "";
     specLength = 0;
-    specStructureClosed = false;
   };
 
   const closeStructuredSpeculation = () => {
-    if (specPhysicalLineIndex > 0 && specFirstLineMatchesHeader) {
-      specStructureClosed = true;
-    } else {
-      endSpeculation();
+    let validJson = false;
+    try {
+      JSON.parse(sourceDecoder.decode(specBytes.subarray(0, specLength)));
+      validJson = true;
+    } catch (error) {
+      // 括号配平不代表内容就是 JSON；普通文本优先回到标准 CSV 规则。
     }
+    if (!validJson || !headerDescriptors) {
+      rollbackSpeculation();
+      return;
+    }
+    endSpeculation();
   };
 
   const updateStructuredState = (byte) => {
@@ -441,7 +445,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     updateStructuredState(byte);
   };
 
-  const resetField = (nextStart, preserveSpeculation = false) => {
+  const resetField = (nextStart) => {
     fieldStart = nextStart;
     fieldStarted = false;
     fieldHasNonWhitespace = false;
@@ -460,19 +464,18 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
     structureEscaped = false;
     structurePendingOpen = 0;
     structurePendingQuote = false;
-    toleranceDisabled = preserveSpeculation;
-    if (!preserveSpeculation) endSpeculation();
+    toleranceDisabled = false;
+    endSpeculation();
   };
 
   const finishField = (endOffset, nextStart) => {
-    const preserveSpeculation = specMode === "structure" && specStructureClosed;
     currentRecord.push({
       start: fieldStart,
       end: endOffset,
       flags: fieldQuoted ? CELL_FLAG_QUOTED : 0,
       escapes: fieldEscapes.length ? fieldEscapes : null,
     });
-    resetField(nextStart, preserveSpeculation);
+    resetField(nextStart);
   };
 
   const isDescriptorEmpty = (descriptor) => {
@@ -778,7 +781,6 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
           rollbackSpeculation();
           return;
         }
-        if (specStructureClosed) endSpeculation();
       } else {
         trackSpeculationLine(byte);
       }
@@ -797,7 +799,6 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
       reportProgress(processedBytes);
     }
     while (speculationContradictsHeaderAtEof()) rollbackSpeculation();
-    if (specMode === "structure" && specStructureClosed) endSpeculation();
     // 围栏到文件末尾都没闭合，几乎一定是把单元格里的 ``` 当成了代码块。
     if (specMode === "fence" && codeFence) rollbackSpeculation();
     if (structurePendingQuote) {
@@ -806,9 +807,13 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress) {
       inQuotes = false;
       endSpeculation();
     }
+    const unclosedStructuredField = specMode === "structure" && (
+      structureStack.length > 0 || Boolean(structurePendingOpen)
+    );
+    if (unclosedStructuredField) rollbackSpeculation();
     const diagnostics = {
       unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
-      unclosedStructuredField: structureStack.length > 0,
+      unclosedStructuredField,
       unclosedCodeFence: codeFence,
     };
     if (fieldStarted || currentRecord.length || fieldStart < file.size) {
