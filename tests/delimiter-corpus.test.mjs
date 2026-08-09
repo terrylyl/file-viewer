@@ -87,6 +87,30 @@ const CORPUS = [
     delimiter: "|", columns: 4,
   },
   { name: "前言行含制表符 + 逗号表", input: "导出: a\tb\nid,name\n1,2\n", delimiter: ",", columns: 2 },
+  // 少数几条超宽记录不能否决一个绝大多数行都复现表头的候选：
+  // JSON / HTML / 围栏列被宽容解析切坏时就是这个形状，方差会冲到几百。
+  {
+    name: "9 列逗号表 + 3 条被切成 400 列",
+    input: (() => {
+      const head = Array.from({ length: 9 }, (_, i) => `h${i + 1}`).join(",");
+      const normal = Array.from({ length: 9 }, (_, i) => `v${i + 1}; x`).join(",");
+      const wide = Array.from({ length: 400 }, (_, i) => `w${i}`).join(",");
+      const rows = Array.from({ length: 20 }, (_, i) => (i % 7 === 3 ? wide : normal));
+      return `${head}\n${rows.join("\n")}\n`;
+    })(),
+    delimiter: ",", columns: 400,
+  },
+  {
+    name: "9 列逗号表 + 1 条被切成 1800 列",
+    input: (() => {
+      const head = Array.from({ length: 9 }, (_, i) => `h${i + 1}`).join(",");
+      const normal = Array.from({ length: 9 }, (_, i) => `v${i + 1}; x`).join(",");
+      const wide = Array.from({ length: 1800 }, (_, i) => `w${i}`).join(",");
+      const rows = Array.from({ length: 20 }, (_, i) => (i === 3 ? wide : normal));
+      return `${head}\n${rows.join("\n")}\n`;
+    })(),
+    delimiter: ",", columns: 1800,
+  },
   // 宽度不能盖过结构：引号里的 60 列 Markdown 表不该赢过 38 列的真表头
   {
     name: "宽表：38 列逗号 + 引号内 60 列 md 表",

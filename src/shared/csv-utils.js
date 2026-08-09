@@ -622,6 +622,11 @@ const CSV_DELIMITER_DECORATION_PENALTY = 40;
 // 切得更宽只在小范围内算证据。不封顶的话，一张 60 列的 Markdown 表能靠宽度
 // 压过 38 列的真表头，宽度项会盖掉一致性、表头复现和包边惩罚。
 const CSV_DELIMITER_WIDTH_CAP = 12;
+// 方差罚同样要封顶。方差的单位是"分隔符个数"，几条被宽容解析切坏的记录
+// （JSON / HTML / 围栏列很容易触发）就能到几百，把 headerMatch、consistency
+// 这些有界的稳健指标整个盖掉：17/19 行都完美复现表头的逗号会被打到 -246，
+// 输给文件里几乎不存在、因此"很稳定"的分号，整表随后塌成一列。
+const CSV_DELIMITER_VARIANCE_CAP = 4;
 
 function isCsvPreambleLine(line, delimiter) {
   return !CSV_DELIMITER_CANDIDATES.some((other) => other !== delimiter && line.includes(other));
@@ -647,7 +652,7 @@ function scoreCsvDelimiterCandidate(records, headerIndex, priority) {
     record.length > 2 && record[0].trim() === "" && record[record.length - 1].trim() === ""
   )).length / scoped.length;
   return Math.min(average, CSV_DELIMITER_WIDTH_CAP) * 4 + consistency * 8 + headerMatch * 12
-    - variance * 3
+    - Math.min(variance, CSV_DELIMITER_VARIANCE_CAP) * 3
     - priority * 0.5
     - decorated * CSV_DELIMITER_DECORATION_PENALTY;
 }

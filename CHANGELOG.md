@@ -4,6 +4,10 @@ All notable user-facing changes are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- 修复 JSON / HTML / Markdown 代码块列较多的合法 CSV 被判成分号分隔、整表塌成一列：分隔符评分里的方差罚没有上限，宽容解析把少数几行切坏（几百列）就能把一个 17/19 行都完美复现表头的逗号打到 -246 分，输给文件里几乎不存在、因此"很稳定"的分号。方差罚现在封顶到 -12，与 headerMatch 同量级，少数畸形行不能否决绝大多数行给出的证据。
+
 ## [2.3.9] - 2026-08-09
 
 ### Fixed
