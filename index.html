@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-/oKNGGzS1Y5nPMmB7Wm+fU+5AOkSVbiZUAgSSPQarsw='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-onAmkyy7RcVPxvaSkopUTJbJpeaO+ZEBZx1CQBQgVvU='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -4353,6 +4353,10 @@ function detectCsvDelimiter(text) {
   candidates.forEach((delimiter, priority) => {
     const parser = createCsvRecordParser(delimiter);
     const records = parser.push(sample).filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+    const headerColumns = records[0] ? records[0].length : 0;
+    // 表头是分隔符探测的硬约束。候选字符如果连首条非空记录都切不开，
+    // 不能仅凭正文中的 Markdown 表格、标签列表等高频内容获胜。
+    if (headerColumns < 2) return;
     const counts = records.map((record) => Math.max(0, record.length - 1));
     const nonZero = counts.filter((count) => count > 0);
     if (!nonZero.length) return;
@@ -4361,7 +4365,6 @@ function detectCsvDelimiter(text) {
     const consistency = nonZero.length / Math.max(1, records.length);
     // 真正的分隔符会让数据行的列数稳定复现表头列数；
     // 只是恰好出现在某个单元格里的字符（tags 列的 a|b|c）做不到这一点。
-    const headerColumns = records[0] ? records[0].length : 0;
     const dataRecords = records.slice(1);
     const headerMatch = dataRecords.length
       ? dataRecords.filter((record) => record.length === headerColumns).length / dataRecords.length
@@ -6245,6 +6248,10 @@ function detectCsvDelimiter(text) {
   candidates.forEach((delimiter, priority) => {
     const parser = createCsvRecordParser(delimiter);
     const records = parser.push(sample).filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+    const headerColumns = records[0] ? records[0].length : 0;
+    // 表头是分隔符探测的硬约束。候选字符如果连首条非空记录都切不开，
+    // 不能仅凭正文中的 Markdown 表格、标签列表等高频内容获胜。
+    if (headerColumns < 2) return;
     const counts = records.map((record) => Math.max(0, record.length - 1));
     const nonZero = counts.filter((count) => count > 0);
     if (!nonZero.length) return;
@@ -6253,7 +6260,6 @@ function detectCsvDelimiter(text) {
     const consistency = nonZero.length / Math.max(1, records.length);
     // 真正的分隔符会让数据行的列数稳定复现表头列数；
     // 只是恰好出现在某个单元格里的字符（tags 列的 a|b|c）做不到这一点。
-    const headerColumns = records[0] ? records[0].length : 0;
     const dataRecords = records.slice(1);
     const headerMatch = dataRecords.length
       ? dataRecords.filter((record) => record.length === headerColumns).length / dataRecords.length
@@ -9181,6 +9187,10 @@ self.onmessage = (event) => {
         candidates.forEach((delimiter, priority) => {
           const parser = createCsvRecordParser(delimiter);
           const records = parser.push(sample).filter((record) => record.some((cell) => cell !== "")).slice(0, 20);
+          const headerColumns = records[0] ? records[0].length : 0;
+          // 表头是分隔符探测的硬约束。候选字符如果连首条非空记录都切不开，
+          // 不能仅凭正文中的 Markdown 表格、标签列表等高频内容获胜。
+          if (headerColumns < 2) return;
           const counts = records.map((record) => Math.max(0, record.length - 1));
           const nonZero = counts.filter((count) => count > 0);
           if (!nonZero.length) return;
@@ -9189,7 +9199,6 @@ self.onmessage = (event) => {
           const consistency = nonZero.length / Math.max(1, records.length);
           // 真正的分隔符会让数据行的列数稳定复现表头列数；
           // 只是恰好出现在某个单元格里的字符（tags 列的 a|b|c）做不到这一点。
-          const headerColumns = records[0] ? records[0].length : 0;
           const dataRecords = records.slice(1);
           const headerMatch = dataRecords.length
             ? dataRecords.filter((record) => record.length === headerColumns).length / dataRecords.length

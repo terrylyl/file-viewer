@@ -435,3 +435,23 @@ test("detectDelimiter ignores separator-like characters inside a single column",
   assert.equal(core.detectDelimiter("id,notes\n1,x;y;z\n2,p;q;r\n3,m;n;o"), ",");
   assert.equal(core.detectDelimiter("id;tags\n1;a|b|c\n2;d|e|f"), ";");
 });
+
+test("detectDelimiter rejects Markdown pipes that do not split the header", () => {
+  const core = loadWorkerCore();
+  const headers = Array.from({ length: 38 }, (_, index) => `h${index + 1}`);
+  const markdownRow = `|${Array.from({ length: 60 }, (_, index) => `c${index + 1}`).join("|")}|`;
+  const markdown = Array.from({ length: 8 }, () => markdownRow).join("\n");
+  const tail = Array.from({ length: 36 }, (_, index) => `v${index + 3}`);
+  const input = [
+    headers.join(","),
+    `1,"${markdown}",${tail.join(",")}`,
+    `2,plain,${tail.join(",")}`,
+  ].join("\n");
+
+  assert.equal(core.detectDelimiter(input), ",");
+  const parsed = core.parseCsvText(input);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.headers)), headers);
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(parsed.rows[0].length, 38);
+  assert.equal(parsed.rows[0][1], markdown);
+});

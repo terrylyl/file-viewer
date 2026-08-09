@@ -275,6 +275,34 @@ test("large data worker preserves multiline JSON with ambiguous separators", asy
   }
 });
 
+test("large data worker ignores dense Markdown pipes absent from the header", async () => {
+  const { context, messages } = loadLargeWorker();
+  const headers = Array.from({ length: 38 }, (_, index) => `h${index + 1}`);
+  const markdownRow = `|${Array.from({ length: 60 }, (_, index) => `c${index + 1}`).join("|")}|`;
+  const markdown = Array.from({ length: 8 }, () => markdownRow).join("\r\n");
+  const tail = Array.from({ length: 36 }, (_, index) => `v${index + 3}`);
+  const text = [
+    headers.join(","),
+    `1,"${markdown}",${tail.join(",")}`,
+    `2,plain,${tail.join(",")}`,
+  ].join("\r\n");
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file: createChunkedFile(text, [1, 7, 3, 19]),
+    fileKind: "CSV",
+    encoding: "utf-8",
+  } });
+
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.file.delimiter, ",");
+  assert.deepEqual(plain(loaded.result.headers), headers);
+  assert.equal(loaded.result.rowCount, 2);
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0] } });
+  const row = messages.find((message) => message.type === "rows").rows[0].row;
+  assert.equal(row.length, 38);
+  assert.equal(row[1], markdown);
+});
+
 test("large data worker replays a rolled back Markdown fence at the right byte offsets", async () => {
   const { context, messages } = loadLargeWorker();
   const text = ["name,note,tag", "alice,```x,a", "bob,ok,b", "carol,fine,c"].join("\n");
