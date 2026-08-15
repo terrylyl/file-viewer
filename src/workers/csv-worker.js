@@ -132,13 +132,130 @@ function repairBackslashRecord(record, expectedColumns, delimiter) {
   return repaired.length === expectedColumns ? repaired : record;
 }
 
+// 单条记录做宽容重读时最多回看这么多字符。跨行的 JSON、围栏都在这个量级以内，
+// 真正不闭合的内容不会因此吞掉整份文件。
+const TOLERANT_REPAIR_MAX_CHARS = 1024 * 1024;
+
+// 严格解析之后，只有列数对不上的记录才交给宽容解析处理，且每一步都要验证：
+// 记录内的公式/反斜杠修复、以及从该记录起点重读一次——只有结果正好等于表头
+// 列数才采纳。合法 CSV 里没有异常记录，这个函数一次都不会动手。
+function strictParseEntriesFrom(text, from, delimiter) {
+  const parser = createCsvRecordParser(delimiter, { strict: true });
+  const rows = [...parser.push(text.slice(from)), ...parser.finish()];
+  const starts = parser.getRecordStarts();
+  const entries = [];
+  rows.forEach((row, index) => {
+    if (row.some((cell) => cell !== "")) entries.push({ row, start: from + (starts[index] || 0) });
+  });
+  return entries;
+}
+
+// 修复越过严格记录边界后最多重解析多少次剩余文本。异常行本来就少，
+// 这个上限只是防止病态文件把重解析变成 O(n²)。
+const TOLERANT_REPAIR_MAX_RESYNC = 64;
+// 异常记录往前回看多少条。跨行的 JSON、Markdown 围栏会让**列数正确**的记录
+// 也是错的（`1,{` 正好两列，但那个 `{` 还没写完），异常要到后面几行才暴露。
+const TOLERANT_REPAIR_MAX_LOOKBACK = 8;
+
+function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns) {
+  if (!expectedColumns) return { rows: initialEntries.map((entry) => entry.row), repairedAny: false };
+  const repaired = [];
+  const repairedFrom = [];
+  let entries = initialEntries;
+  let index = 0;
+  let resyncBudget = TOLERANT_REPAIR_MAX_RESYNC;
+  let repairedAny = false;
+
+  const emit = (row, fromIndex) => {
+    repaired.push(row);
+    repairedFrom.push(fromIndex);
+  };
+
+  while (index < entries.length) {
+    const entry = entries[index];
+    if (entry.row.length === expectedColumns) {
+      emit(entry.row, index);
+      index += 1;
+      continue;
+    }
+
+    // 先试记录内的修复：公式被逗号切开、反斜杠吞掉了分隔符，都不涉及跨行
+    const local = repairBackslashRecord(
+      repairFormulaRecord(entry.row, expectedColumns, delimiter),
+      expectedColumns,
+      delimiter,
+    );
+    if (local.length === expectedColumns) {
+      emit(local, index);
+      repairedAny = true;
+      index += 1;
+      continue;
+    }
+
+    // 再从这条记录的起点用宽容解析重读（未加引号的 JSON、Markdown 围栏会因此
+    // 重新合成一个 cell）。列数对不上就丢弃这次尝试，保留严格解析结果。
+    // 跨行内容的开头那条记录列数往往正好是对的（`1,[1,` 就是三列），异常要到
+    // 后面几行才暴露，而中间几行看起来完全正常——靠"这行是否写完了"根本判断
+    // 不出来。改成从异常处依次向前重读，取第一个列数对得上、而且确实覆盖了这条
+    // 异常记录的结果；覆盖条件把"读出的还是它自己"那种无效尝试挡在外面。
+    let attempt = null;
+    let from = index;
+    for (let back = 0; back <= TOLERANT_REPAIR_MAX_LOOKBACK && index - back >= 0; back += 1) {
+      const candidate = index - back;
+      const tried = reparseFirstToleratedRecord(
+        text,
+        entries[candidate].start,
+        delimiter,
+        TOLERANT_REPAIR_MAX_CHARS,
+        expectedColumns,
+      );
+      if (tried && tried.record.length === expectedColumns && tried.end > entry.start) {
+        attempt = tried;
+        from = candidate;
+        break;
+      }
+    }
+    if (attempt) {
+      while (repairedFrom.length && repairedFrom[repairedFrom.length - 1] >= from) {
+        repaired.pop();
+        repairedFrom.pop();
+      }
+      emit(attempt.record, from);
+      repairedAny = true;
+      let next = index + 1;
+      while (next < entries.length && entries[next].start < attempt.end) next += 1;
+      // 宽容解析读到的终点不一定落在严格记录的边界上——严格解析在畸形行上
+      // 可能已经把好几行并成一条。对不齐就从终点重新严格解析，否则后面的行会丢。
+      const aligned = next >= entries.length
+        ? attempt.end >= text.length
+        : entries[next].start === attempt.end;
+      if (!aligned && resyncBudget > 0) {
+        resyncBudget -= 1;
+        entries = strictParseEntriesFrom(text, attempt.end, delimiter);
+        repairedFrom.length = 0;
+        index = 0;
+        continue;
+      }
+      index = next;
+      continue;
+    }
+
+    emit(local, index);
+    index += 1;
+  }
+
+  return { rows: repaired, repairedAny };
+}
+
 function parseCsvText(text, options = {}) {
   const delimiter = options.delimiter || detectDelimiter(text);
   const previewLimit = options.previewLimit || DEFAULT_PREVIEW_LIMIT;
   const longFieldThreshold = options.longFieldThreshold || DEFAULT_LONG_FIELD_THRESHOLD;
+  // 先按严格 RFC4180 解析一遍。合法 CSV 到这里就已经是正确结果，宽容解析
+  // 只在后面对"列数对不上"的记录出手，因此不可能把一份本来正确的文件改坏。
   const records = [];
   const strict = Boolean(options.strict);
-  const parser = createCsvRecordParser(delimiter, { strict });
+  const parser = createCsvRecordParser(delimiter, { strict: true });
   const chunkSize = 64 * 1024;
   for (let start = 0; start < text.length; start += chunkSize) {
     const parsedRecords = parser.push(text.slice(start, start + chunkSize));
@@ -146,12 +263,17 @@ function parseCsvText(text, options = {}) {
     if (options.onProgress) options.onProgress(Math.min(0.98, (start + chunkSize) / Math.max(1, text.length)));
   }
   for (const parsedRecord of parser.finish()) records.push(parsedRecord);
+  const recordStarts = parser.getRecordStarts();
   const parserDiagnostics = parser.getDiagnostics();
   const parserWarning = describeCsvParserDiagnostics(parserDiagnostics);
 
   // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
   // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
-  const nonEmptyRecords = records.filter((row) => row.some((cell) => cell !== ""));
+  const nonEmpty = [];
+  records.forEach((row, index) => {
+    if (row.some((cell) => cell !== "")) nonEmpty.push({ row, start: recordStarts[index] || 0 });
+  });
+  const nonEmptyRecords = nonEmpty.map((entry) => entry.row);
   // options.headerIndex 来自用户手动指定，优先于自动识别
   const manualHeaderIndex = Number.isFinite(options.headerIndex) && options.headerIndex >= 0
     ? Math.min(options.headerIndex, Math.max(0, nonEmptyRecords.length - 1))
@@ -160,19 +282,15 @@ function parseCsvText(text, options = {}) {
   const rawHeaders = nonEmptyRecords[headerIndex] || [];
   const expectedColumns = rawHeaders.length;
   // 标题行仍然是用户的数据，只是不再占着表头：按原顺序留在表头之前的位置。
-  const bodyRecords = headerIndex
-    ? [...nonEmptyRecords.slice(0, headerIndex), ...nonEmptyRecords.slice(headerIndex + 1)]
-    : nonEmptyRecords.slice(1);
+  const bodyEntries = headerIndex
+    ? [...nonEmpty.slice(0, headerIndex), ...nonEmpty.slice(headerIndex + 1)]
+    : nonEmpty.slice(1);
+  const repairResult = strict
+    ? { rows: bodyEntries.map((entry) => entry.row), repairedAny: false }
+    : repairAnomalousRecords(text, delimiter, bodyEntries, expectedColumns);
+  const bodyRecords = repairResult.rows;
   const recordsForAnalysis = expectedColumns
-    ? [
-      rawHeaders,
-      // 严格模式下不做记录级修复：公式合并、反斜杠拆分同样属于宽容处理
-      ...bodyRecords.map((row) => (strict ? row : repairBackslashRecord(
-        repairFormulaRecord(row, expectedColumns, delimiter),
-        expectedColumns,
-        delimiter,
-      ))),
-    ]
+    ? [rawHeaders, ...bodyRecords]
     : nonEmptyRecords;
   const maxColumns = getMaxRecordColumns(recordsForAnalysis, expectedColumns);
   const headers = normalizeHeaders(rawHeaders, maxColumns);
@@ -212,7 +330,14 @@ function parseCsvText(text, options = {}) {
       );
     }
   }
-  if (parserWarning) {
+  // 告警要反映最终结果，而不是中间那遍严格解析。含未加引号 JSON、Markdown
+  // 围栏的文件在严格视角下必然"引号未闭合"，但只要修复之后每行列数都对上了，
+  // 用户手里就是一张完整的表，没有什么需要提醒的。
+  // 修复动过手，说明严格那遍看到的"引号未闭合"落在已经被重读修好的区间里，
+  // 这时它是过期信息。一次都没动过手才把它照原样报出去。
+  const hasUnrepairedRow = expectedColumns > 0
+    && recordsForAnalysis.some((row, index) => index > 0 && row.length !== expectedColumns);
+  if (parserWarning && (hasUnrepairedRow || !repairResult.repairedAny)) {
     issues.inconsistentRows.push(
       buildIssueSummary(
         "复杂字段未闭合",
