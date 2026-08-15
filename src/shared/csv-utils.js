@@ -626,8 +626,11 @@ function reparseFirstToleratedRecord(text, from, delimiter, limit, expectedColum
     const emitted = parser.push(text[index]);
     if (emitted.length) return { record: emitted[0], end: index + 1 };
   }
+  // 走到窗口末尾才由 finish() 吐出记录：只有恰好一条时，它的范围才确定是整段
+  // 窗口。吐出多条（推测性解析在末尾回滚就会这样）就无从判断第一条消耗到哪里，
+  // 硬按整段算会把后面的记录当成已消耗而丢掉。
   const tail = parser.finish();
-  return tail.length ? { record: tail[0], end } : null;
+  return tail.length === 1 ? { record: tail[0], end } : null;
 }
 
 // 引号内出现未双写的 `"`，同时又真的切出了列数不一致的行——这两件事凑齐，

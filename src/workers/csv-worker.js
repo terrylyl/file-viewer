@@ -157,29 +157,14 @@ const TOLERANT_REPAIR_MAX_RESYNC = 64;
 // 也是错的（`1,{` 正好两列，但那个 `{` 还没写完），异常要到后面几行才暴露。
 const TOLERANT_REPAIR_MAX_LOOKBACK = 8;
 
-// 这条记录的末字段看起来还没写完吗：括号没配平、以分隔符收尾（跨行 JSON 的
-// 续行长这样），或者围栏标记出现了奇数次。
-function opensMultilineField(row, delimiter) {
-  if (!row.length) return false;
-  const last = String(row[row.length - 1] ?? "");
-  if (last.endsWith(delimiter) || last === "") return true;
-  const joined = row.join(delimiter);
-  if ((joined.split("```").length - 1) % 2 === 1) return true;
-  let depth = 0;
-  for (const ch of joined) {
-    if (ch === "{" || ch === "[") depth += 1;
-    else if (ch === "}" || ch === "]") depth -= 1;
-  }
-  return depth > 0;
-}
-
 function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns) {
-  if (!expectedColumns) return initialEntries.map((entry) => entry.row);
+  if (!expectedColumns) return { rows: initialEntries.map((entry) => entry.row), repairedAny: false };
   const repaired = [];
   const repairedFrom = [];
   let entries = initialEntries;
   let index = 0;
   let resyncBudget = TOLERANT_REPAIR_MAX_RESYNC;
+  let repairedAny = false;
 
   const emit = (row, fromIndex) => {
     repaired.push(row);
@@ -202,30 +187,41 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
     );
     if (local.length === expectedColumns) {
       emit(local, index);
+      repairedAny = true;
       index += 1;
       continue;
     }
 
-    // 再从这条记录的起点用宽容解析重读一次（未加引号的 JSON、Markdown 围栏
-    // 会因此重新合成一个 cell）。列数对不上就丢弃这次尝试，保留严格解析结果。
-    // 跨行内容的开头那条记录列数往往是对的，异常要到后面才暴露，所以要回看。
+    // 再从这条记录的起点用宽容解析重读（未加引号的 JSON、Markdown 围栏会因此
+    // 重新合成一个 cell）。列数对不上就丢弃这次尝试，保留严格解析结果。
+    // 跨行内容的开头那条记录列数往往正好是对的（`1,[1,` 就是三列），异常要到
+    // 后面几行才暴露，而中间几行看起来完全正常——靠"这行是否写完了"根本判断
+    // 不出来。改成从异常处依次向前重读，取第一个列数对得上、而且确实覆盖了这条
+    // 异常记录的结果；覆盖条件把"读出的还是它自己"那种无效尝试挡在外面。
+    let attempt = null;
     let from = index;
-    let lookback = 0;
-    while (
-      from > 0
-      && lookback < TOLERANT_REPAIR_MAX_LOOKBACK
-      && opensMultilineField(entries[from - 1].row, delimiter)
-    ) {
-      from -= 1;
-      lookback += 1;
+    for (let back = 0; back <= TOLERANT_REPAIR_MAX_LOOKBACK && index - back >= 0; back += 1) {
+      const candidate = index - back;
+      const tried = reparseFirstToleratedRecord(
+        text,
+        entries[candidate].start,
+        delimiter,
+        TOLERANT_REPAIR_MAX_CHARS,
+        expectedColumns,
+      );
+      if (tried && tried.record.length === expectedColumns && tried.end > entry.start) {
+        attempt = tried;
+        from = candidate;
+        break;
+      }
     }
-    const attempt = reparseFirstToleratedRecord(text, entries[from].start, delimiter, TOLERANT_REPAIR_MAX_CHARS, expectedColumns);
-    if (attempt && attempt.record.length === expectedColumns && attempt.end > entry.start) {
+    if (attempt) {
       while (repairedFrom.length && repairedFrom[repairedFrom.length - 1] >= from) {
         repaired.pop();
         repairedFrom.pop();
       }
       emit(attempt.record, from);
+      repairedAny = true;
       let next = index + 1;
       while (next < entries.length && entries[next].start < attempt.end) next += 1;
       // 宽容解析读到的终点不一定落在严格记录的边界上——严格解析在畸形行上
@@ -248,7 +244,7 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
     index += 1;
   }
 
-  return repaired;
+  return { rows: repaired, repairedAny };
 }
 
 function parseCsvText(text, options = {}) {
@@ -289,9 +285,10 @@ function parseCsvText(text, options = {}) {
   const bodyEntries = headerIndex
     ? [...nonEmpty.slice(0, headerIndex), ...nonEmpty.slice(headerIndex + 1)]
     : nonEmpty.slice(1);
-  const bodyRecords = strict
-    ? bodyEntries.map((entry) => entry.row)
+  const repairResult = strict
+    ? { rows: bodyEntries.map((entry) => entry.row), repairedAny: false }
     : repairAnomalousRecords(text, delimiter, bodyEntries, expectedColumns);
+  const bodyRecords = repairResult.rows;
   const recordsForAnalysis = expectedColumns
     ? [rawHeaders, ...bodyRecords]
     : nonEmptyRecords;
@@ -333,7 +330,14 @@ function parseCsvText(text, options = {}) {
       );
     }
   }
-  if (parserWarning) {
+  // 告警要反映最终结果，而不是中间那遍严格解析。含未加引号 JSON、Markdown
+  // 围栏的文件在严格视角下必然"引号未闭合"，但只要修复之后每行列数都对上了，
+  // 用户手里就是一张完整的表，没有什么需要提醒的。
+  // 修复动过手，说明严格那遍看到的"引号未闭合"落在已经被重读修好的区间里，
+  // 这时它是过期信息。一次都没动过手才把它照原样报出去。
+  const hasUnrepairedRow = expectedColumns > 0
+    && recordsForAnalysis.some((row, index) => index > 0 && row.length !== expectedColumns);
+  if (parserWarning && (hasUnrepairedRow || !repairResult.repairedAny)) {
     issues.inconsistentRows.push(
       buildIssueSummary(
         "复杂字段未闭合",

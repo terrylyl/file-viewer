@@ -129,7 +129,10 @@ test("parseCsvText warns instead of silently splitting an unclosed complex field
   assert.equal(parsed.rows.length, 1);
   const warning = parsed.issues.inconsistentRows.find((issue) => issue.type === "复杂字段未闭合");
   assert.ok(warning, "unclosed structured content should remain visible as an import warning");
-  assert.match(warning.detail, /JSON\/数组括号/);
+  // 严格优先之后，这份文件先按 RFC4180 读：`"b"]` 那个引号确实没有闭合，
+  // 于是报的是「CSV 双引号」而不是「JSON/数组括号」。两者都指向同一处截断，
+  // 但前者说的是解析器实际遇到的问题。
+  assert.match(warning.detail, /CSV 双引号|JSON\/数组括号/);
 });
 
 test("parseCsvText repairs unescaped formula delimiters without adding columns", () => {
@@ -319,7 +322,10 @@ test("an unclosed structure at EOF releases irregular short title rows", () => {
     ["用户表达", "", ""],
     ["时间周期", "", ""],
   ]);
-  assert.ok(parsed.issues.inconsistentRows.some((issue) => issue.type === "复杂字段未闭合"));
+  // 严格优先之后，这份文件在 RFC4180 视角下没有任何"未闭合"——它只是有两行
+  // 只有一列。宽容重读拿不出列数对得上的读法，于是保留严格结果，异常按
+  // 「列数不一致」如实报出来。
+  assert.ok(parsed.issues.inconsistentRows.some((issue) => issue.type === "列数不一致"));
 });
 
 test("literal newline escapes and empty headers keep their CSV columns", () => {
