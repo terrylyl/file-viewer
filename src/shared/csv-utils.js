@@ -45,7 +45,10 @@ function isJsonStructureLead(open, next) {
   );
 }
 
-function createCsvRecordParser(delimiter = ",") {
+// options.strict：完全按 RFC4180 解析，不做 JSON、Markdown 围栏、反斜杠转义
+// 这些宽容处理。合法 CSV 的语义没有歧义，读错时可以一键退回这条确定的路径。
+function createCsvRecordParser(delimiter = ",", options = {}) {
+  const tolerant = !options.strict;
   let field = "";
   let record = [];
   let learnedColumns = 0;
@@ -53,7 +56,7 @@ function createCsvRecordParser(delimiter = ",") {
   let inQuotes = false;
   let pendingQuote = false;
   let pendingBackslash = false;
-  let pendingEscapedQuote = false;
+  let pendingBackslashDelimiter = false;
   let skipLineFeed = false;
   let codeFence = false;
   let backtickRun = 0;
@@ -235,7 +238,7 @@ function createCsvRecordParser(delimiter = ",") {
     backtickRun = 0;
     pendingQuote = false;
     pendingBackslash = false;
-    pendingEscapedQuote = false;
+    pendingBackslashDelimiter = false;
     toleranceDisabled = true;
     // 走 feed 而不是 processCharacter：重放过程中如果又开启了一次推测性解析，
     // 它的缓冲区也必须被填上，否则嵌套回滚会重放一段不完整的文本。
@@ -252,7 +255,7 @@ function createCsvRecordParser(delimiter = ",") {
     inQuotes = false;
     pendingQuote = false;
     pendingBackslash = false;
-    pendingEscapedQuote = false;
+    pendingBackslashDelimiter = false;
     skipLineFeed = false;
     codeFence = false;
     backtickRun = 0;
@@ -300,7 +303,7 @@ function createCsvRecordParser(delimiter = ",") {
 
   // 先只记下开括号，等下一个字符确认像 JSON 再真正进入结构化模式。
   const startPendingStructure = (ch) => {
-    if (!toleranceDisabled) {
+    if (tolerant && !toleranceDisabled) {
       beginSpeculation("structure", ch);
       structurePendingOpen = ch;
     }
@@ -366,17 +369,18 @@ function createCsvRecordParser(delimiter = ",") {
       return;
     }
 
-    if (pendingEscapedQuote) {
-      pendingEscapedQuote = false;
-      if (ch === delimiter || ch === "\n" || ch === "\r") {
-        // 反斜杠属于字段内容，那个引号是收尾引号，例如 "C:\dir\",next
+    if (pendingBackslashDelimiter) {
+      pendingBackslashDelimiter = false;
+      if (ch === '"') {
+        // 分隔符后面紧跟开引号，说明那里确实开始了一个加引号的字段。合并的话
+        // 这个开引号会退化成普通字符，字段里的换行随之失去保护，整行被拆散。
         field += "\\";
         started = true;
-        inQuotes = false;
+        processCharacter(delimiter, records);
         processCharacter(ch, records);
         return;
       }
-      field += '\\"';
+      field += `\\${delimiter}`;
       started = true;
       processCharacter(ch, records);
       return;
@@ -384,9 +388,9 @@ function createCsvRecordParser(delimiter = ",") {
 
     if (pendingBackslash) {
       pendingBackslash = false;
-      if (ch === '"' && inQuotes) {
-        // 可能是转义引号，也可能是以反斜杠结尾的字段的收尾引号，再看一个字符才能定
-        pendingEscapedQuote = true;
+      if (ch === delimiter && !inQuotes) {
+        // `\` + 分隔符算不算转义，要看后面那个字段是不是加引号的，再等一个字符
+        pendingBackslashDelimiter = true;
         return;
       }
       if (ch === '"' || ch === delimiter || ch === "\\") {
@@ -437,10 +441,9 @@ function createCsvRecordParser(delimiter = ",") {
         appendStructuredCharacter(ch, records);
         return;
       }
-      if (ch === "\\") {
-        pendingBackslash = true;
-        return;
-      }
+      // 引号内不给反斜杠特殊含义：RFC4180 在这里没有歧义，`"` 必须双写、`\` 就是普通
+      // 字符。`"C:\dir\",next` 按标准规则本来就解析得对，而把 `\"` 当转义会吃掉收尾
+      // 引号，把下一行并进来——差分模糊测试在合法 CSV 上复现了这个记录数偏差。
       if ((ch === "{" || ch === "[") && !field.trim()) {
         startPendingStructure(ch);
         return;
@@ -471,7 +474,7 @@ function createCsvRecordParser(delimiter = ",") {
       return;
     }
 
-    if (ch === "\\") {
+    if (tolerant && ch === "\\") {
       pendingBackslash = true;
       return;
     }
@@ -483,7 +486,7 @@ function createCsvRecordParser(delimiter = ",") {
       return;
     }
 
-    if (ch === "`" && !toleranceDisabled && /^`{0,2}$/.test(field.trim())) {
+    if (tolerant && ch === "`" && !toleranceDisabled && /^`{0,2}$/.test(field.trim())) {
       if (!backtickRun) beginSpeculation("fence", ch);
       field += ch;
       started = true;
@@ -567,16 +570,15 @@ function createCsvRecordParser(delimiter = ",") {
       );
       if (unclosedStructuredField) rollbackSpeculation(records);
       diagnostics = {
-        unclosedQuotedField: inQuotes && !pendingQuote && !pendingEscapedQuote,
+        unclosedQuotedField: inQuotes && !pendingQuote,
         unclosedStructuredField,
         unclosedCodeFence: codeFence,
         undoubledQuote: sawUndoubledQuote,
       };
-      if (pendingEscapedQuote) {
-        field += "\\";
+      if (pendingBackslashDelimiter) {
+        field += `\${delimiter}`;
         started = true;
-        inQuotes = false;
-        pendingEscapedQuote = false;
+        pendingBackslashDelimiter = false;
       }
       if (pendingBackslash) {
         field += "\\";

@@ -137,7 +137,8 @@ function parseCsvText(text, options = {}) {
   const previewLimit = options.previewLimit || DEFAULT_PREVIEW_LIMIT;
   const longFieldThreshold = options.longFieldThreshold || DEFAULT_LONG_FIELD_THRESHOLD;
   const records = [];
-  const parser = createCsvRecordParser(delimiter);
+  const strict = Boolean(options.strict);
+  const parser = createCsvRecordParser(delimiter, { strict });
   const chunkSize = 64 * 1024;
   for (let start = 0; start < text.length; start += chunkSize) {
     const parsedRecords = parser.push(text.slice(start, start + chunkSize));
@@ -165,11 +166,12 @@ function parseCsvText(text, options = {}) {
   const recordsForAnalysis = expectedColumns
     ? [
       rawHeaders,
-      ...bodyRecords.map((row) => repairBackslashRecord(
+      // 严格模式下不做记录级修复：公式合并、反斜杠拆分同样属于宽容处理
+      ...bodyRecords.map((row) => (strict ? row : repairBackslashRecord(
         repairFormulaRecord(row, expectedColumns, delimiter),
         expectedColumns,
         delimiter,
-      )),
+      ))),
     ]
     : nonEmptyRecords;
   const maxColumns = getMaxRecordColumns(recordsForAnalysis, expectedColumns);
@@ -472,6 +474,7 @@ self.onmessage = (event) => {
     const delimiter = message.delimiter || detectDelimiter(decoded.text);
     const result = parseCsvText(decoded.text, {
       delimiter,
+      strict: Boolean(message.strict),
       headerIndex: message.headerRow > 0 ? message.headerRow - 1 : -1,
       previewLimit: message.previewLimit || DEFAULT_PREVIEW_LIMIT,
       longFieldThreshold: message.longFieldThreshold || DEFAULT_LONG_FIELD_THRESHOLD,

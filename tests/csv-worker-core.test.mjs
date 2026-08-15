@@ -566,6 +566,46 @@ test("an explicit header row overrides detection and stays quiet about it", () =
   assert.equal(JSON.stringify(clamped.headers), JSON.stringify(["1", "a", "2"]));
 });
 
+test("严格模式关掉全部宽容处理，结果与 RFC4180 一致", () => {
+  const core = loadWorkerCore();
+  // 取不含内部引号的 payload：这样两种模式的期望值都无歧义
+  const input = [
+    "id,payload,tag",
+    "1,{a:1,b:2},x",
+    "2,=IF(A1 > 0, B1, C1),y",
+    "3,C:\\dir\\,z",
+  ].join("\n");
+
+  // 宽容模式：JSON 合成一个 cell、公式合并回去、反斜杠按转义处理
+  const tolerant = core.parseCsvText(input, { delimiter: "," });
+  assert.equal(tolerant.rows[1][1], "=IF(A1 > 0, B1, C1)");
+  assert.equal(tolerant.rows[1][2], "y");
+  assert.equal(tolerant.rows[2][1], "C:\\dir\\", "反斜杠合并后由记录级修复拆回来");
+  assert.equal(tolerant.rows[2][2], "z");
+
+  // 严格模式：一律按标准 CSV 切，公式和反斜杠都不再特殊对待
+  const strict = core.parseCsvText(input, { delimiter: ",", strict: true });
+  assert.equal(strict.rows[0][1], "{a:1");
+  assert.equal(strict.rows[0][2], "b:2}");
+  assert.equal(strict.rows[1][1], "=IF(A1 > 0");
+  assert.equal(strict.rows[1][2], " B1");
+  assert.equal(strict.rows[2][1], "C:\\dir\\");
+  assert.equal(strict.rows[2][2], "z");
+});
+
+test("严格模式下加引号的字段仍按 RFC4180 正确解析", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText(
+    'id,note\n1,"say ""hi"", ok"\n2,"line1\nline2"\n3,"C:\\dir\\"\n',
+    { delimiter: ",", strict: true },
+  );
+
+  assert.equal(parsed.rows.length, 3);
+  assert.equal(parsed.rows[0][1], 'say "hi", ok');
+  assert.equal(parsed.rows[1][1], "line1\nline2");
+  assert.equal(parsed.rows[2][1], "C:\\dir\\");
+});
+
 test("detectDelimiter ignores separator-like characters inside a single column", () => {
   const core = loadWorkerCore();
 

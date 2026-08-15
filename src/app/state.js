@@ -65,6 +65,7 @@ const els = {
   encodingSelect: document.getElementById("encodingSelect"),
   delimiterSelect: document.getElementById("delimiterSelect"),
   headerRowInput: document.getElementById("headerRowInput"),
+  strictCsvInput: document.getElementById("strictCsvInput"),
   sheetSelectLabel: document.getElementById("sheetSelectLabel"),
   sheetSelect: document.getElementById("sheetSelect"),
   searchInput: document.getElementById("searchInput"),

@@ -190,6 +190,20 @@ test(".tsv imports take their delimiter from the extension, .csv does not", () =
   );
 });
 
+test("严格 CSV 模式可以从界面开启并贯通两条解析路径", () => {
+  assert.match(html, /id="strictCsvInput"/, "missing strict CSV control");
+  assert.match(html, /strictCsvInput: document\.getElementById\("strictCsvInput"\)/, "strict control should be in els");
+  assert.match(
+    html,
+    /els\.strictCsvInput\.addEventListener\("change", reimportWithOverrides\)/,
+    "切换严格模式应重新解析当前文件",
+  );
+  assert.match(html, /strict: resolveImportStrict\(\)/, "两条导入路径都要带上严格开关");
+  assert.match(html, /const tolerant = !options\.strict;/, "解析器应支持 strict 选项");
+  assert.match(html, /strict: Boolean\(message\.strict\)/, "普通路径 worker 应接受 strict");
+  assert.match(html, /strict: Boolean\(options\.strict\)/, "大文件路径应接受 strict");
+});
+
 test("delimiter and header row can be overridden by hand", () => {
   assert.match(html, /id="delimiterSelect"/, "missing manual delimiter control");
   assert.match(html, /id="headerRowInput"/, "missing manual header row control");

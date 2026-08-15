@@ -74,6 +74,9 @@
                 <input id="headerRowInput" class="header-row-input" type="number" min="1" step="1" placeholder="自动" disabled
                   title="第几条非空记录作为表头；留空按标题行自动识别，换文件会回到自动" />
               </label>
+              <label title="按 RFC4180 严格解析：不做 JSON、Markdown 代码块、反斜杠转义等宽容处理，结果与 Python csv 一致">
+                <input id="strictCsvInput" type="checkbox" disabled /> 严格 CSV
+              </label>
               <label class="sheet-control" id="sheetSelectLabel" hidden>
                 Sheet
                 <select id="sheetSelect" disabled>

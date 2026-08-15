@@ -153,12 +153,18 @@ function resolveImportHeaderRow() {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+function resolveImportStrict() {
+  return els.strictCsvInput.checked;
+}
+
 function setImportOverridesEnabled(enabled) {
   els.delimiterSelect.disabled = !enabled;
   els.headerRowInput.disabled = !enabled;
+  els.strictCsvInput.disabled = !enabled;
 }
 
 // 换文件时必须清掉：上一份文件的手动分隔符静默套到新文件上比探测判错更难查。
+// 「严格 CSV」不在此列——它和编码一样是使用者对解析方式的偏好，不是某个文件的属性。
 function resetImportOverrides() {
   els.delimiterSelect.value = "";
   els.headerRowInput.value = "";
@@ -264,6 +270,7 @@ async function parseLargeTextFile(file, fileKind) {
     fileKind,
     delimiter: resolveImportDelimiter(file),
     headerRow: resolveImportHeaderRow(),
+    strict: resolveImportStrict(),
     encoding: els.encodingSelect.value,
     previewLimit: PREVIEW_LIMIT,
     longFieldThreshold: 50000,
@@ -380,6 +387,7 @@ async function parseCsvFile(file) {
         fileLastModified: file.lastModified,
         delimiter: resolveImportDelimiter(file),
         headerRow: resolveImportHeaderRow(),
+        strict: resolveImportStrict(),
         encoding: els.encodingSelect.value,
         previewLimit: PREVIEW_LIMIT,
         longFieldThreshold: 50000,

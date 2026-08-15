@@ -202,7 +202,9 @@ function isJsonStructureLeadByte(open, next) {
   );
 }
 
-function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex = 0) {
+function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex = 0, options = {}) {
+  // options.strict：与普通路径一致，完全按 RFC4180 解析，不做任何宽容处理
+  const tolerant = !options.strict;
   const starts = createGrowableU32(4096);
   const ends = createGrowableU32(4096);
   const flags = createGrowableU8(4096);
@@ -614,8 +616,10 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
 
   const finishRecord = () => {
     // 顺序与普通路径一致：先按公式合并多切的列，再按反斜杠拆回少切的列
-    repairFormulaRecord();
-    repairShortRecord();
+    if (tolerant) {
+      repairFormulaRecord();
+      repairShortRecord();
+    }
     // 表头之前的全空记录（文件开头的空行、",,"占位行）既不是表头也不是数据行，
     // 直接丢掉；与普通路径 parseCsvText 的口径保持一致。
     if (!headerDescriptors && !currentRecord.some((descriptor) => !isDescriptorEmpty(descriptor))) {
@@ -804,12 +808,12 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
         appendStructuredByte(byte);
         return;
       }
-      if (byte === BYTE_BACKSLASH) {
+      if (tolerant && byte === BYTE_BACKSLASH) {
         appendFieldByte(byte);
         pendingBackslash = true;
         return;
       }
-      if ((byte === BYTE_OPEN_BRACE || byte === BYTE_OPEN_BRACKET) && !fieldHasNonWhitespace && !toleranceDisabled) {
+      if (tolerant && (byte === BYTE_OPEN_BRACE || byte === BYTE_OPEN_BRACKET) && !fieldHasNonWhitespace && !toleranceDisabled) {
         beginSpeculation("structure", offset, byte);
         appendFieldByte(byte);
         structurePendingOpen = byte;
@@ -839,7 +843,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
       return;
     }
 
-    if (byte === BYTE_BACKSLASH) {
+    if (tolerant && byte === BYTE_BACKSLASH) {
       appendFieldByte(byte);
       pendingBackslash = true;
       return;
@@ -856,7 +860,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
       return;
     }
 
-    if (byte === BYTE_BACKTICK && leadingFenceEligible && leadingBacktickCount < 3 && !toleranceDisabled) {
+    if (tolerant && byte === BYTE_BACKTICK && leadingFenceEligible && leadingBacktickCount < 3 && !toleranceDisabled) {
       if (!leadingBacktickCount) beginSpeculation("fence", offset, byte);
       appendFieldByte(byte);
       leadingBacktickCount += 1;
@@ -868,7 +872,7 @@ function createCsvByteIndexer(file, delimiterByte, reportProgress, headerIndex =
     }
     if (leadingBacktickCount && leadingBacktickCount < 3 && specMode === "fence") endSpeculation();
 
-    if ((byte === BYTE_OPEN_BRACE || byte === BYTE_OPEN_BRACKET) && !fieldHasNonWhitespace && !toleranceDisabled) {
+    if (tolerant && (byte === BYTE_OPEN_BRACE || byte === BYTE_OPEN_BRACKET) && !fieldHasNonWhitespace && !toleranceDisabled) {
       beginSpeculation("structure", offset, byte);
       appendFieldByte(byte);
       structurePendingOpen = byte;
@@ -1025,7 +1029,9 @@ async function loadIndexedCsv(file, options) {
   const headerIndex = options.headerRow > 0
     ? options.headerRow - 1
     : findCsvHeaderIndex(sampleCsvRecords(sampleText, delimiter, sampleOptions));
-  const indexer = createCsvByteIndexer(file, delimiter.charCodeAt(0), reportProgress, headerIndex);
+  const indexer = createCsvByteIndexer(file, delimiter.charCodeAt(0), reportProgress, headerIndex, {
+    strict: Boolean(options.strict),
+  });
   const indexed = await indexer.scan();
   cellStarts = indexed.starts;
   cellEnds = indexed.ends;
