@@ -132,13 +132,134 @@ function repairBackslashRecord(record, expectedColumns, delimiter) {
   return repaired.length === expectedColumns ? repaired : record;
 }
 
+// 单条记录做宽容重读时最多回看这么多字符。跨行的 JSON、围栏都在这个量级以内，
+// 真正不闭合的内容不会因此吞掉整份文件。
+const TOLERANT_REPAIR_MAX_CHARS = 1024 * 1024;
+
+// 严格解析之后，只有列数对不上的记录才交给宽容解析处理，且每一步都要验证：
+// 记录内的公式/反斜杠修复、以及从该记录起点重读一次——只有结果正好等于表头
+// 列数才采纳。合法 CSV 里没有异常记录，这个函数一次都不会动手。
+function strictParseEntriesFrom(text, from, delimiter) {
+  const parser = createCsvRecordParser(delimiter, { strict: true });
+  const rows = [...parser.push(text.slice(from)), ...parser.finish()];
+  const starts = parser.getRecordStarts();
+  const entries = [];
+  rows.forEach((row, index) => {
+    if (row.some((cell) => cell !== "")) entries.push({ row, start: from + (starts[index] || 0) });
+  });
+  return entries;
+}
+
+// 修复越过严格记录边界后最多重解析多少次剩余文本。异常行本来就少，
+// 这个上限只是防止病态文件把重解析变成 O(n²)。
+const TOLERANT_REPAIR_MAX_RESYNC = 64;
+// 异常记录往前回看多少条。跨行的 JSON、Markdown 围栏会让**列数正确**的记录
+// 也是错的（`1,{` 正好两列，但那个 `{` 还没写完），异常要到后面几行才暴露。
+const TOLERANT_REPAIR_MAX_LOOKBACK = 8;
+
+// 这条记录的末字段看起来还没写完吗：括号没配平、以分隔符收尾（跨行 JSON 的
+// 续行长这样），或者围栏标记出现了奇数次。
+function opensMultilineField(row, delimiter) {
+  if (!row.length) return false;
+  const last = String(row[row.length - 1] ?? "");
+  if (last.endsWith(delimiter) || last === "") return true;
+  const joined = row.join(delimiter);
+  if ((joined.split("```").length - 1) % 2 === 1) return true;
+  let depth = 0;
+  for (const ch of joined) {
+    if (ch === "{" || ch === "[") depth += 1;
+    else if (ch === "}" || ch === "]") depth -= 1;
+  }
+  return depth > 0;
+}
+
+function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns) {
+  if (!expectedColumns) return initialEntries.map((entry) => entry.row);
+  const repaired = [];
+  const repairedFrom = [];
+  let entries = initialEntries;
+  let index = 0;
+  let resyncBudget = TOLERANT_REPAIR_MAX_RESYNC;
+
+  const emit = (row, fromIndex) => {
+    repaired.push(row);
+    repairedFrom.push(fromIndex);
+  };
+
+  while (index < entries.length) {
+    const entry = entries[index];
+    if (entry.row.length === expectedColumns) {
+      emit(entry.row, index);
+      index += 1;
+      continue;
+    }
+
+    // 先试记录内的修复：公式被逗号切开、反斜杠吞掉了分隔符，都不涉及跨行
+    const local = repairBackslashRecord(
+      repairFormulaRecord(entry.row, expectedColumns, delimiter),
+      expectedColumns,
+      delimiter,
+    );
+    if (local.length === expectedColumns) {
+      emit(local, index);
+      index += 1;
+      continue;
+    }
+
+    // 再从这条记录的起点用宽容解析重读一次（未加引号的 JSON、Markdown 围栏
+    // 会因此重新合成一个 cell）。列数对不上就丢弃这次尝试，保留严格解析结果。
+    // 跨行内容的开头那条记录列数往往是对的，异常要到后面才暴露，所以要回看。
+    let from = index;
+    let lookback = 0;
+    while (
+      from > 0
+      && lookback < TOLERANT_REPAIR_MAX_LOOKBACK
+      && opensMultilineField(entries[from - 1].row, delimiter)
+    ) {
+      from -= 1;
+      lookback += 1;
+    }
+    const attempt = reparseFirstToleratedRecord(text, entries[from].start, delimiter, TOLERANT_REPAIR_MAX_CHARS, expectedColumns);
+    if (attempt && attempt.record.length === expectedColumns && attempt.end > entry.start) {
+      while (repairedFrom.length && repairedFrom[repairedFrom.length - 1] >= from) {
+        repaired.pop();
+        repairedFrom.pop();
+      }
+      emit(attempt.record, from);
+      let next = index + 1;
+      while (next < entries.length && entries[next].start < attempt.end) next += 1;
+      // 宽容解析读到的终点不一定落在严格记录的边界上——严格解析在畸形行上
+      // 可能已经把好几行并成一条。对不齐就从终点重新严格解析，否则后面的行会丢。
+      const aligned = next >= entries.length
+        ? attempt.end >= text.length
+        : entries[next].start === attempt.end;
+      if (!aligned && resyncBudget > 0) {
+        resyncBudget -= 1;
+        entries = strictParseEntriesFrom(text, attempt.end, delimiter);
+        repairedFrom.length = 0;
+        index = 0;
+        continue;
+      }
+      index = next;
+      continue;
+    }
+
+    emit(local, index);
+    index += 1;
+  }
+
+  return repaired;
+}
+
 function parseCsvText(text, options = {}) {
   const delimiter = options.delimiter || detectDelimiter(text);
   const previewLimit = options.previewLimit || DEFAULT_PREVIEW_LIMIT;
   const longFieldThreshold = options.longFieldThreshold || DEFAULT_LONG_FIELD_THRESHOLD;
+  // 先按严格 RFC4180 解析一遍。合法 CSV 到这里就已经是正确结果，宽容解析
+  // 只在后面对"列数对不上"的记录出手，因此不可能把一份本来正确的文件改坏。
   const records = [];
   const strict = Boolean(options.strict);
-  const parser = createCsvRecordParser(delimiter, { strict });
+  const parser = createCsvRecordParser(delimiter, { strict: true });
   const chunkSize = 64 * 1024;
   for (let start = 0; start < text.length; start += chunkSize) {
     const parsedRecords = parser.push(text.slice(start, start + chunkSize));
@@ -146,12 +267,17 @@ function parseCsvText(text, options = {}) {
     if (options.onProgress) options.onProgress(Math.min(0.98, (start + chunkSize) / Math.max(1, text.length)));
   }
   for (const parsedRecord of parser.finish()) records.push(parsedRecord);
+  const recordStarts = parser.getRecordStarts();
   const parserDiagnostics = parser.getDiagnostics();
   const parserWarning = describeCsvParserDiagnostics(parserDiagnostics);
 
   // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
   // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
-  const nonEmptyRecords = records.filter((row) => row.some((cell) => cell !== ""));
+  const nonEmpty = [];
+  records.forEach((row, index) => {
+    if (row.some((cell) => cell !== "")) nonEmpty.push({ row, start: recordStarts[index] || 0 });
+  });
+  const nonEmptyRecords = nonEmpty.map((entry) => entry.row);
   // options.headerIndex 来自用户手动指定，优先于自动识别
   const manualHeaderIndex = Number.isFinite(options.headerIndex) && options.headerIndex >= 0
     ? Math.min(options.headerIndex, Math.max(0, nonEmptyRecords.length - 1))
@@ -160,19 +286,14 @@ function parseCsvText(text, options = {}) {
   const rawHeaders = nonEmptyRecords[headerIndex] || [];
   const expectedColumns = rawHeaders.length;
   // 标题行仍然是用户的数据，只是不再占着表头：按原顺序留在表头之前的位置。
-  const bodyRecords = headerIndex
-    ? [...nonEmptyRecords.slice(0, headerIndex), ...nonEmptyRecords.slice(headerIndex + 1)]
-    : nonEmptyRecords.slice(1);
+  const bodyEntries = headerIndex
+    ? [...nonEmpty.slice(0, headerIndex), ...nonEmpty.slice(headerIndex + 1)]
+    : nonEmpty.slice(1);
+  const bodyRecords = strict
+    ? bodyEntries.map((entry) => entry.row)
+    : repairAnomalousRecords(text, delimiter, bodyEntries, expectedColumns);
   const recordsForAnalysis = expectedColumns
-    ? [
-      rawHeaders,
-      // 严格模式下不做记录级修复：公式合并、反斜杠拆分同样属于宽容处理
-      ...bodyRecords.map((row) => (strict ? row : repairBackslashRecord(
-        repairFormulaRecord(row, expectedColumns, delimiter),
-        expectedColumns,
-        delimiter,
-      ))),
-    ]
+    ? [rawHeaders, ...bodyRecords]
     : nonEmptyRecords;
   const maxColumns = getMaxRecordColumns(recordsForAnalysis, expectedColumns);
   const headers = normalizeHeaders(rawHeaders, maxColumns);

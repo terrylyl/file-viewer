@@ -47,11 +47,15 @@ function isJsonStructureLead(open, next) {
 
 // options.strict：完全按 RFC4180 解析，不做 JSON、Markdown 围栏、反斜杠转义
 // 这些宽容处理。合法 CSV 的语义没有歧义，读错时可以一键退回这条确定的路径。
+// options.expectedColumns：从文件中间开始局部重读时，把已知的表头列数带进来。
+// 宽容解析的安全网全部以表头列数为判据，缺了它等于在没有证据的情况下工作。
 function createCsvRecordParser(delimiter = ",", options = {}) {
   const tolerant = !options.strict;
   let field = "";
   let record = [];
-  let learnedColumns = 0;
+  let learnedColumns = Number.isFinite(options.expectedColumns) && options.expectedColumns > 0
+    ? options.expectedColumns
+    : 0;
   let started = false;
   let inQuotes = false;
   let pendingQuote = false;
@@ -84,6 +88,11 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
   let specLineLastSignificantIsDelimiter = false;
   let specLineSkipLineFeed = false;
   let sawUndoubledQuote = false;
+  // 严格模式下记录每条记录在源文本中的起始下标。宽容模式有回滚重放，
+  // 同一个字符会被 feed 多次，计数没有意义，因此只在严格模式维护。
+  const recordStarts = [];
+  let charIndex = 0;
+  let recordStart = 0;
   let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false, undoubledQuote: false };
 
   // 进入推测性解析前记录现场，预算用尽或到达文件末尾仍未闭合时可以回滚重放。
@@ -248,6 +257,10 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
   const emitRecord = (records) => {
     record.push(field);
     if (!learnedColumns) learnedColumns = record.length;
+    if (!tolerant) {
+      recordStarts.push(recordStart);
+      recordStart = charIndex;
+    }
     records.push(record);
     field = "";
     record = [];
@@ -527,6 +540,7 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
   };
 
   const feed = (ch, records) => {
+    if (!tolerant) charIndex += 1;
     if (specMode) {
       specBuffer += ch;
       if (specBuffer.length > CSV_TOLERANCE_MAX_CHARS) {
@@ -594,7 +608,26 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
     getDiagnostics() {
       return { ...diagnostics };
     },
+    // 每条记录在源文本中的起始下标，与 push()/finish() 返回的记录一一对应。
+    // 只有严格模式有效：宽容模式会回滚重放，同一个字符被 feed 多次。
+    getRecordStarts() {
+      return recordStarts;
+    },
   };
+}
+
+// 严格解析出的记录里，列数对不上的那些才需要宽容解析出手。从这条记录在源文本中的
+// 起点重新读一次，读出的第一条记录列数正好等于表头才采纳——宽容解析因此永远
+// 不可能把一份本来正确的文件改坏，也不需要推测缓冲、回滚和各种全局安全网。
+function reparseFirstToleratedRecord(text, from, delimiter, limit, expectedColumns) {
+  const parser = createCsvRecordParser(delimiter, { expectedColumns });
+  const end = Math.min(text.length, from + limit);
+  for (let index = from; index < end; index += 1) {
+    const emitted = parser.push(text[index]);
+    if (emitted.length) return { record: emitted[0], end: index + 1 };
+  }
+  const tail = parser.finish();
+  return tail.length ? { record: tail[0], end } : null;
 }
 
 // 引号内出现未双写的 `"`，同时又真的切出了列数不一致的行——这两件事凑齐，
