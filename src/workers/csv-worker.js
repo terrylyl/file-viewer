@@ -157,7 +157,10 @@ const TOLERANT_REPAIR_MAX_RESYNC = 64;
 // 也是错的（`1,{` 正好两列，但那个 `{` 还没写完），异常要到后面几行才暴露。
 const TOLERANT_REPAIR_MAX_LOOKBACK = 8;
 
-function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns) {
+// suspectLastRecord：严格解析到文件末尾仍停在引号里。这种文件的最后一条记录
+// 是引号级联吞出来的，列数可能"正好对得上"却整条都是错的（`"b":2},x` 以引号
+// 开头，会把后面所有行吞进同一个字段），所以要无条件当成异常处理。
+function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns, suspectLastRecord) {
   if (!expectedColumns) return { rows: initialEntries.map((entry) => entry.row), repairedAny: false };
   const repaired = [];
   const repairedFrom = [];
@@ -165,6 +168,7 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
   let index = 0;
   let resyncBudget = TOLERANT_REPAIR_MAX_RESYNC;
   let repairedAny = false;
+  let suspectLast = Boolean(suspectLastRecord);
 
   const emit = (row, fromIndex) => {
     repaired.push(row);
@@ -173,7 +177,8 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
 
   while (index < entries.length) {
     const entry = entries[index];
-    if (entry.row.length === expectedColumns) {
+    const suspect = suspectLast && index === entries.length - 1;
+    if (entry.row.length === expectedColumns && !suspect) {
       emit(entry.row, index);
       index += 1;
       continue;
@@ -185,9 +190,11 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
       expectedColumns,
       delimiter,
     );
-    if (local.length === expectedColumns) {
+    // suspect 的记录列数本来就"正好对得上"，局部修复对它无事可做，
+    // 走这条捷径会直接把错误内容当成正确结果放行。
+    if (local.length === expectedColumns && !suspect) {
       emit(local, index);
-      repairedAny = true;
+      if (local !== entry.row) repairedAny = true;
       index += 1;
       continue;
     }
@@ -220,8 +227,13 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
         repaired.pop();
         repairedFrom.pop();
       }
+      // 宽容重读在文件末尾回滚后会退回严格结果，那不叫修复。只有内容真的
+      // 变了才算动过手，否则会把"过期诊断"的判断也一并误导。
+      const changed = from !== index
+        || attempt.record.length !== entry.row.length
+        || attempt.record.some((cell, position) => cell !== entry.row[position]);
       emit(attempt.record, from);
-      repairedAny = true;
+      if (changed) repairedAny = true;
       let next = index + 1;
       while (next < entries.length && entries[next].start < attempt.end) next += 1;
       // 宽容解析读到的终点不一定落在严格记录的边界上——严格解析在畸形行上
@@ -232,6 +244,8 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
       if (!aligned && resyncBudget > 0) {
         resyncBudget -= 1;
         entries = strictParseEntriesFrom(text, attempt.end, delimiter);
+        // 重新严格解析之后，"末条记录不可信"这条判断针对的是上一轮的尾巴
+        suspectLast = false;
         repairedFrom.length = 0;
         index = 0;
         continue;
@@ -287,7 +301,13 @@ function parseCsvText(text, options = {}) {
     : nonEmpty.slice(1);
   const repairResult = strict
     ? { rows: bodyEntries.map((entry) => entry.row), repairedAny: false }
-    : repairAnomalousRecords(text, delimiter, bodyEntries, expectedColumns);
+    : repairAnomalousRecords(
+      text,
+      delimiter,
+      bodyEntries,
+      expectedColumns,
+      parserDiagnostics.unclosedQuotedField,
+    );
   const bodyRecords = repairResult.rows;
   const recordsForAnalysis = expectedColumns
     ? [rawHeaders, ...bodyRecords]
