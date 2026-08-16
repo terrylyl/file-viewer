@@ -147,7 +147,8 @@ function strictParseEntriesFrom(text, from, delimiter) {
   rows.forEach((row, index) => {
     if (row.some((cell) => cell !== "")) entries.push({ row, start: from + (starts[index] || 0) });
   });
-  return entries;
+  // 重解析出来的尾巴同样可能停在引号里，"末条记录不可信"要跟着重算而不是一笔勾销。
+  return { entries, unclosedQuotedField: parser.getDiagnostics().unclosedQuotedField };
 }
 
 // 修复越过严格记录边界后最多重解析多少次剩余文本。异常行本来就少，
@@ -243,9 +244,9 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
         : entries[next].start === attempt.end;
       if (!aligned && resyncBudget > 0) {
         resyncBudget -= 1;
-        entries = strictParseEntriesFrom(text, attempt.end, delimiter);
-        // 重新严格解析之后，"末条记录不可信"这条判断针对的是上一轮的尾巴
-        suspectLast = false;
+        const resynced = strictParseEntriesFrom(text, attempt.end, delimiter);
+        entries = resynced.entries;
+        suspectLast = resynced.unclosedQuotedField;
         repairedFrom.length = 0;
         index = 0;
         continue;

@@ -327,7 +327,12 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
   const processCharacter = (ch, records) => {
     if (skipLineFeed) {
       skipLineFeed = false;
-      if (ch === "\n") return;
+      if (ch === "\n") {
+        // `\r` 触发 emit 时 `\n` 还没被消费，记录起点会停在这个 `\n` 上。
+        // 从那里局部重读，宽容解析第一个字符就吐出一条空记录，修复必然落空。
+        if (!tolerant) recordStart = charIndex;
+        return;
+      }
     }
 
     if (structurePendingQuote) {

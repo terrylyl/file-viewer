@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-Fu7y6erKQoi3tdh32DqKn1QVq1VoAZx5NY+BD/YJb+8='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-LXe0aa3udachp99JKtUobWltPijcFVnEl1g/nxj30GE='; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
     <title>本地表格文件查看器</title>
     <style>
       @property --detail-width {
@@ -4112,7 +4112,12 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
   const processCharacter = (ch, records) => {
     if (skipLineFeed) {
       skipLineFeed = false;
-      if (ch === "\n") return;
+      if (ch === "\n") {
+        // `\r` 触发 emit 时 `\n` 还没被消费，记录起点会停在这个 `\n` 上。
+        // 从那里局部重读，宽容解析第一个字符就吐出一条空记录，修复必然落空。
+        if (!tolerant) recordStart = charIndex;
+        return;
+      }
     }
 
     if (structurePendingQuote) {
@@ -4748,7 +4753,8 @@ function strictParseEntriesFrom(text, from, delimiter) {
   rows.forEach((row, index) => {
     if (row.some((cell) => cell !== "")) entries.push({ row, start: from + (starts[index] || 0) });
   });
-  return entries;
+  // 重解析出来的尾巴同样可能停在引号里，"末条记录不可信"要跟着重算而不是一笔勾销。
+  return { entries, unclosedQuotedField: parser.getDiagnostics().unclosedQuotedField };
 }
 
 // 修复越过严格记录边界后最多重解析多少次剩余文本。异常行本来就少，
@@ -4844,9 +4850,9 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
         : entries[next].start === attempt.end;
       if (!aligned && resyncBudget > 0) {
         resyncBudget -= 1;
-        entries = strictParseEntriesFrom(text, attempt.end, delimiter);
-        // 重新严格解析之后，"末条记录不可信"这条判断针对的是上一轮的尾巴
-        suspectLast = false;
+        const resynced = strictParseEntriesFrom(text, attempt.end, delimiter);
+        entries = resynced.entries;
+        suspectLast = resynced.unclosedQuotedField;
         repairedFrom.length = 0;
         index = 0;
         continue;
@@ -6400,7 +6406,12 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
   const processCharacter = (ch, records) => {
     if (skipLineFeed) {
       skipLineFeed = false;
-      if (ch === "\n") return;
+      if (ch === "\n") {
+        // `\r` 触发 emit 时 `\n` 还没被消费，记录起点会停在这个 `\n` 上。
+        // 从那里局部重读，宽容解析第一个字符就吐出一条空记录，修复必然落空。
+        if (!tolerant) recordStart = charIndex;
+        return;
+      }
     }
 
     if (structurePendingQuote) {
@@ -9724,7 +9735,12 @@ self.onmessage = (event) => {
         const processCharacter = (ch, records) => {
           if (skipLineFeed) {
             skipLineFeed = false;
-            if (ch === "\n") return;
+            if (ch === "\n") {
+              // `\r` 触发 emit 时 `\n` 还没被消费，记录起点会停在这个 `\n` 上。
+              // 从那里局部重读，宽容解析第一个字符就吐出一条空记录，修复必然落空。
+              if (!tolerant) recordStart = charIndex;
+              return;
+            }
           }
 
           if (structurePendingQuote) {

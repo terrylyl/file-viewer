@@ -612,6 +612,45 @@ test("严格模式下加引号的字段仍按 RFC4180 正确解析", () => {
   assert.equal(parsed.rows[2][1], "C:\\dir\\");
 });
 
+// 严格优先的修复要从异常记录的起点局部重读。CRLF 下 `\r` 触发 emit 时 `\n` 还没被
+// 消费，记录起点会停在 `\n` 上，宽容重读第一个字符就吐出一条空记录，修复必然落空——
+// 同一份内容换成 LF 就修得好，换成 CRLF 就塌成一堆碎片。
+test("CRLF 不会让记录起点偏到换行符上，修复照样生效", () => {
+  const core = loadWorkerCore();
+  const lines = ["id,name,note", "1,a,```json", '{"t":"one, two"}', "```", "2,b,after"];
+
+  for (const [label, eol] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
+    const parsed = core.parseCsvText(lines.join(eol), { delimiter: "," });
+    assert.equal(JSON.stringify(parsed.headers), JSON.stringify(["id", "name", "note"]), label);
+    assert.equal(parsed.rows.length, 2, label);
+    assert.equal(parsed.rows[0][2], `\`\`\`json${eol}{"t":"one, two"}${eol}\`\`\``, label);
+    assert.equal(JSON.stringify(parsed.rows[1]), JSON.stringify(["2", "b", "after"]), label);
+    assert.equal(parsed.issues.inconsistentRows.length, 0, label);
+  }
+});
+
+// 修复越过严格记录边界后会从终点重新严格解析。重解析出来的尾巴同样可能停在引号里，
+// "末条记录不可信"必须跟着重算：一笔勾销的话，末行那条列数正好对得上、内容却被
+// 引号级联吞坏的记录会被直接放行。
+test("重新严格解析之后仍然重算末条记录是否可信", () => {
+  const core = loadWorkerCore();
+  const parsed = core.parseCsvText([
+    "id,name,payload,notes",
+    '1,Alice,"{"tags":["a","b"],"ok":true}",```json',
+    '{"text":"one, two","items":[1,2]}',
+    "```",
+    '2,Bob,{"tags":["c","d"],"ok":false},after',
+  ].join("\r\n"), { delimiter: "," });
+
+  assert.equal(JSON.stringify(parsed.headers), JSON.stringify(["id", "name", "payload", "notes"]));
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(
+    JSON.stringify(parsed.rows[1]),
+    JSON.stringify(["2", "Bob", '{"tags":["c","d"],"ok":false}', "after"]),
+  );
+  assert.equal(parsed.issues.inconsistentRows.length, 0);
+});
+
 test("detectDelimiter ignores separator-like characters inside a single column", () => {
   const core = loadWorkerCore();
 
