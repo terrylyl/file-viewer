@@ -713,7 +713,7 @@ test("large data worker does not let a stray bracket collapse the whole file", a
   ]);
 });
 
-test("large data worker splits a backslash-terminated cell back into its columns", async () => {
+test("large data worker keeps a backslash-terminated cell in its own column", async () => {
   const { context, messages } = loadLargeWorker();
   await context.self.onmessage({ data: {
     kind: "load-large-file",
@@ -727,6 +727,44 @@ test("large data worker splits a backslash-terminated cell back into its columns
   assert.equal(loaded.result.issues.inconsistentRows.length, 0);
   await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [0] } });
   assert.deepEqual(plain(messages.find((message) => message.type === "rows").rows[0].row), ["C:\\data\\", "2024"]);
+});
+
+// 严格优先的核心保证：合法 CSV 里不存在列数对不上的记录，宽容重读一次都不该发生。
+// 严格扫描完全是流式的，除了开头的采样和表头 cell 解码，不该再回头 slice 任何字节——
+// 这条既是正确性（宽容逻辑碰不到合法文件），也是大文件路径的性能底线。
+test("large data worker never re-reads bytes for a well-formed CSV", async () => {
+  const { context, messages } = loadLargeWorker();
+  const rows = Array.from(
+    { length: 200 },
+    (_, index) => `${index},"note ${index}, with comma","C:\\dir\\"`,
+  );
+  const text = `id,note,path\n${rows.join("\n")}\n`;
+  const file = createChunkedFile(text, [64]);
+  await context.self.onmessage({ data: {
+    kind: "load-large-file",
+    file,
+    fileKind: "CSV",
+    encoding: "utf-8",
+  } });
+
+  const loadReads = file.sliceRanges.slice();
+  const loaded = messages.find((message) => message.type === "loaded");
+  assert.equal(loaded.result.rowCount, 200);
+  assert.equal(loaded.result.issues.inconsistentRows.length, 0);
+
+  // loadReads[0] 是开头 512 KiB 的编码/分隔符采样，其余只能落在表头行之内
+  const headerEnd = text.indexOf("\n");
+  assert.deepEqual(
+    loadReads.slice(1).filter(([, end]) => end > headerEnd),
+    [],
+    "合法 CSV 不该触发任何宽容重读",
+  );
+
+  await context.self.onmessage({ data: { kind: "get-rows", token: 1, indices: [7] } });
+  assert.deepEqual(
+    plain(messages.find((message) => message.type === "rows").rows[0].row),
+    ["7", "note 7, with comma", "C:\\dir\\"],
+  );
 });
 
 test("large data worker handles JSONL CRLF split across stream chunks", async () => {

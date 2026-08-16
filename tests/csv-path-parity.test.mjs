@@ -127,6 +127,8 @@ const SHAPES = [
   ["公式含逗号", utf8("id,formula,result\n1,=IF(A1 > 0, B1, C1),ok\n2,=SUM(A2, B2),done\n")],
   ["公式在末列", utf8("id,formula\n1,=IF(A1 > 0, B1, C1)\n2,plain\n")],
   ["Windows 路径未加引号", utf8("path,next\nC:\\data\\,2024\nb,3\n")],
+  // 加了引号的 `\` + 分隔符是一个完整字段，两条路径都不该按行短就把它拆开
+  ["Windows 路径加引号且行偏短", utf8('path,next\n"C:\\data\\,2024"\nb,3\n')],
   ["引号内换行", utf8('id,note\n1,"line1\nline2"\n2,ok\n')],
   ["引号内双写", utf8('id,note\n1,"say ""hi"", ok"\n2,b\n')],
   ["引号空 cell", utf8('id,a,b\n1,"",x\n')],

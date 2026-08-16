@@ -49,6 +49,9 @@ Local serving is done by `scripts/serve.mjs`; static file access is enough for n
 - `tests/shared-core.test.mjs`: validates shared pure helpers directly.
 - `tests/large-data-worker.test.mjs`: indexing, encoding detection, and on-demand read behavior for the large-file Worker.
 - `tests/rfc4180-conformance.test.mjs`: RFC 4180 corpus run through both parsing paths, plus the documented deviations.
+- `tests/csv-differential-fuzz.test.mjs`: randomly generated *well-formed* CSV compared field by field against a strict RFC 4180 reference.
+- `tests/csv-path-parity.test.mjs`: 44 hand-written shapes compared item by item across the two parsing paths.
+- `tests/csv-path-parity-fuzz.test.mjs`: randomly generated *malformed* CSV compared across the two paths. The fixed shapes and the well-formed fuzzer leave a gap exactly where the paths diverge most easily — malformed content combined with repair logic.
 - `tests/html-contract.test.mjs`: contract tests for required DOM ids, function hooks, Worker scripts, and high-risk behavior guards.
 
 ## Main Layers
@@ -201,8 +204,15 @@ The tolerant extensions are guarded, because an unterminated one used to swallow
 - Structured fields and code fences run under `CSV_TOLERANCE_MAX_CHARS`. Exceeding it rolls the parser back to the start of the field and replays the buffered text with tolerance disabled.
 - A code fence or structured-field candidate still open at EOF is rolled back the same way, while parser diagnostics retain the corresponding unclosed-field warning.
 - Speculative JSON/array handling is checked against a strict CSV shadow state at each physical line. If the candidate would merge rows that independently reproduce the header width, it is rolled back and replayed as ordinary CSV. A bracketed value that is not valid JSON may be accepted for compatibility only when it closes on the same physical line inside an already quoted field; later rows cannot accidentally validate it with a closing bracket.
-- Inside quotes, `\"` is only an escape when another character follows it; `"C:\dir\",next` closes at its own quote.
-- `parseCsvText` additionally splits backslash-escaped delimiters back apart when a record came out shorter than the header.
+- Inside quotes, `\` carries no special meaning at all; `"C:\dir\",next` closes at its own quote. `\` + delimiter is only treated as an escape outside quotes, and only when the next character is not an opening quote.
+
+Tolerance is strict-first: the parser reads the whole input as plain RFC 4180 and hands only the records whose column count disagrees with the header to the tolerant machinery, re-reading each from that record's own offset and accepting the result only when it yields exactly the header's column count. A well-formed CSV therefore contains no anomalous records and never reaches the tolerant path at all — correctness is by construction rather than by after-the-fact safety nets. Three details are load-bearing:
+
+- The local re-read must be given the header's column count. Every tolerant safety net keys off it, and a parser started mid-file would otherwise have learned nothing.
+- A record's start offset must account for CRLF. `\r` triggers the record boundary while its `\n` is still unconsumed, so an unadjusted offset points at the newline and the re-read immediately emits an empty record.
+- The first record of a multi-line value usually has the *right* column count (`1,[1,` is three fields) and the anomaly only surfaces rows later, so the repair walks backwards from the anomaly and takes the first re-read that both matches the header and actually covers the anomalous record.
+
+Column count alone does not prove a record is right: a value beginning with a quote can make the strict parser swallow to EOF and still land on the header width. Whenever the strict parse ends inside an open quote, the final record is treated as anomalous unconditionally.
 
 `escapeCsv` mirrors these rules: any value containing a backslash or backtick, or starting with `{`/`[`, is quoted on export, so the app can always re-read what it wrote. `escapeSpreadsheetFormula` leaves plain numbers alone rather than turning `-5` into `'-5`.
 - JSONL object expansion.
@@ -243,7 +253,13 @@ Staleness guards:
 
 ### Large Data Worker
 
-`large-data-worker-source` is selected only for CSV/TSV/TXT/JSONL files of at least 24 MiB. It scans `File.stream()` as `Uint8Array` chunks and records each CSV cell (or JSONL line) as byte offsets. ASCII delimiters can be recognized before decoding for UTF-8 and GB18030/GBK input. The CSV scanner preserves the normal parser's tolerant handling of quoted fields, doubled quotes, backslash escapes, unquoted JSON/arrays, Markdown fences, CRLF, and state split across stream chunks — including the JSON lookahead gate, the tolerance budget, and the rollback described above.
+`large-data-worker-source` is selected only for CSV/TSV/TXT/JSONL files of at least 24 MiB. It scans `File.stream()` as `Uint8Array` chunks and records each CSV cell (or JSONL line) as byte offsets. ASCII delimiters can be recognized before decoding for UTF-8 and GB18030/GBK input. `createCsvByteRecordParser` is the byte-offset twin of the in-memory record parser and reproduces the same rules — quoted fields, doubled quotes, the backslash rules, unquoted JSON/arrays, Markdown fences, CRLF, the JSON lookahead gate, the tolerance budget, the rollback, and state split across stream chunks — while emitting descriptors instead of strings.
+
+This path is strict-first in the same sense as the in-memory one, with one structural difference: repairing an anomalous record needs bytes read back with `File.slice()`, so repair is asynchronous. The scan therefore proceeds in batches — feed a stream chunk, then process the records it produced — and a repair that consumes bytes past the record it replaced is reconciled by *records* rather than by bytes: the strict scan simply keeps going and records ending before the repair's end are discarded. Only when the repair's end lands inside a record does that remainder get re-parsed from a fresh strict parser. Skipping records rather than bytes is what keeps the two paths resynchronizing at the same offsets, and it makes the result independent of how the stream happens to be chunked.
+
+The header row is likewise chosen from a *strict* sample parse (`sampleCsvRecords(..., { strict: true })`). Choosing it from a tolerant sample while indexing strictly makes the two paths pick different header rows.
+
+Repairs are bounded: a re-read window starts at 64 KiB and grows to `INDEX_TOLERANCE_MAX_BYTES` only if no record completes, lookback is capped at `INDEX_REPAIR_MAX_LOOKBACK`, and at most `INDEX_REPAIR_MAX_RECORDS` records are re-read per file. Past that limit the strict result stands and the rows are reported as `列数不一致`, which is the documented fallback for input whose structure is inconsistent throughout. Because rolling back a committed row would leave a stale width behind, `maxColumns` and the "any row still mismatched" flag are computed from the finished index rather than accumulated as rows are written.
 
 Two encoding hazards are handled here specifically, because this path parses bytes rather than decoded text:
 

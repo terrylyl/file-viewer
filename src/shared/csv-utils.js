@@ -88,17 +88,23 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
   let specLineLastSignificantIsDelimiter = false;
   let specLineSkipLineFeed = false;
   let sawUndoubledQuote = false;
-  // 严格模式下记录每条记录在源文本中的起始下标。宽容模式有回滚重放，
-  // 同一个字符会被 feed 多次，计数没有意义，因此只在严格模式维护。
+  // 每条记录在源文本中的起止下标。位置由调用方显式传进 feed()，回滚重放时按
+  // 缓冲区的原始起点回放，所以宽容模式下同样准确——同一个字符被 feed 多次也不会
+  // 把计数带偏。宽容重读要靠它判断"这次读到哪儿了"，少了它就只能拿 feed 次数
+  // 硬凑，一次回滚重放吐出多条记录就会把后面的行当成已消耗而丢掉。
   const recordStarts = [];
-  let charIndex = 0;
-  let recordStart = 0;
+  const recordEnds = [];
+  let basePosition = Number.isFinite(options.startPosition) ? options.startPosition : 0;
+  let position = basePosition;
+  let recordStart = basePosition;
+  let specStartPosition = basePosition;
   let diagnostics = { unclosedQuotedField: false, unclosedStructuredField: false, unclosedCodeFence: false, undoubledQuote: false };
 
   // 进入推测性解析前记录现场，预算用尽或到达文件末尾仍未闭合时可以回滚重放。
   const beginSpeculation = (mode, entryChar) => {
     specMode = mode;
     specBuffer = entryChar;
+    specStartPosition = position;
     specField = field;
     specRecordLength = record.length;
     specStarted = started;
@@ -233,6 +239,7 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
 
   const rollbackSpeculation = (records) => {
     const replay = specBuffer;
+    const replayFrom = specStartPosition;
     field = specField;
     started = specStarted;
     inQuotes = specInQuotes;
@@ -251,16 +258,20 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
     toleranceDisabled = true;
     // 走 feed 而不是 processCharacter：重放过程中如果又开启了一次推测性解析，
     // 它的缓冲区也必须被填上，否则嵌套回滚会重放一段不完整的文本。
-    for (const ch of replay) feed(ch, records);
+    // 位置按缓冲区的原始起点回放，重放不会把记录边界算到后面去。
+    let replayOffset = 0;
+    for (const ch of replay) {
+      feed(ch, replayFrom + replayOffset, records);
+      replayOffset += ch.length;
+    }
   };
 
-  const emitRecord = (records) => {
+  const emitRecord = (records, endPosition) => {
     record.push(field);
     if (!learnedColumns) learnedColumns = record.length;
-    if (!tolerant) {
-      recordStarts.push(recordStart);
-      recordStart = charIndex;
-    }
+    recordStarts.push(recordStart);
+    recordEnds.push(endPosition);
+    recordStart = endPosition;
     records.push(record);
     field = "";
     record = [];
@@ -328,9 +339,12 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
     if (skipLineFeed) {
       skipLineFeed = false;
       if (ch === "\n") {
-        // `\r` 触发 emit 时 `\n` 还没被消费，记录起点会停在这个 `\n` 上。
+        // `\r` 触发 emit 时 `\n` 还没被消费，记录边界会停在这个 `\n` 上。
         // 从那里局部重读，宽容解析第一个字符就吐出一条空记录，修复必然落空。
-        if (!tolerant) recordStart = charIndex;
+        recordStart = position + 1;
+        if (recordEnds.length && recordEnds[recordEnds.length - 1] === position) {
+          recordEnds[recordEnds.length - 1] = position + 1;
+        }
         return;
       }
     }
@@ -535,7 +549,7 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
     }
 
     if (ch === "\n" || ch === "\r") {
-      emitRecord(records);
+      emitRecord(records, position + 1);
       skipLineFeed = ch === "\r";
       return;
     }
@@ -544,8 +558,8 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
     started = true;
   };
 
-  const feed = (ch, records) => {
-    if (!tolerant) charIndex += 1;
+  const feed = (ch, at, records) => {
+    position = at;
     if (specMode) {
       specBuffer += ch;
       if (specBuffer.length > CSV_TOLERANCE_MAX_CHARS) {
@@ -568,7 +582,13 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
   return {
     push(text) {
       const records = [];
-      for (const ch of String(text == null ? "" : text)) feed(ch, records);
+      const source = String(text == null ? "" : text);
+      let offset = 0;
+      for (const ch of source) {
+        feed(ch, basePosition + offset, records);
+        offset += ch.length;
+      }
+      basePosition += source.length;
       return records;
     },
     finish() {
@@ -595,7 +615,8 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
         undoubledQuote: sawUndoubledQuote,
       };
       if (pendingBackslashDelimiter) {
-        field += `\${delimiter}`;
+        // 文本正好停在 `\` + 分隔符上，后面没有字段来解释它，按字面留回去
+        field += `\\${delimiter}`;
         started = true;
         pendingBackslashDelimiter = false;
       }
@@ -607,16 +628,18 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
         inQuotes = false;
         pendingQuote = false;
       }
-      if (started || field.length || record.length) emitRecord(records);
+      if (started || field.length || record.length) emitRecord(records, basePosition);
       return records;
     },
     getDiagnostics() {
       return { ...diagnostics };
     },
-    // 每条记录在源文本中的起始下标，与 push()/finish() 返回的记录一一对应。
-    // 只有严格模式有效：宽容模式会回滚重放，同一个字符被 feed 多次。
+    // 每条记录在源文本中的起止下标，与 push()/finish() 返回的记录一一对应。
     getRecordStarts() {
       return recordStarts;
+    },
+    getRecordEnds() {
+      return recordEnds;
     },
   };
 }
@@ -625,15 +648,16 @@ function createCsvRecordParser(delimiter = ",", options = {}) {
 // 起点重新读一次，读出的第一条记录列数正好等于表头才采纳——宽容解析因此永远
 // 不可能把一份本来正确的文件改坏，也不需要推测缓冲、回滚和各种全局安全网。
 function reparseFirstToleratedRecord(text, from, delimiter, limit, expectedColumns) {
-  const parser = createCsvRecordParser(delimiter, { expectedColumns });
+  const parser = createCsvRecordParser(delimiter, { expectedColumns, startPosition: from });
   const end = Math.min(text.length, from + limit);
   for (let index = from; index < end; index += 1) {
     const emitted = parser.push(text[index]);
-    if (emitted.length) return { record: emitted[0], end: index + 1 };
+    // 终点取解析器记下的记录边界，而不是"喂到第几个字符了"。一次回滚重放可以
+    // 一口气吐出好几条记录，那时喂到的位置已经越过第一条的终点，按它算会把后面
+    // 的记录当成已消耗而丢掉。
+    if (emitted.length) return { record: emitted[0], end: parser.getRecordEnds()[0] };
   }
-  // 走到窗口末尾才由 finish() 吐出记录：只有恰好一条时，它的范围才确定是整段
-  // 窗口。吐出多条（推测性解析在末尾回滚就会这样）就无从判断第一条消耗到哪里，
-  // 硬按整段算会把后面的记录当成已消耗而丢掉。
+  // 走到窗口末尾才由 finish() 吐出记录：只有恰好一条时，它的范围才确定是整段窗口。
   const tail = parser.finish();
   return tail.length === 1 ? { record: tail[0], end } : null;
 }
@@ -664,11 +688,13 @@ function describeCsvDelimiter(delimiter) {
 
 // options.truncated：调用方给的 text 本身就是截断样本（大文件只读前 512 KiB）。
 // 只有样本覆盖完整输入时才能 finish()，否则会把半条记录当成完整证据。
+// options.strict：按 RFC4180 取样。表头行判定必须用它——严格优先之后两条路径的
+// 记录都来自严格解析，用宽容取样去判表头会挑到另一行上去。
 function sampleCsvRecords(text, delimiter, options = {}) {
   const source = String(text == null ? "" : text);
   const sample = source.slice(0, CSV_DELIMITER_SAMPLE_MAX_CHARS);
   const complete = !options.truncated && sample.length === source.length;
-  const parser = createCsvRecordParser(delimiter);
+  const parser = createCsvRecordParser(delimiter, { strict: Boolean(options.strict) });
   const records = parser.push(sample);
   if (complete) {
     for (const record of parser.finish()) records.push(record);

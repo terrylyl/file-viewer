@@ -108,30 +108,6 @@ function repairFormulaRecord(record, expectedColumns, delimiter) {
   return changed && repaired.length === expectedColumns ? repaired : record;
 }
 
-// 未加引号的 `\` + 分隔符会被解析器当成转义，Windows 路径 `C:\dir\,next` 因此并列。
-// 只有当这一行确实比表头少列时才拆回来，`alpha\, beta` 这类列数正常的行不受影响。
-function repairBackslashRecord(record, expectedColumns, delimiter) {
-  if (!expectedColumns || record.length >= expectedColumns) return record;
-  const escaped = `\\${delimiter}`;
-  let missing = expectedColumns - record.length;
-  const repaired = [];
-
-  for (const cell of record) {
-    const value = cell == null ? "" : String(cell);
-    if (missing <= 0 || !value.includes(escaped)) {
-      repaired.push(value);
-      continue;
-    }
-    const pieces = value.split(escaped);
-    const takes = Math.min(missing, pieces.length - 1);
-    for (let index = 0; index < takes; index += 1) repaired.push(`${pieces[index]}\\`);
-    repaired.push(pieces.slice(takes).join(escaped));
-    missing -= takes;
-  }
-
-  return repaired.length === expectedColumns ? repaired : record;
-}
-
 // 单条记录做宽容重读时最多回看这么多字符。跨行的 JSON、围栏都在这个量级以内，
 // 真正不闭合的内容不会因此吞掉整份文件。
 const TOLERANT_REPAIR_MAX_CHARS = 1024 * 1024;
@@ -185,12 +161,12 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
       continue;
     }
 
-    // 先试记录内的修复：公式被逗号切开、反斜杠吞掉了分隔符，都不涉及跨行
-    const local = repairBackslashRecord(
-      repairFormulaRecord(entry.row, expectedColumns, delimiter),
-      expectedColumns,
-      delimiter,
-    );
+    // 先试记录内的修复：公式被分隔符切开，不涉及跨行。
+    // （反斜杠拆列曾经也在这里：宽容解析把未加引号的 `C:\dir\,next` 并成一列，
+    // 少列时再按 `\` + 分隔符拆回去。严格优先之后这种并列根本不会发生——严格
+    // 解析在那个分隔符处照切不误——它剩下的唯一效果是把 `"C:\dir\,2024"` 这类
+    // 本来就加了引号的完整字段拆开，那是错的，所以去掉了。）
+    const local = repairFormulaRecord(entry.row, expectedColumns, delimiter);
     // suspect 的记录列数本来就"正好对得上"，局部修复对它无事可做，
     // 走这条捷径会直接把错误内容当成正确结果放行。
     if (local.length === expectedColumns && !suspect) {
@@ -255,11 +231,17 @@ function repairAnomalousRecords(text, delimiter, initialEntries, expectedColumns
       continue;
     }
 
+    // 重读没找到对得上的读法，保留严格结果。但记录内的修复（公式合并）可能已经
+    // 改动过内容，那同样算动过手——漏掉它会让"引号未闭合"这条过期诊断照原样报出去。
+    if (local !== entry.row) repairedAny = true;
     emit(local, index);
     index += 1;
   }
 
-  return { rows: repaired, repairedAny };
+  // suspectLast 一路跟着重解析走，最后剩下的就是「未被修复覆盖的那一段」在严格
+  // 视角下还闭不闭合。告警要按它来报：整份文件那遍严格解析的结论在修完之后已经
+  // 不成立了。大文件路径天然只有最后那个解析器的诊断，这样两边口径才一致。
+  return { rows: repaired, repairedAny, unclosedQuotedField: suspectLast };
 }
 
 function parseCsvText(text, options = {}) {
@@ -280,7 +262,6 @@ function parseCsvText(text, options = {}) {
   for (const parsedRecord of parser.finish()) records.push(parsedRecord);
   const recordStarts = parser.getRecordStarts();
   const parserDiagnostics = parser.getDiagnostics();
-  const parserWarning = describeCsvParserDiagnostics(parserDiagnostics);
 
   // 文件开头的空行、",,"占位行不能顶替表头，否则列名全变成 Column N、
   // 真表头降级成第一行数据。判定口径与 detectCsvDelimiter 的取样保持一致。
@@ -301,7 +282,11 @@ function parseCsvText(text, options = {}) {
     ? [...nonEmpty.slice(0, headerIndex), ...nonEmpty.slice(headerIndex + 1)]
     : nonEmpty.slice(1);
   const repairResult = strict
-    ? { rows: bodyEntries.map((entry) => entry.row), repairedAny: false }
+    ? {
+      rows: bodyEntries.map((entry) => entry.row),
+      repairedAny: false,
+      unclosedQuotedField: parserDiagnostics.unclosedQuotedField,
+    }
     : repairAnomalousRecords(
       text,
       delimiter,
@@ -310,6 +295,10 @@ function parseCsvText(text, options = {}) {
       parserDiagnostics.unclosedQuotedField,
     );
   const bodyRecords = repairResult.rows;
+  const parserWarning = describeCsvParserDiagnostics({
+    ...parserDiagnostics,
+    unclosedQuotedField: repairResult.unclosedQuotedField,
+  });
   const recordsForAnalysis = expectedColumns
     ? [rawHeaders, ...bodyRecords]
     : nonEmptyRecords;
