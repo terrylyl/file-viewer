@@ -64,7 +64,7 @@ PowerShell 若拦截 `npm.ps1`，改用 `npm.cmd run build` / `npm.cmd test`。�
 - Node 内置 runner + `assert/strict`，文件名 `*.test.mjs` 放 `tests/`。
 - Worker 测试用 `vm.runInContext` 加载源码：`csv-worker-core` / `large-data-worker` 从 `index.html` 抽取内嵌 Worker 源码并依赖 `self.__CSV_CORE__` 之类的测试导出；`shared-core` 直接跑 `src/shared/*.js`。给 Worker 加可测核心时沿用这个导出模式。
 - `tests/html-contract.test.mjs` 是契约测试：必需的 DOM id、函数钩子、构建顺序、CI 与发布脚本内容、SheetJS 校验和、版本一致性。新增 DOM id 或关键函数时同步更新它。
-- 版本号硬编码在该契约测试里（`app package version is 2.3.9`）。升版本要同时改 `package.json`、`sbom.cdx.json` 的 `metadata.component.version`、这条测试、`README.md`/`CHANGELOG.md`/`SECURITY.md`；tag `v*` 与 `package.json` 版本不一致会让 release job 失败。
+- 版本号硬编码在该契约测试里（`app package version is 2.4.0`）。升版本要同时改 `package.json`、`sbom.cdx.json` 的 `metadata.component.version`、这条测试、`README.md`/`CHANGELOG.md`/`SECURITY.md`；tag `v*` 与 `package.json` 版本不一致会让 release job 失败。
 
 ## 隐私与依赖红线
 

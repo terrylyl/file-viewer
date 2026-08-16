@@ -4,6 +4,8 @@ All notable user-facing changes are documented here.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-08-16
+
 ### Changed
 
 - 普通路径的 CSV 解析改为「严格优先」：先按 RFC4180 完整解析一遍，只有列数对不上表头的记录才交给宽容解析处理，且必须从该记录起点重读出正好等于表头列数的结果才采纳。合法 CSV 里不存在异常记录，宽容逻辑一次都不会执行，因此不可能把一份本来正确的文件改坏；畸形文件的兜底能力保持不变（未加引号的 JSON、跨行 Markdown 围栏、公式、反斜杠都仍能还原）。跨行内容的开头那条记录列数往往正好是对的（`1,[1,` 就是三列），异常要到后面几行才暴露，因此异常处会向前有界回溯重读，取第一个列数对得上且确实覆盖该异常行的读法。
@@ -147,3 +149,4 @@ All notable user-facing changes are documented here.
 [2.3.7]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.7
 [2.3.8]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.8
 [2.3.9]: https://github.com/terrylyl/file-viewer/releases/tag/v2.3.9
+[2.4.0]: https://github.com/terrylyl/file-viewer/releases/tag/v2.4.0

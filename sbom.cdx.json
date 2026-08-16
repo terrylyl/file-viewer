@@ -5,11 +5,11 @@
   "serialNumber": "urn:uuid:8ed40d60-2627-4e95-8207-b6c92d2b3f34",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-08-09T00:00:00Z",
+    "timestamp": "2026-08-16T00:00:00Z",
     "component": {
       "type": "application",
       "name": "local-table-file-viewer",
-      "version": "2.3.9",
+      "version": "2.4.0",
       "licenses": [
         {
           "license": {
