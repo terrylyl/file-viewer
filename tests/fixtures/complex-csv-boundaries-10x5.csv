@@ -1,0 +1,14 @@
+id,scenario,payload,notes,status
+1,plain,"simple, comma",baseline,ok
+2,quoted-json,"{""tags"":[""alpha"",""beta""],""ok"":true}","quoted JSON with commas",ok
+3,multiline-quoted,"{""message"":""first line
+second line"",""count"":2}","quoted field spans lines",ok
+4,bare-json,{"tags":["a","b"],"nested":{"enabled":true,"count":2}},unquoted structured field,compat
+5,relaxed-json,"{"tags":["c","d"],"nested":{"enabled":false}}",quotes not doubled,compat
+6,backslash-escapes,alpha\, beta,C:\\temp\\demo,compat
+7,fenced-markdown,{"kind":"markdown","items":[1,2]},```json
+{"text":"one, two","nested":{"ok":true}}
+```,compat
+8,formula-with-commas,"=IF(A1 > 0, B1, C1)","semicolon; pipe | tab",compat
+9,empty-fields,,,"empty status"
+10,unicode-and-spaces,"{""中文"":""值，含逗号"",""emoji"":""✅""}","  leading and trailing spaces  ",ok

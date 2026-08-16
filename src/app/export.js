@@ -1,0 +1,302 @@
+const LARGE_EXPORT_BATCH_ROWS = 10;
+
+function getExportSplitCount() {
+  const value = Math.floor(Number(els.exportSplitCountInput.value));
+  const splitCount = Number.isFinite(value) && value > 0 ? value : 1;
+  els.exportSplitCountInput.value = String(splitCount);
+  return splitCount;
+}
+
+function getExportBaseName() {
+  return state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
+}
+
+function getRowWindowSummary(rowWindow = state.rowWindow) {
+  const normalized = normalizeRowWindow(rowWindow);
+  if (normalized.mode === "first") return `当前保留前 ${normalized.count.toLocaleString()} 行`;
+  if (normalized.mode === "range") {
+    return `当前保留第 ${normalized.start.toLocaleString()}～${normalized.end.toLocaleString()} 行`;
+  }
+  return "当前保留全部结果";
+}
+
+function syncRowFilterDraftControls() {
+  const mode = els.rowFilterModeSelect.value;
+  els.rowFilterCountLabel.hidden = mode !== "first";
+  els.rowFilterRangeFields.hidden = mode !== "range";
+  els.rowFilterStatus.classList.remove("error");
+  if (mode === "first") {
+    const count = Math.floor(Number(els.rowFilterCountInput.value));
+    els.rowFilterStatus.textContent = Number.isFinite(count) && count > 0
+      ? `将保留当前结果的前 ${count.toLocaleString()} 行`
+      : "请输入大于 0 的行数";
+  } else if (mode === "range") {
+    const start = Math.floor(Number(els.rowFilterStartInput.value));
+    const end = Math.floor(Number(els.rowFilterEndInput.value));
+    els.rowFilterStatus.textContent = Number.isFinite(start) && Number.isFinite(end) && start > 0 && end >= start
+      ? `将保留当前结果的第 ${start.toLocaleString()}～${end.toLocaleString()} 行`
+      : "请输入有效范围，结束行不能小于起始行";
+  } else {
+    els.rowFilterStatus.textContent = "当前保留全部结果";
+  }
+}
+
+function syncRowFilterControls() {
+  const rowWindow = normalizeRowWindow(state.rowWindow);
+  els.rowFilterModeSelect.value = rowWindow.mode;
+  if (rowWindow.mode === "first") els.rowFilterCountInput.value = String(rowWindow.count);
+  if (rowWindow.mode === "range") {
+    els.rowFilterStartInput.value = String(rowWindow.start);
+    els.rowFilterEndInput.value = String(rowWindow.end);
+  }
+  syncRowFilterDraftControls();
+}
+
+function closeRowFilterPopover() {
+  els.rowFilterPopover.classList.remove("open");
+  els.rowFilterButton.setAttribute("aria-expanded", "false");
+}
+
+function openRowFilterPopover(anchor = els.rowFilterButton) {
+  if (els.rowFilterButton.disabled) return;
+  closeClipboardImportPopover();
+  closeAddColumnPopover();
+  closeConcatenateColumnPopover();
+  closeColumnFilterMenu();
+  closeExportPopover();
+  els.columnsPopover.classList.remove("open");
+  els.columnsButton.setAttribute("aria-expanded", "false");
+  syncRowFilterControls();
+  els.rowFilterPopover.classList.add("open");
+  els.rowFilterButton.setAttribute("aria-expanded", "true");
+  const rect = anchor.getBoundingClientRect();
+  const width = els.rowFilterPopover.offsetWidth || 360;
+  const height = els.rowFilterPopover.offsetHeight || 330;
+  els.rowFilterPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`;
+  els.rowFilterPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - height - 8))}px`;
+  setPopoverTransformOrigin(els.rowFilterPopover, rect);
+  els.rowFilterModeSelect.focus();
+}
+
+function applyRowFilter() {
+  const mode = els.rowFilterModeSelect.value;
+  let next = { mode: "all" };
+  if (mode === "first") {
+    const count = Math.floor(Number(els.rowFilterCountInput.value));
+    if (!Number.isFinite(count) || count < 1) {
+      els.rowFilterStatus.textContent = "请输入大于 0 的行数";
+      els.rowFilterStatus.classList.add("error");
+      return;
+    }
+    next = { mode: "first", count };
+  } else if (mode === "range") {
+    const start = Math.floor(Number(els.rowFilterStartInput.value));
+    const end = Math.floor(Number(els.rowFilterEndInput.value));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < start) {
+      els.rowFilterStatus.textContent = "请输入有效范围，结束行不能小于起始行";
+      els.rowFilterStatus.classList.add("error");
+      return;
+    }
+    next = { mode: "range", start, end };
+  }
+  state.rowWindow = next;
+  recomputeView();
+  closeRowFilterPopover();
+  showToast(getRowWindowSummary(next));
+}
+
+function clearRowWindow() {
+  state.rowWindow = { mode: "all" };
+  recomputeView();
+  if (els.rowFilterPopover.classList.contains("open")) syncRowFilterControls();
+}
+
+function updateExportPanel() {
+  const rowCount = state.viewIndices.length;
+  const columnCount = getVisibleColumnIndexes().length;
+  const format = els.exportFormatSelect.value.toUpperCase();
+  const splitCount = rowCount ? Math.min(getExportSplitCount(), rowCount) : 1;
+  els.exportSummary.textContent = rowCount
+    ? `将导出当前视图中的 ${rowCount.toLocaleString()} 行 × ${columnCount.toLocaleString()} 列。`
+    : "当前视图没有可导出的行。";
+  const extension = format === "XLSX" ? "xlsx" : "csv";
+  const base = `${getExportBaseName()}-filtered`;
+  els.exportFilenamePreview.textContent = splitCount > 1
+    ? `${base}_part1.${extension} … ${base}_part${splitCount}.${extension}`
+    : `${base}.${extension}`;
+  els.exportCsvButton.disabled = !rowCount;
+}
+
+function closeExportPopover() {
+  els.exportPopover.classList.remove("open");
+  els.exportMenuButton.setAttribute("aria-expanded", "false");
+}
+
+function openExportPopover(anchor = els.exportMenuButton) {
+  if (els.exportMenuButton.disabled) return;
+  closeClipboardImportPopover();
+  closeAddColumnPopover();
+  closeConcatenateColumnPopover();
+  closeColumnFilterMenu();
+  closeRowFilterPopover();
+  els.columnsPopover.classList.remove("open");
+  els.columnsButton.setAttribute("aria-expanded", "false");
+  updateExportPanel();
+  els.exportPopover.classList.add("open");
+  els.exportMenuButton.setAttribute("aria-expanded", "true");
+  const rect = anchor.getBoundingClientRect();
+  const width = els.exportPopover.offsetWidth || 360;
+  const height = els.exportPopover.offsetHeight || 260;
+  els.exportPopover.style.left = `${Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))}px`;
+  els.exportPopover.style.top = `${Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - height - 8))}px`;
+  setPopoverTransformOrigin(els.exportPopover, rect);
+  els.exportFormatSelect.focus();
+}
+
+function getFilteredExportRowGroups() {
+  const rowIndexes = [...state.viewIndices];
+  if (!rowIndexes.length) return [];
+  const splitCount = Math.min(getExportSplitCount(), rowIndexes.length);
+  const rowsPerPart = Math.ceil(rowIndexes.length / splitCount);
+  const groups = [];
+  for (let index = 0; index < rowIndexes.length; index += rowsPerPart) {
+    groups.push(rowIndexes.slice(index, index + rowsPerPart));
+  }
+  return groups;
+}
+
+async function exportFilteredCsv(rowIndexes = state.viewIndices, suffix = "") {
+  if (!state.rows.length) return;
+  const visibleColumns = getVisibleColumnIndexes();
+  const header = visibleColumns.map((col) => escapeCsv(state.headers[col])).join(",");
+  if (isLargeDataMode()) {
+    const indexes = Array.from(rowIndexes);
+    const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
+    const filename = `${base}-filtered${suffix}.csv`;
+    const target = await openTextFileWritable(filename);
+    if (target.cancelled) return false;
+    if (!target.writable && Number(state.file?.size || 0) > LARGE_EXPENSIVE_OPERATION_MAX_BYTES) {
+      throw new Error("当前浏览器不支持流式保存；为避免内存溢出，超过 128 MiB 的大文件不能回退为内存导出。请使用支持文件保存选择器的 Chromium 浏览器。");
+    }
+    const parts = target.writable ? null : [header];
+    try {
+      if (target.writable) await target.writable.write(`\ufeff${header}`);
+      for (let start = 0; start < indexes.length; start += LARGE_EXPORT_BATCH_ROWS) {
+        const rows = await getLargeDataRows(indexes.slice(start, start + LARGE_EXPORT_BATCH_ROWS));
+        for (const row of rows) {
+          const line = `\r\n${visibleColumns.map((col) => escapeCsv(row?.[col] ?? "")).join(",")}`;
+          if (target.writable) await target.writable.write(line);
+          else parts.push(line);
+        }
+        setProgress(Math.min(0.98, (start + rows.length) / Math.max(1, indexes.length)), `导出 CSV · ${Math.min(start + rows.length, indexes.length).toLocaleString()} / ${indexes.length.toLocaleString()} 行`);
+      }
+      if (target.writable) await target.writable.close();
+      else await saveTextFile(filename, parts);
+      setProgress(1, "CSV 导出完成");
+      return true;
+    } catch (error) {
+      if (target.writable?.abort) await target.writable.abort().catch(() => {});
+      throw error;
+    }
+  }
+  const parts = [header];
+  let chunk = [];
+  for (const rowIndex of rowIndexes) {
+    const row = state.rows[rowIndex];
+    chunk.push("\r\n", visibleColumns.map((col) => escapeCsv(row[col] || "")).join(","));
+    if (chunk.length >= 2000) {
+      parts.push(chunk.join(""));
+      chunk = [];
+    }
+  }
+  if (chunk.length) parts.push(chunk.join(""));
+  const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
+  await saveTextFile(`${base}-filtered${suffix}.csv`, parts);
+  return true;
+}
+
+function getFilteredExportMatrix(rowIndexes = state.viewIndices) {
+  const visibleColumns = getVisibleColumnIndexes();
+  const matrix = [visibleColumns.map((col) => state.headers[col])];
+  for (const rowIndex of rowIndexes) {
+    const row = state.rows[rowIndex];
+    matrix.push(visibleColumns.map((col) => row[col] || ""));
+  }
+  return matrix;
+}
+
+async function exportFilteredXlsx(rowIndexes = state.viewIndices, suffix = "") {
+  if (!state.rows.length) return;
+  if (isLargeDataMode() && !canRunLargeExpensiveOperation()) {
+    throw new Error("大文件暂不支持 XLSX 导出；XLSX 必须在内存中构建完整工作簿，请改用流式 CSV 导出。");
+  }
+  let matrix;
+  if (isLargeDataMode()) {
+    const visibleColumns = getVisibleColumnIndexes();
+    matrix = [visibleColumns.map((col) => state.headers[col])];
+    const indexes = Array.from(rowIndexes);
+    for (let start = 0; start < indexes.length; start += 500) {
+      const rows = await getLargeDataRows(indexes.slice(start, start + 500));
+      matrix.push(...rows.map((row) => visibleColumns.map((col) => row?.[col] || "")));
+      setProgress(Math.min(0.94, (start + rows.length) / Math.max(1, indexes.length) * 0.94), "准备 XLSX 导出");
+    }
+  } else {
+    matrix = getFilteredExportMatrix(rowIndexes);
+  }
+  const base = state.file?.name ? state.file.name.replace(/\.[^.]+$/, "") : "filtered";
+  const buffer = await exportXlsxInWorker(matrix);
+  await saveBinaryFile(
+    `${base}-filtered${suffix}.xlsx`,
+    buffer,
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
+  els.leftStatus.textContent = "已导出 XLSX 文件";
+}
+
+function exportXlsxInWorker(matrix) {
+  return new Promise((resolve, reject) => {
+    const worker = createExcelWorker();
+    const token = Date.now();
+    worker.onmessage = (event) => {
+      const message = event.data || {};
+      if (message.token !== token) return;
+      worker.terminate();
+      if (message.type === "export-complete") resolve(message.buffer);
+      else reject(new Error(message.message || "XLSX 导出失败"));
+    };
+    worker.onerror = () => {
+      worker.terminate();
+      reject(new Error("XLSX 导出 Worker 启动失败"));
+    };
+    worker.postMessage({ kind: "export-xlsx", token, matrix });
+  });
+}
+
+async function exportFilteredTable() {
+  try {
+    const rowGroups = getFilteredExportRowGroups();
+    if (!rowGroups.length) {
+      els.leftStatus.textContent = "当前筛选结果为空，未导出文件";
+      showToast("当前视图没有可导出的行", { tone: "error" });
+      return;
+    }
+    for (let partIndex = 0; partIndex < rowGroups.length; partIndex += 1) {
+      const suffix = rowGroups.length > 1 ? `_part${partIndex + 1}` : "";
+      if (els.exportFormatSelect.value === "xlsx") {
+        await exportFilteredXlsx(rowGroups[partIndex], suffix);
+      } else {
+        const exported = await exportFilteredCsv(rowGroups[partIndex], suffix);
+        if (exported === false) return;
+      }
+    }
+    const message = rowGroups.length > 1
+      ? `已导出 ${rowGroups.length} 个拆分文件`
+      : `已导出 ${state.viewIndices.length.toLocaleString()} 行 ${els.exportFormatSelect.value.toUpperCase()}`;
+    els.leftStatus.textContent = message;
+    closeExportPopover();
+    showToast(message);
+  } catch (error) {
+    els.leftStatus.textContent = `导出失败：${error.message}`;
+    showToast(`导出失败：${error.message}`, { tone: "error" });
+  }
+}
